@@ -118,6 +118,16 @@ export const OPERATOR_BUILD_TOOL = 'build_app';
 export const OPERATOR_PENDING_DECISIONS_TOOL = 'list_pending_decisions';
 
 /**
+ * Read-back for an oversized tool result (both agents).
+ *
+ * Dispatched IN-PROCESS like the scratchpad: the row lives in the control
+ * plane, there is no MCP tool by this name, and the conversation is derived
+ * from the turn so a model argument can never select another conversation's
+ * row. It is the handle that makes the 64k truncation envelope recoverable.
+ */
+export const READ_TOOL_RESULT_TOOL = 'read_tool_result';
+
+/**
  * The Office skill creator (Office-only, in-process).
  *
  * Present ONLY when the Office overlay supplies a `skillCreator` executor for
@@ -262,6 +272,26 @@ export function getToolCatalog(): ToolSpec[] {
     { name: 'butterbase_docs', description: 'Fetch Butterbase documentation for a capability/topic. Use when unsure how a feature works.', parameters: flatOpen() },
     { name: 'list_partner_apis', description: 'List available partner APIs that can be proxied from a Butterbase app.', parameters: flatOpen() },
     { name: 'submit_suggestion', description: 'Submit a product suggestion / feedback item.', parameters: flatOpen() },
+
+    // ---- Tool-result read-back (loop-internal, NOT dispatched via MCP) ----
+    {
+      name: READ_TOOL_RESULT_TOOL,
+      description:
+        'Search or page through the FULL stored result of an earlier tool call when that result was truncated or cleared. ' +
+        'Pass the `message_id` from the truncated envelope or the cleared stub. Use `query` to find text in the full JSON; ' +
+        'omit it to read from `offset` with `limit`. It reads only the current conversation and cannot reach any other.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['message_id'],
+        properties: {
+          message_id: { type: 'string', description: 'The message_id from a truncated result envelope or a cleared stub.' },
+          query: { type: 'string', description: 'Case-insensitive text to find in the full result.' },
+          offset: { type: 'integer', minimum: 0, description: 'Character offset to read from when query is omitted.' },
+          limit: { type: 'integer', minimum: 1, maximum: 20000, description: 'Maximum characters to return (default 8000).' },
+        },
+      },
+    },
 
     // ---- File-op primitives (loop-internal, NOT dispatched via MCP) ----
     {
@@ -471,6 +501,10 @@ export function getToolCatalog(): ToolSpec[] {
 
 export function isListPendingDecisionsTool(name: string): name is 'list_pending_decisions' {
   return name === OPERATOR_PENDING_DECISIONS_TOOL;
+}
+
+export function isReadToolResultTool(name: string): name is 'read_tool_result' {
+  return name === READ_TOOL_RESULT_TOOL;
 }
 
 export function isOperatorScratchpadTool(name: string): name is 'update_operator_scratchpad' {

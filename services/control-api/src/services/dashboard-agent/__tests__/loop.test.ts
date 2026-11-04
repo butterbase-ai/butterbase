@@ -56,6 +56,8 @@ vi.mock('../tool-catalog.js', () => ({
   OPERATOR_SANDBOX_CODE_TOOL: 'run_sandbox_code',
   OPERATOR_BUILD_TOOL: 'build_app',
   OPERATOR_PENDING_DECISIONS_TOOL: 'list_pending_decisions',
+  READ_TOOL_RESULT_TOOL: 'read_tool_result',
+  isReadToolResultTool: (name: string) => name === 'read_tool_result',
   SKILL_CREATOR_TOOL: 'skill_creator',
   RUN_SKILL_SCRIPT_TOOL: 'run_skill_script',
   getToolCatalog: vi.fn().mockReturnValue([

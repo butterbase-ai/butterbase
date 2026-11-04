@@ -28,8 +28,16 @@ import { persistPreparedApproval, findParkedProposalIntent } from './proposal-st
 import { SUBSTRATE_ESCALATION_TOOL } from './approvals-store.js';
 import { assertOperatorKeyArguments } from '../locked-key-access.js';
 import { createHash, randomUUID } from 'crypto';
-import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, SKILL_CREATOR_TOOL, RUN_SKILL_SCRIPT_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { appendMessage, listMessages, getToolResultMessage, getToolMessageIds, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, isReadToolResultTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, SKILL_CREATOR_TOOL, RUN_SKILL_SCRIPT_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { parseReadToolResultArgs, readToolResultText } from './read-tool-result.js';
+import {
+  toGatewayMessages,
+  toolResultContentForModel,
+  toolResultModelMaxChars,
+  type GatewayMessage,
+} from './gateway-message.js';
+export { toolResultContentForModel };
 import type { ActiveSkillContext, IntegrationReader, SkillCreatorExecutor, SkillScriptExecutor } from './skill-types.js';
 import { createBuildHydrator, type BuildHydration } from './build-hydration.js';
 import { callMcpTool } from './mcp-client.js';
@@ -56,7 +64,8 @@ import { getSharedDeployTreeStore, type DeployTreeStore } from './deploy-tree-st
 import { readOperatorYoloMode } from './operator-yolo.js';
 import { evaluateOperatorAccess } from './operator-access-policy.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
-import { trimOperatorHistory } from './operator-history.js';
+import { trimOperatorHistory, OPERATOR_HISTORY_MAX_CHARS, OPERATOR_HISTORY_MAX_MESSAGES } from './operator-history.js';
+import { compactReplay, compactInFlight, envPositiveInt } from './context-compaction.js';
 import { getSystemPrompt } from './prompt.js';
 import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
@@ -378,17 +387,6 @@ type StreamChunk =
   | { type: 'tool_call'; id: string; name: string; args: unknown }
   | { type: 'usage'; prompt_tokens: number; completion_tokens: number };
 
-interface GatewayMessage {
-  role: string;
-  content?: string | null;
-  tool_calls?: Array<{
-    id: string;
-    type: 'function';
-    function: { name: string; arguments: string };
-  }>;
-  tool_call_id?: string;
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -417,38 +415,6 @@ function sortKeysDeep(value: unknown): unknown {
 function hashToolArgs(args: unknown): string {
   const canonical = JSON.stringify(sortKeysDeep(args ?? {}));
   return createHash('sha256').update(canonical).digest('hex');
-}
-
-/**
- * Convert persisted store messages to the gateway's OpenAI-compatible format.
- */
-function toGatewayMessages(messages: Message[]): GatewayMessage[] {
-  return messages.map((msg): GatewayMessage => {
-    if (msg.role === 'tool') {
-      return {
-        role: 'tool',
-        tool_call_id: msg.toolCallId ?? '',
-        content: JSON.stringify(msg.toolResult ?? {}),
-      };
-    }
-    if (msg.role === 'assistant' && msg.toolCallId) {
-      return {
-        role: 'assistant',
-        content: msg.content || null,
-        tool_calls: [
-          {
-            id: msg.toolCallId,
-            type: 'function',
-            function: {
-              name: msg.toolName ?? '',
-              arguments: JSON.stringify(msg.toolArgs ?? {}),
-            },
-          },
-        ],
-      };
-    }
-    return { role: msg.role, content: msg.content };
-  });
 }
 
 /**
@@ -1395,30 +1361,65 @@ async function* runAgentTurnInternal(
   }
 
   /**
-   * I2: bound what an OPERATOR turn replays.
+   * Bound what an OPERATOR turn replays, and compact before the bound.
    *
    * One operator conversation per org, reused forever, woken ~144x/day —
-   * replaying the whole transcript is a scheduled context-window failure. The
-   * scratchpad and the wake header now carry the continuity, so a suffix is
-   * enough. `trimOperatorHistory` picks a PAIRING-VALID cut (see its header):
-   * it can never emit an assistant `tool_calls` whose result was trimmed away,
-   * nor an orphan `role:'tool'` row — the wedge that bricks an org's operator
+   * replaying the whole transcript is a scheduled context-window failure.
+   *
+   * ORDER MATTERS. Compaction runs on the UNTRIMMED history first, so the
+   * stored summary captures what the 32k trim would otherwise discard. The
+   * trim below is a cost guard on the compacted tail, not the primary
+   * continuity mechanism. `trimOperatorHistory` still owns the cut: it can
+   * never emit an assistant `tool_calls` whose result was trimmed away, nor an
+   * orphan `role:'tool'` row — the wedge that bricks an org's operator
    * permanently.
    *
    * Nothing is deleted; `history` above is still the full stored record, and
    * `turnNumber` is deliberately computed from it so the snapshot-title
    * fallback does not reset when the replay window slides.
    *
-   * FOR A HUMAN CONVERSATION THIS IS THE SAME ARRAY BY IDENTITY. The assistant
-   * replays exactly what it replayed before — `toGatewayMessages(history)`,
-   * every row, same order. Do not "simplify" this into an unconditional call.
+   * For a human conversation `compactReplay` returns the same array by identity
+   * when the history is under budget, and `replay.messages` is that array —
+   * the assistant replays exactly what it replayed before. Do not "simplify"
+   * this into an unconditional trim.
    */
-  const replayHistory = isOperator ? trimOperatorHistory(history) : history;
+  const operatorBudget = envPositiveInt('DASHBOARD_AGENT_OPERATOR_CONTEXT_BUDGET_CHARS', 150_000);
+  const operatorTail = envPositiveInt('DASHBOARD_AGENT_OPERATOR_COMPACT_TAIL_CHARS', OPERATOR_HISTORY_MAX_CHARS);
+  const replay = await compactReplay({
+    pool: input.pool,
+    conversationId: input.conversationId,
+    messages: history, // untrimmed: the summary must see what the trim would drop
+    gateway: createGatewayChat(
+      input.jwt,
+      officeOrganizationId ?? null,
+      process.env.DASHBOARD_AGENT_COMPACT_MODEL || undefined,
+    ),
+    budgetChars: isOperator ? operatorBudget : undefined,
+    tailChars: isOperator ? operatorTail : undefined,
+  });
+  const replayHistory = isOperator
+    ? trimOperatorHistory(replay.messages, {
+        maxChars: OPERATOR_HISTORY_MAX_CHARS,
+        maxMessages: OPERATOR_HISTORY_MAX_MESSAGES,
+      })
+    : replay.messages;
+  const summaryBlock = replay.summary ? `\n\n# Conversation summary so far\n${replay.summary}` : '';
+  const systemContentBase = schemaPromptBlock + getSystemPrompt({ organizationIntegrations: typeof input.integrationReader === 'function' }) + (officeMemoryText ? `\n\n${officeMemoryText}` : '');
 
   const messages: GatewayMessage[] = [
-    { role: 'system', content: schemaPromptBlock + getSystemPrompt({ organizationIntegrations: typeof input.integrationReader === 'function' }) + (officeMemoryText ? `\n\n${officeMemoryText}` : '') },
+    { role: 'system', content: systemContentBase + summaryBlock },
     ...toGatewayMessages(replayHistory),
   ];
+
+  // Mid-turn compaction state. The row-id map is filled from the initial
+  // replay; compactInFlight resolves any current-turn ids with one query.
+  const midTurnFixedChars = JSON.stringify(tools).length;
+  const midTurnIds = new Map<string, string>();
+  for (const message of replayHistory) {
+    if (message.role === 'tool' && message.toolCallId) midTurnIds.set(message.toolCallId, message.id);
+  }
+  const replayMessages: Message[] = [...replayHistory];
+  const turnStartIndex = Math.max(0, replayHistory.length - 1);
 
   // Yield and drain any queued SSE events (file_change / active_app_change /
   // deployment_progress) — flushed after every fileOps/deployer invocation.
@@ -1446,6 +1447,7 @@ async function* runAgentTurnInternal(
    * re-reading per call would buy nothing.
    */
   let pendingGatedCalls: PendingGatedCallRow[] | null = null;
+  let midTurnRebuilt = false;
   try {
     outer: for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
       let assistantText = '';
@@ -1466,6 +1468,32 @@ async function* runAgentTurnInternal(
           break outer;
         }
         officeConsequential = access.approvalMode === 'consequential';
+      }
+
+      // Checked before EVERY model request, not only at turn start: one turn
+      // can add many 64k results after the first request.
+      const mid = await compactInFlight({
+        messages,
+        replayMessages,
+        turnStartIndex,
+        idByCallId: midTurnIds,
+        fixedChars: midTurnFixedChars,
+        ceilingChars: envPositiveInt('DASHBOARD_AGENT_MIDTURN_CEILING_CHARS', 850_000),
+        keepLastToolResults: envPositiveInt('DASHBOARD_AGENT_MIDTURN_KEEP_TOOL_RESULTS', 4),
+        gateway: createGatewayChat(input.jwt, officeOrganizationId ?? null, process.env.DASHBOARD_AGENT_COMPACT_MODEL || undefined),
+        conversationId: input.conversationId,
+        pool: input.pool,
+        systemContentBase,
+        allowForcedSummary: !midTurnRebuilt,
+      });
+      if (mid.blocked) {
+        yield { type: 'blocked', reason: 'context_limit' };
+        terminated = true;
+        break outer;
+      }
+      if (mid.rebuilt) {
+        messages.splice(0, messages.length, ...mid.messages);
+        midTurnRebuilt = true;
       }
 
       const stream = streamChatCompletion({
@@ -2467,6 +2495,43 @@ async function* runAgentTurnInternal(
         }
 
         /**
+         * ---- Route: read_tool_result (in-process) -------------------------
+         *
+         * The handle that makes a 64k-truncated result recoverable. The row is
+         * resolved with the turn's conversation id, never a model argument, so
+         * an id from another conversation is indistinguishable from a missing
+         * one. Read-only; it cannot write, approve, or dispatch anything.
+         */
+        if (isReadToolResultTool(tc.name)) {
+          toolCallsCount++;
+          const parsed = parseReadToolResultArgs(tc.args);
+          let payload: { result?: unknown; error?: string };
+          if (!parsed.ok) {
+            payload = { error: parsed.error };
+          } else {
+            try {
+              const row = await getToolResultMessage(input.pool, input.conversationId, parsed.value.messageId);
+              payload = row
+                ? { result: readToolResultText(row.toolResult, parsed.value) }
+                : { error: 'tool_result_not_found' };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        /**
          * ---- Route: build_app (in-process) --------------------------------
          *
          * PHASE 3's whole point: put a real compiler between "write" and
@@ -3127,13 +3192,35 @@ async function* runAgentTurnInternal(
           },
         })),
       });
+      // The cap must hold in the LIVE turn, not only on replay: one broad
+      // search is exactly the incident this feature exists to survive. Resolve
+      // row ids only when a result actually needs the envelope.
+      const capThreshold = toolResultModelMaxChars();
+      const needsCap = toolCallResults.some(
+        (res) => res.error === undefined && JSON.stringify(res.result ?? {}).length > capThreshold,
+      );
+      if (needsCap) {
+        try {
+          const resolved = await getToolMessageIds(
+            input.pool,
+            input.conversationId,
+            pendingToolCalls.map((tc) => tc.id),
+          );
+          for (const [callId, rowId] of resolved) midTurnIds.set(callId, rowId);
+        } catch {
+          // Without a row id the result stays raw this turn; replay caps it.
+        }
+      }
+
       for (let i = 0; i < pendingToolCalls.length; i++) {
         const tc = pendingToolCalls[i];
         const res = toolCallResults[i];
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content: JSON.stringify(res.error !== undefined ? { error: res.error } : res.result),
+          content: res.error !== undefined
+            ? JSON.stringify({ error: res.error })
+            : toolResultContentForModel(res.result, capThreshold, midTurnIds.get(tc.id)),
         });
       }
 

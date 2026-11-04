@@ -49,6 +49,7 @@ import { canReadOfficeActivity } from '../services/dashboard-agent/office-activi
 import { buildProposalReview, verifyPreparedApproval } from '../services/dashboard-agent/proposal-review.js';
 import { redactProposalArguments } from '../services/dashboard-agent/approval-proposal.js';
 import { validateProposalToolArguments } from '../services/dashboard-agent/proposal-validation.js';
+import { publicAgentErrorMessage } from '../services/dashboard-agent/public-error.js';
 import { readConfirmedExecution } from '../services/dashboard-agent/execution-outcome.js';
 import { requestApprovalReview } from '../services/dashboard-agent/request-proposal-review.js';
 import { listReviewPreparations } from '../services/dashboard-agent/review-preparation-store.js';
@@ -1045,12 +1046,12 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
           if (step) reply.raw.write(`data: ${JSON.stringify({ type: 'activity', step })}\n\n`);
           if (['token', 'assistant_message', 'done', 'title_updated', 'blocked'].includes(event.type)) reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
           else if (event.type === 'approval_required') reply.raw.write(`data: ${JSON.stringify({ type: event.type, approval_id: event.approval_id, tool_name: event.tool_name, sensitivity: event.sensitivity })}\n\n`);
-          else if (event.type === 'error') reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: 'The operator could not complete this turn.' })}\n\n`);
+          else if (event.type === 'error') reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: publicAgentErrorMessage(event.message) })}\n\n`);
         }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const errEvent = { type: 'error' as const, message: activity_version ? 'The operator could not complete this turn.' : msg };
+      const errEvent = { type: 'error' as const, message: activity_version ? publicAgentErrorMessage(msg) : msg };
       publishEvent(conversation_id, errEvent);
       if (!clientDisconnected) reply.raw.write(`data: ${JSON.stringify(errEvent)}\n\n`);
     } finally {
