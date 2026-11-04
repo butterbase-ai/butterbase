@@ -65,7 +65,7 @@ import { readOperatorYoloMode } from './operator-yolo.js';
 import { evaluateOperatorAccess } from './operator-access-policy.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
 import { trimOperatorHistory, OPERATOR_HISTORY_MAX_CHARS, OPERATOR_HISTORY_MAX_MESSAGES } from './operator-history.js';
-import { compactReplay, compactInFlight } from './context-compaction.js';
+import { compactReplay, compactInFlight, envPositiveInt } from './context-compaction.js';
 import { getSystemPrompt } from './prompt.js';
 import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
@@ -1383,8 +1383,8 @@ async function* runAgentTurnInternal(
    * the assistant replays exactly what it replayed before. Do not "simplify"
    * this into an unconditional trim.
    */
-  const operatorBudget = Number(process.env.DASHBOARD_AGENT_OPERATOR_CONTEXT_BUDGET_CHARS ?? 150_000);
-  const operatorTail = Number(process.env.DASHBOARD_AGENT_OPERATOR_COMPACT_TAIL_CHARS ?? OPERATOR_HISTORY_MAX_CHARS);
+  const operatorBudget = envPositiveInt('DASHBOARD_AGENT_OPERATOR_CONTEXT_BUDGET_CHARS', 150_000);
+  const operatorTail = envPositiveInt('DASHBOARD_AGENT_OPERATOR_COMPACT_TAIL_CHARS', OPERATOR_HISTORY_MAX_CHARS);
   const replay = await compactReplay({
     pool: input.pool,
     conversationId: input.conversationId,
@@ -1392,7 +1392,7 @@ async function* runAgentTurnInternal(
     gateway: createGatewayChat(
       input.jwt,
       officeOrganizationId ?? null,
-      process.env.DASHBOARD_AGENT_COMPACT_MODEL,
+      process.env.DASHBOARD_AGENT_COMPACT_MODEL || undefined,
     ),
     budgetChars: isOperator ? operatorBudget : undefined,
     tailChars: isOperator ? operatorTail : undefined,
@@ -1478,13 +1478,12 @@ async function* runAgentTurnInternal(
         turnStartIndex,
         idByCallId: midTurnIds,
         fixedChars: midTurnFixedChars,
-        ceilingChars: Number(process.env.DASHBOARD_AGENT_MIDTURN_CEILING_CHARS ?? 850_000),
-        keepLastToolResults: Number(process.env.DASHBOARD_AGENT_MIDTURN_KEEP_TOOL_RESULTS ?? 4),
-        gateway: createGatewayChat(input.jwt, officeOrganizationId ?? null, process.env.DASHBOARD_AGENT_COMPACT_MODEL),
+        ceilingChars: envPositiveInt('DASHBOARD_AGENT_MIDTURN_CEILING_CHARS', 850_000),
+        keepLastToolResults: envPositiveInt('DASHBOARD_AGENT_MIDTURN_KEEP_TOOL_RESULTS', 4),
+        gateway: createGatewayChat(input.jwt, officeOrganizationId ?? null, process.env.DASHBOARD_AGENT_COMPACT_MODEL || undefined),
         conversationId: input.conversationId,
         pool: input.pool,
         systemContentBase,
-        summary: replay.summary,
         allowForcedSummary: !midTurnRebuilt,
       });
       if (mid.blocked) {

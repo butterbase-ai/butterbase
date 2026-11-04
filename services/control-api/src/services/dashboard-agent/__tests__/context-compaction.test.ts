@@ -4,7 +4,7 @@ import type { Message } from '../store.js';
 import * as summaryStore from '../context-summary-store.js';
 import {
   compactReplay, replayChars, clearOldToolResults, messagesAfterWatermark, buildCompactionPrompt,
-  gatewayChars, clearGatewayToolResults, compactInFlight,
+  gatewayChars, clearGatewayToolResults, compactInFlight, envPositiveInt,
 } from '../context-compaction.js';
 
 vi.mock('../context-summary-store.js', () => ({
@@ -55,12 +55,16 @@ describe('compactReplay', () => {
     const out = await compactReplay({
       pool, conversationId: 'conv-1', messages, gateway: { chat },
       budgetChars: 100_000, keepMessages: 5, tailChars: 100_000, promptChars: 150_000,
+      modelUsed: 'test/model',
     });
 
     expect(out.trigger).toBe('summarized');
     expect(out.summary).toBe('SUMMARY');
     expect(out.messages.some((m) => m.content === 'current question')).toBe(true);
-    expect(summaryStore.upsertContextSummary).toHaveBeenCalled();
+    expect(summaryStore.upsertContextSummary).toHaveBeenCalledWith(
+      pool,
+      expect.objectContaining({ modelUsed: 'test/model' }),
+    );
   });
 
   it('falls back to the tail when the gateway fails', async () => {
@@ -238,12 +242,37 @@ describe('mid-turn helpers', () => {
       conversationId: 'conv-1',
       pool,
       systemContentBase: 'sys',
-      summary: null,
       allowForcedSummary: false,
     });
 
     expect(out.blocked).toBe(true);
     expect(chat).not.toHaveBeenCalled();
+  });
+
+  it('honours DASHBOARD_AGENT_COMPACT_TIMEOUT_MS', async () => {
+    process.env.DASHBOARD_AGENT_COMPACT_TIMEOUT_MS = '1234';
+    const chat = vi.fn(async () => 'SUMMARY');
+    const messages = Array.from({ length: 5 }, (_, i) => msg({ id: `m${i}`, content: 'x'.repeat(100) }));
+    try {
+      await compactReplay({
+        pool, conversationId: 'conv-1', messages, gateway: { chat },
+        force: true, keepMessages: 1, tailChars: 1_000,
+      });
+      expect(chat).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 1_234 }));
+    } finally {
+      delete process.env.DASHBOARD_AGENT_COMPACT_TIMEOUT_MS;
+    }
+  });
+
+  it('falls back when an env value is not a positive integer', () => {
+    process.env.DASHBOARD_AGENT_TEST_BUDGET = 'not-a-number';
+    try {
+      expect(envPositiveInt('DASHBOARD_AGENT_TEST_BUDGET', 7)).toBe(7);
+      process.env.DASHBOARD_AGENT_TEST_BUDGET = '9';
+      expect(envPositiveInt('DASHBOARD_AGENT_TEST_BUDGET', 7)).toBe(9);
+    } finally {
+      delete process.env.DASHBOARD_AGENT_TEST_BUDGET;
+    }
   });
 
   it('forces summarization when force is true', async () => {

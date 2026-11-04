@@ -51,6 +51,8 @@ const mockListPendingGatedCalls = approvalsStoreModule.listPendingGatedCalls as 
 >;
 
 const ORG_ID = '11111111-1111-4111-8111-111111111111';
+const MSG_ID = '33333333-3333-4333-8333-333333333333';
+const FOREIGN_ID = '44444444-4444-4444-8444-444444444444';
 const OPERATOR_USER = operatorUserId(ORG_ID);
 const stubPool = {} as pg.Pool;
 
@@ -135,24 +137,24 @@ beforeEach(() => {
 describe('read_tool_result dispatch', () => {
   it('returns a slice of the stored result', async () => {
     mockGetToolResultMessage.mockResolvedValueOnce({
-      id: 'm1',
+      id: MSG_ID,
       toolResult: { body: 'hello world' },
     });
-    oneToolCallThenStop('read_tool_result', { message_id: 'm1', limit: 5 });
+    oneToolCallThenStop('read_tool_result', { message_id: MSG_ID, limit: 5 });
 
     const events = await collect(operatorTurn());
     const tool = events.find((e) => e.type === 'tool_result');
     expect(tool).toMatchObject({
       type: 'tool_result',
-      result: { message_id: 'm1', offset: 0, returned_characters: 5, text: '{"bod' },
+      result: { message_id: MSG_ID, offset: 0, returned_characters: 5, text: '{"bod' },
     });
-    expect(mockGetToolResultMessage).toHaveBeenCalledWith(stubPool, 'conv-1', 'm1');
+    expect(mockGetToolResultMessage).toHaveBeenCalledWith(stubPool, 'conv-1', MSG_ID);
     expect(mockCallMcpTool).not.toHaveBeenCalled();
   });
 
   it('does not leak whether a missing id belongs to another conversation', async () => {
     mockGetToolResultMessage.mockResolvedValueOnce(null);
-    oneToolCallThenStop('read_tool_result', { message_id: 'foreign' });
+    oneToolCallThenStop('read_tool_result', { message_id: FOREIGN_ID });
 
     const events = await collect(operatorTurn());
     expect(events.find((e) => e.type === 'tool_result')).toMatchObject({

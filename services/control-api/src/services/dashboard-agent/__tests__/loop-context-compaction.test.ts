@@ -46,6 +46,7 @@ vi.mock('../context-compaction.js', () => ({
     rebuilt: false,
     messages,
   })),
+  envPositiveInt: vi.fn((_name: string, fallback: number) => fallback),
 }));
 
 import * as storeModule from '../store.js';

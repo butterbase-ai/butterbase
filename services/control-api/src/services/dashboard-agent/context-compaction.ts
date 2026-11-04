@@ -44,6 +44,12 @@ export const DEFAULT_SUMMARY_MAX_CHARS = 12_000;
 export const DEFAULT_CLEAR_KEEP_MESSAGES = 24;
 export const MIN_CLEARABLE_RESULT_CHARS = 1_000;
 export const COMPACTION_TIMEOUT_MS = 20_000;
+export const DEFAULT_COMPACT_MODEL = 'anthropic/claude-haiku-4.5';
+
+/** The model a summary call uses, and the name persisted with the summary. */
+export function compactionModel(): string {
+  return process.env.DASHBOARD_AGENT_COMPACT_MODEL || DEFAULT_COMPACT_MODEL;
+}
 
 const MESSAGE_PROMPT_CAP = 4_000;
 const SUMMARY_HEADINGS = [
@@ -58,7 +64,13 @@ const SUMMARY_HEADINGS = [
   '9. Next step',
 ];
 
-function envPositiveInt(name: string, fallback: number): number {
+/**
+ * Positive-integer env or the fallback. Exported for the loop's operator and
+ * mid-turn wiring: a bare `Number(process.env.X ?? default)` turns a typo into
+ * NaN, and `x <= NaN` is always false — which would compact every turn or
+ * block every request.
+ */
+export function envPositiveInt(name: string, fallback: number): number {
   const parsed = Number.parseInt(process.env[name] ?? '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
@@ -258,7 +270,7 @@ function shrinkCutForPrompt(
 
 function logCompaction(fields: Record<string, unknown>): void {
   if (process.env.NODE_ENV === 'test') return;
-  console.info('[dashboard-agent] context_compaction', JSON.stringify(fields));
+  console.info('dashboard_agent.context_compaction', JSON.stringify(fields));
 }
 
 export async function compactReplay(input: {
@@ -271,7 +283,11 @@ export async function compactReplay(input: {
   tailChars?: number;
   promptChars?: number;
   force?: boolean;
+  /** Model name recorded with the summary; defaults to the compaction model. */
+  modelUsed?: string;
 }): Promise<CompactionResult> {
+  const startedAt = Date.now();
+  const modelUsed = input.modelUsed ?? compactionModel();
   const budgetChars = input.budgetChars
     ?? envPositiveInt('DASHBOARD_AGENT_CONTEXT_BUDGET_CHARS', DEFAULT_CONTEXT_BUDGET_CHARS);
   const tailChars = input.tailChars
@@ -303,6 +319,7 @@ export async function compactReplay(input: {
     logCompaction({
       conversation_id: input.conversationId, mode: 'start_of_turn', trigger,
       before_chars: beforeChars, after_chars: replayChars(trimmed),
+      model: modelUsed, duration_ms: Date.now() - startedAt,
     });
     return {
       messages: trimmed,
@@ -335,6 +352,7 @@ export async function compactReplay(input: {
     logCompaction({
       conversation_id: input.conversationId, mode: 'start_of_turn', trigger: 'cleared',
       before_chars: beforeChars, after_chars: clearedChars,
+      model: modelUsed, duration_ms: Date.now() - startedAt,
     });
     return {
       messages: cleared,
@@ -357,6 +375,7 @@ export async function compactReplay(input: {
     logCompaction({
       conversation_id: input.conversationId, mode: 'start_of_turn', trigger,
       before_chars: beforeChars, after_chars: replayChars(trimmed) + existingSummaryChars,
+      model: modelUsed, duration_ms: Date.now() - startedAt,
     });
     return {
       messages: trimmed,
@@ -377,7 +396,7 @@ export async function compactReplay(input: {
   try {
     raw = await input.gateway.chat({
       prompt: buildCompactionPrompt(prefix, existing?.summary ?? null),
-      timeoutMs: COMPACTION_TIMEOUT_MS,
+      timeoutMs: envPositiveInt('DASHBOARD_AGENT_COMPACT_TIMEOUT_MS', COMPACTION_TIMEOUT_MS),
     });
   } catch {
     return failed('summary_failed');
@@ -395,7 +414,7 @@ export async function compactReplay(input: {
       throughCreatedAt: last.createdAt,
       sourceCharacters: replayChars(prefix),
       summaryCharacters: summary.length,
-      modelUsed: null,
+      modelUsed,
     });
   } catch {
     return failed('summary_failed');
@@ -406,6 +425,8 @@ export async function compactReplay(input: {
     conversation_id: input.conversationId, mode: 'start_of_turn', trigger: 'summarized',
     before_chars: beforeChars, after_chars: afterChars,
     summarized_messages: prefix.length, kept_messages: tail.length, summary_chars: summary.length,
+    summary_truncated: raw.trim().length > DEFAULT_SUMMARY_MAX_CHARS,
+    model: modelUsed, duration_ms: Date.now() - startedAt,
   });
 
   return {
@@ -442,7 +463,6 @@ export async function compactInFlight(input: {
   conversationId: string;
   pool: pg.Pool;
   systemContentBase: string;
-  summary: string | null;
   /**
    * False after the first rebuild in a turn. A rebuild changes the array's
    * layout, so the caller's original turn-start index no longer describes it;
@@ -477,19 +497,29 @@ export async function compactInFlight(input: {
     if (gatewayChars(base, input.fixedChars) <= input.ceilingChars) {
       logCompaction({
         conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'cleared',
-        cleared_results: cleared.cleared,
+        before_chars: gatewayChars(input.messages, input.fixedChars),
+        after_chars: gatewayChars(base, input.fixedChars),
+        cleared_results: cleared.cleared, model: compactionModel(),
       });
       return { blocked: false, rebuilt: cleared.cleared > 0, messages: base };
     }
 
     if (input.allowForcedSummary === false) {
-      logCompaction({ conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked' });
+      logCompaction({
+        conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked',
+        before_chars: gatewayChars(input.messages, input.fixedChars),
+        after_chars: gatewayChars(base, input.fixedChars), model: compactionModel(),
+      });
       return { blocked: true, rebuilt: false, messages: base };
     }
 
     const preTurn = input.replayMessages.slice(0, Math.max(0, input.turnStartIndex));
     if (preTurn.length === 0) {
-      logCompaction({ conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked' });
+      logCompaction({
+        conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked',
+        before_chars: gatewayChars(input.messages, input.fixedChars),
+        after_chars: gatewayChars(base, input.fixedChars), model: compactionModel(),
+      });
       return { blocked: true, rebuilt: false, messages: base };
     }
 
@@ -502,7 +532,11 @@ export async function compactInFlight(input: {
     });
 
     if (!forced.summary) {
-      logCompaction({ conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked' });
+      logCompaction({
+        conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked',
+        before_chars: gatewayChars(input.messages, input.fixedChars),
+        after_chars: gatewayChars(base, input.fixedChars), model: compactionModel(),
+      });
       return { blocked: true, rebuilt: false, messages: base };
     }
 
@@ -516,12 +550,19 @@ export async function compactInFlight(input: {
     if (gatewayChars(next, input.fixedChars) <= input.ceilingChars) {
       logCompaction({
         conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'summarized',
+        before_chars: gatewayChars(input.messages, input.fixedChars),
+        after_chars: gatewayChars(next, input.fixedChars),
         summarized_messages: forced.messages.length, summary_chars: forced.summary.length,
+        model: compactionModel(),
       });
       return { blocked: false, rebuilt: true, messages: next };
     }
 
-    logCompaction({ conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked' });
+    logCompaction({
+      conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked',
+      before_chars: gatewayChars(input.messages, input.fixedChars),
+      after_chars: gatewayChars(next, input.fixedChars), model: compactionModel(),
+    });
     return { blocked: true, rebuilt: false, messages: next };
   } catch {
     return { blocked: false, rebuilt: false, messages: input.messages };

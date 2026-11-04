@@ -2,14 +2,18 @@ import { describe, expect, it } from 'vitest';
 import { parseReadToolResultArgs, readToolResultText } from '../read-tool-result.js';
 
 const result = { body: 'x'.repeat(5000) + 'CALCULATOR' + 'y'.repeat(5000) };
+const ID = '00000000-0000-4000-8000-000000000000';
 
 describe('parseReadToolResultArgs', () => {
-  it('requires a non-blank message_id and bounds limit', () => {
+  it('requires a non-blank, UUID-shaped message_id and bounds limit', () => {
     expect(parseReadToolResultArgs({})).toEqual({ ok: false, error: 'invalid_arguments' });
     expect(parseReadToolResultArgs({ message_id: '  ' })).toEqual({ ok: false, error: 'invalid_arguments' });
-    expect(parseReadToolResultArgs({ message_id: 'm1', limit: 20_001 })).toEqual({ ok: false, error: 'invalid_arguments' });
-    expect(parseReadToolResultArgs({ message_id: 'm1', offset: -1 })).toEqual({ ok: false, error: 'invalid_arguments' });
-    expect(parseReadToolResultArgs({ message_id: 'm1' })).toEqual({ ok: true, value: { messageId: 'm1' } });
+    expect(parseReadToolResultArgs({ message_id: 'not-a-uuid' })).toEqual({ ok: false, error: 'invalid_arguments' });
+    expect(parseReadToolResultArgs({ message_id: ID, limit: 20_001 })).toEqual({ ok: false, error: 'invalid_arguments' });
+    expect(parseReadToolResultArgs({ message_id: ID, offset: -1 })).toEqual({ ok: false, error: 'invalid_arguments' });
+    expect(parseReadToolResultArgs({ message_id: ID, query: 'q'.repeat(257) })).toEqual({ ok: false, error: 'invalid_arguments' });
+    expect(parseReadToolResultArgs({ message_id: ID, query: 'q'.repeat(256) })).toMatchObject({ ok: true });
+    expect(parseReadToolResultArgs({ message_id: ID })).toEqual({ ok: true, value: { messageId: ID } });
   });
 });
 

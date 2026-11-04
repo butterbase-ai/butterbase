@@ -11,6 +11,12 @@ export const DEFAULT_READ_LIMIT = 8_000;
 export const MAX_READ_LIMIT = 20_000;
 export const MAX_MATCHES = 25;
 export const MATCH_CONTEXT_CHARS = 160;
+/**
+ * A long query would otherwise make each context window huge. 256 + two
+ * 160-char sides = 576; 25 × 576 is still under MAX_READ_LIMIT, so the hard
+ * output cap below can only be reached by a bug, not by a model-supplied query.
+ */
+export const MAX_QUERY_CHARS = 256;
 
 export type ReadToolResultInput = {
   messageId: string;
@@ -50,6 +56,14 @@ export type ParsedReadToolResultArgs =
 
 const INVALID: ParsedReadToolResultArgs = { ok: false, error: 'invalid_arguments' };
 
+/**
+ * `message_id` is a UUID column. Accepting arbitrary text lets a non-UUID reach
+ * Postgres and surface its raw `invalid input syntax for type uuid` error,
+ * leaking column typing and adding an undefined error shape. The shape check
+ * lives here so the tool's contract stays `invalid_arguments`.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -63,11 +77,13 @@ export function parseReadToolResultArgs(args: unknown): ParsedReadToolResultArgs
 
   const messageId = args.message_id;
   if (typeof messageId !== 'string' || messageId.trim().length === 0) return INVALID;
+  if (!UUID_RE.test(messageId.trim())) return INVALID;
 
   const value: ReadToolResultInput = { messageId: messageId.trim() };
 
   if (args.query !== undefined) {
     if (typeof args.query !== 'string' || args.query.trim().length === 0) return INVALID;
+    if (args.query.length > MAX_QUERY_CHARS) return INVALID;
     value.query = args.query;
   }
   if (args.offset !== undefined) {
@@ -153,6 +169,15 @@ function searchMatches(
 
   if (matches.length === MAX_MATCHES) {
     truncated = truncated || haystack.indexOf(needle, from) !== -1;
+  }
+
+  // Hard ceiling on the returned text, independent of the union-based `limit`.
+  // With MAX_QUERY_CHARS this is unreachable, but the contract is a maximum.
+  let returned = matches.reduce((total, match) => total + match.context.length, 0);
+  while (matches.length > 0 && returned > MAX_READ_LIMIT) {
+    const removed = matches.pop()!;
+    returned -= removed.context.length;
+    truncated = true;
   }
 
   return {
