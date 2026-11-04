@@ -95,6 +95,10 @@ const OPERATOR_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   // Operator working state
   'update_operator_scratchpad',
   'list_pending_decisions',
+  // Read of the conversation's own stored tool result; the conversation comes
+  // from the turn, never from an argument. Same reasoning as
+  // list_pending_decisions, applied to tool-result rows.
+  'read_tool_result',
   // Office skills: the creator drafts and enqueues a read-only test; it cannot
   // run, approve, deploy or send. The script executor is scoped to the pinned
   // package and its sandbox is network-denied.

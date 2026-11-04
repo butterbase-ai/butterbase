@@ -113,6 +113,7 @@ describe('reads, preparation and builds stay allowed', () => {
     ['build_app', { app_id: 'app_1' }],
     ['update_operator_scratchpad', { content: 'notes' }],
     ['list_pending_decisions', {}],
+    ['read_tool_result', { message_id: 'm1' }],
     ['manage_repo', { action: 'push', app_id: 'app_1', files: [] }],
     ['manage_repo', { action: 'pull_latest', app_id: 'app_1' }],
     ['submit_suggestion', { category: 'improvement', description: 'x' }],

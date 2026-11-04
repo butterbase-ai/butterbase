@@ -38,6 +38,16 @@ vi.mock('../approvals-store.js', () => ({
   listPendingGatedCalls: vi.fn(),
 }));
 
+vi.mock('../snapshot-title.js', () => ({
+  createGatewayChat: vi.fn(() => ({ chat: vi.fn(async () => 'PRETURN SUMMARY') })),
+  deriveSnapshotTitle: vi.fn(async () => 'title'),
+}));
+
+vi.mock('../context-summary-store.js', () => ({
+  getContextSummary: vi.fn(async () => null),
+  upsertContextSummary: vi.fn(async () => {}),
+}));
+
 import * as storeModule from '../store.js';
 import * as mcpClientModule from '../mcp-client.js';
 import * as approvalsStoreModule from '../approvals-store.js';
@@ -121,6 +131,35 @@ function twoToolCallsThenStop() {
   return { bodies, fetchMock };
 }
 
+function oneToolCallThenStop() {
+  const bodies: string[] = [];
+  let round = 0;
+  const fetchMock = vi.fn(async (_url: unknown, init?: unknown) => {
+    bodies.push((init as { body?: string } | undefined)?.body ?? '');
+    round += 1;
+    if (round === 1) return toolCallRound('call-1');
+    return gatewayResponse([
+      { choices: [{ delta: { content: 'ok' }, finish_reason: null }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    ]);
+  });
+  global.fetch = fetchMock as unknown as typeof fetch;
+  return { bodies };
+}
+
+function finalAnswer() {
+  const bodies: string[] = [];
+  const fetchMock = vi.fn(async (_url: unknown, init?: unknown) => {
+    bodies.push((init as { body?: string } | undefined)?.body ?? '');
+    return gatewayResponse([
+      { choices: [{ delta: { content: 'ok' }, finish_reason: null }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    ]);
+  });
+  global.fetch = fetchMock as unknown as typeof fetch;
+  return { bodies };
+}
+
 function operatorTurn(extra: Record<string, unknown> = {}) {
   return runAgentTurn({
     conversationId: 'conv-1',
@@ -131,6 +170,17 @@ function operatorTurn(extra: Record<string, unknown> = {}) {
     pool: stubPool,
     organizationId: ORG_ID,
     ...extra,
+  } as never);
+}
+
+function humanTurn() {
+  return runAgentTurn({
+    conversationId: 'conv-1',
+    userId: 'cognito-sub-abc',
+    jwt: 'user-jwt',
+    userMessage: 'current question',
+    model: 'test/model',
+    pool: stubPool,
   } as never);
 }
 
@@ -160,6 +210,48 @@ describe('mid-turn compaction', () => {
     expect(bodies[2]).toContain('cleared');
     expect(bodies[2]).not.toContain('a'.repeat(5_000));
     expect(bodies[2]).toContain('b'.repeat(5_000));
+  });
+
+  it('caps an oversized same-turn result and keeps it recoverable', async () => {
+    const previous = process.env.DASHBOARD_AGENT_MIDTURN_CEILING_CHARS;
+    process.env.DASHBOARD_AGENT_MIDTURN_CEILING_CHARS = '900000';
+    mockCallMcpTool.mockReset();
+    mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: 'z'.repeat(100_000) } as never);
+    const { bodies } = oneToolCallThenStop();
+
+    try {
+      const events = await collect(operatorTurn());
+      expect(events.some((e) => e.type === 'done')).toBe(true);
+      expect(bodies).toHaveLength(2);
+      expect(bodies[1]).toContain('truncated');
+      expect(bodies[1]).toContain('row-call-1');
+      expect(bodies[1]).not.toContain('z'.repeat(100_000));
+    } finally {
+      process.env.DASHBOARD_AGENT_MIDTURN_CEILING_CHARS = previous;
+    }
+  });
+
+  it('force-summarizes the pre-turn prefix and preserves the current turn', async () => {
+    const previous = process.env.DASHBOARD_AGENT_MIDTURN_CEILING_CHARS;
+    process.env.DASHBOARD_AGENT_MIDTURN_CEILING_CHARS = '150000';
+    const history = Array.from({ length: 100 }, (_, i) => ({
+      ...stubMessage,
+      id: `m${i}`,
+      content: 'x'.repeat(2_000),
+    }));
+    history.push({ ...stubMessage, id: 'current', content: 'current question' });
+    mockListMessages.mockResolvedValue(history as never);
+    const { bodies } = finalAnswer();
+
+    try {
+      const events = await collect(humanTurn());
+      expect(events.some((e) => e.type === 'done')).toBe(true);
+      expect(bodies[0]).toContain('# Conversation summary so far');
+      expect(bodies[0]).toContain('PRETURN SUMMARY');
+      expect(bodies[0]).toContain('current question');
+    } finally {
+      process.env.DASHBOARD_AGENT_MIDTURN_CEILING_CHARS = previous;
+    }
   });
 
   it('stops the turn cleanly when even clearing cannot get under the ceiling', async () => {

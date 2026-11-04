@@ -167,8 +167,10 @@ export function clearGatewayToolResults(
  * Drop messages already covered by the stored summary.
  *
  * The id is authoritative when the watermark row is still present; a deleted
- * row falls back to creation time. If neither can locate it, replay nothing
- * extra: the watermark is newer than everything stored.
+ * row falls back to creation time. If nothing is newer than the watermark,
+ * replay everything — an empty tail would hide the current user message. A
+ * time-based cut is moved back until it is pairing-valid, so it can never start
+ * the tail on a tool result whose call was dropped.
  */
 export function messagesAfterWatermark(
   messages: Message[],
@@ -182,7 +184,12 @@ export function messagesAfterWatermark(
   const byTime = messages.findIndex(
     (message) => message.createdAt.getTime() > summary.throughCreatedAt.getTime(),
   );
-  return byTime === -1 ? [] : messages.slice(byTime);
+  if (byTime === -1) return messages;
+
+  const invalid = invalidCutPoints(messages);
+  let cut = byTime;
+  while (cut > 0 && invalid[cut]) cut -= 1;
+  return messages.slice(cut);
 }
 
 function capPromptText(text: string): string {
@@ -436,6 +443,13 @@ export async function compactInFlight(input: {
   pool: pg.Pool;
   systemContentBase: string;
   summary: string | null;
+  /**
+   * False after the first rebuild in a turn. A rebuild changes the array's
+   * layout, so the caller's original turn-start index no longer describes it;
+   * allowing a second forced summary would slice the wrong rows. Clearing
+   * remains available, and a still-over-ceiling request blocks cleanly.
+   */
+  allowForcedSummary?: boolean;
 }): Promise<{ blocked: boolean; rebuilt: boolean; messages: GatewayMessage[] }> {
   try {
     if (gatewayChars(input.messages, input.fixedChars) <= input.ceilingChars) {
@@ -466,6 +480,11 @@ export async function compactInFlight(input: {
         cleared_results: cleared.cleared,
       });
       return { blocked: false, rebuilt: cleared.cleared > 0, messages: base };
+    }
+
+    if (input.allowForcedSummary === false) {
+      logCompaction({ conversation_id: input.conversationId, mode: 'mid_turn', trigger: 'blocked' });
+      return { blocked: true, rebuilt: false, messages: base };
     }
 
     const preTurn = input.replayMessages.slice(0, Math.max(0, input.turnStartIndex));

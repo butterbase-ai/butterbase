@@ -28,11 +28,16 @@ import { persistPreparedApproval, findParkedProposalIntent } from './proposal-st
 import { SUBSTRATE_ESCALATION_TOOL } from './approvals-store.js';
 import { assertOperatorKeyArguments } from '../locked-key-access.js';
 import { createHash, randomUUID } from 'crypto';
-import { appendMessage, listMessages, getToolResultMessage, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
+import { appendMessage, listMessages, getToolResultMessage, getToolMessageIds, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
 import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, isReadToolResultTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, SKILL_CREATOR_TOOL, RUN_SKILL_SCRIPT_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
 import { parseReadToolResultArgs, readToolResultText } from './read-tool-result.js';
-import { toGatewayMessages, type GatewayMessage } from './gateway-message.js';
-export { toolResultContentForModel } from './gateway-message.js';
+import {
+  toGatewayMessages,
+  toolResultContentForModel,
+  toolResultModelMaxChars,
+  type GatewayMessage,
+} from './gateway-message.js';
+export { toolResultContentForModel };
 import type { ActiveSkillContext, IntegrationReader, SkillCreatorExecutor, SkillScriptExecutor } from './skill-types.js';
 import { createBuildHydrator, type BuildHydration } from './build-hydration.js';
 import { callMcpTool } from './mcp-client.js';
@@ -1442,6 +1447,7 @@ async function* runAgentTurnInternal(
    * re-reading per call would buy nothing.
    */
   let pendingGatedCalls: PendingGatedCallRow[] | null = null;
+  let midTurnRebuilt = false;
   try {
     outer: for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
       let assistantText = '';
@@ -1479,13 +1485,17 @@ async function* runAgentTurnInternal(
         pool: input.pool,
         systemContentBase,
         summary: replay.summary,
+        allowForcedSummary: !midTurnRebuilt,
       });
       if (mid.blocked) {
         yield { type: 'blocked', reason: 'context_limit' };
         terminated = true;
         break outer;
       }
-      if (mid.rebuilt) messages.splice(0, messages.length, ...mid.messages);
+      if (mid.rebuilt) {
+        messages.splice(0, messages.length, ...mid.messages);
+        midTurnRebuilt = true;
+      }
 
       const stream = streamChatCompletion({
         signal: input.signal,
@@ -3139,13 +3149,35 @@ async function* runAgentTurnInternal(
           },
         })),
       });
+      // The cap must hold in the LIVE turn, not only on replay: one broad
+      // search is exactly the incident this feature exists to survive. Resolve
+      // row ids only when a result actually needs the envelope.
+      const capThreshold = toolResultModelMaxChars();
+      const needsCap = toolCallResults.some(
+        (res) => res.error === undefined && JSON.stringify(res.result ?? {}).length > capThreshold,
+      );
+      if (needsCap) {
+        try {
+          const resolved = await getToolMessageIds(
+            input.pool,
+            input.conversationId,
+            pendingToolCalls.map((tc) => tc.id),
+          );
+          for (const [callId, rowId] of resolved) midTurnIds.set(callId, rowId);
+        } catch {
+          // Without a row id the result stays raw this turn; replay caps it.
+        }
+      }
+
       for (let i = 0; i < pendingToolCalls.length; i++) {
         const tc = pendingToolCalls[i];
         const res = toolCallResults[i];
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content: JSON.stringify(res.error !== undefined ? { error: res.error } : res.result),
+          content: res.error !== undefined
+            ? JSON.stringify({ error: res.error })
+            : toolResultContentForModel(res.result, capThreshold, midTurnIds.get(tc.id)),
         });
       }
 

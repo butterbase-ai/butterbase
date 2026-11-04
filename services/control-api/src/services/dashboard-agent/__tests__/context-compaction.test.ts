@@ -4,7 +4,7 @@ import type { Message } from '../store.js';
 import * as summaryStore from '../context-summary-store.js';
 import {
   compactReplay, replayChars, clearOldToolResults, messagesAfterWatermark, buildCompactionPrompt,
-  gatewayChars, clearGatewayToolResults,
+  gatewayChars, clearGatewayToolResults, compactInFlight,
 } from '../context-compaction.js';
 
 vi.mock('../context-summary-store.js', () => ({
@@ -145,6 +145,33 @@ describe('helpers', () => {
     expect(out.map((m) => m.id)).toEqual(['m2', 'm3']);
   });
 
+  it('replays everything when no message is newer than the watermark', () => {
+    const base = new Date('2026-11-04T00:00:00Z').getTime();
+    const messages = ['m1', 'm2'].map((id, i) =>
+      msg({ id, createdAt: new Date(base - (i + 1) * 1000) }));
+    const out = messagesAfterWatermark(messages, {
+      conversationId: 'conv-1', summary: 'S', throughMessageId: 'deleted',
+      throughCreatedAt: new Date(base), sourceCharacters: 1, summaryCharacters: 1,
+      modelUsed: null, updatedAt: new Date(),
+    });
+    expect(out.map((m) => m.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('moves a time-based cut back to include the call for a tool result', () => {
+    const base = new Date('2026-11-04T00:00:00Z').getTime();
+    const messages = [
+      msg({ id: 'a1', role: 'assistant', toolCallId: 'c1', createdAt: new Date(base + 1000) }),
+      msg({ id: 't1', role: 'tool', toolCallId: 'c1', createdAt: new Date(base + 2000) }),
+      msg({ id: 'u1', role: 'user', createdAt: new Date(base + 3000) }),
+    ];
+    const out = messagesAfterWatermark(messages, {
+      conversationId: 'conv-1', summary: 'S', throughMessageId: 'deleted',
+      throughCreatedAt: new Date(base + 1500), sourceCharacters: 1, summaryCharacters: 1,
+      modelUsed: null, updatedAt: new Date(),
+    });
+    expect(out.map((m) => m.id)).toEqual(['a1', 't1', 'u1']);
+  });
+
   it('includes all nine summary sections', () => {
     const prompt = buildCompactionPrompt([msg({ id: 'm1', content: 'hello' })], 'PREVIOUS');
     for (const heading of ['Primary request', 'Key technical concepts', 'Files and data', 'Errors and fixes',
@@ -189,6 +216,34 @@ describe('mid-turn helpers', () => {
 
   it('estimates input characters including fixed overhead', () => {
     expect(gatewayChars([{ role: 'user', content: 'abcd' }], 100)).toBeGreaterThanOrEqual(104);
+  });
+
+  it('does not force a summary after a rebuild', async () => {
+    const chat = vi.fn(async () => 'SUMMARY');
+    const messages = [
+      { role: 'system', content: 'x'.repeat(10_000) },
+      { role: 'user', content: 'current' },
+    ];
+    const replayMessages = [msg({ id: 'm1', content: 'pre' }), msg({ id: 'm2', content: 'current' })];
+
+    const out = await compactInFlight({
+      messages,
+      replayMessages,
+      turnStartIndex: 1,
+      idByCallId: new Map(),
+      fixedChars: 0,
+      ceilingChars: 1,
+      keepLastToolResults: 4,
+      gateway: { chat },
+      conversationId: 'conv-1',
+      pool,
+      systemContentBase: 'sys',
+      summary: null,
+      allowForcedSummary: false,
+    });
+
+    expect(out.blocked).toBe(true);
+    expect(chat).not.toHaveBeenCalled();
   });
 
   it('forces summarization when force is true', async () => {
