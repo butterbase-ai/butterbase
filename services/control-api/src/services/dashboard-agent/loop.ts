@@ -419,6 +419,39 @@ function hashToolArgs(args: unknown): string {
   return createHash('sha256').update(canonical).digest('hex');
 }
 
+const DEFAULT_TOOL_RESULT_MODEL_MAX_CHARS = 64_000;
+
+function toolResultModelMaxChars(): number {
+  const raw = process.env.DASHBOARD_AGENT_TOOL_RESULT_MAX_CHARS;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TOOL_RESULT_MODEL_MAX_CHARS;
+}
+
+/**
+ * Bound what a single tool result can put into the model context.
+ *
+ * The full result stays in `dashboard_agent_messages.tool_result`; only the
+ * gateway message is capped. Without this, one search that returns full email
+ * bodies with base64 parts can exceed the provider's input limit (Qwen rejects
+ * requests over 983,616 characters) and the whole turn dies with a 400.
+ *
+ * The model sees a valid JSON envelope with a preview and a note; it can run a
+ * narrower search or fetch a specific record by id to get the rest.
+ */
+export function toolResultContentForModel(
+  result: unknown,
+  maxChars = toolResultModelMaxChars(),
+): string {
+  const text = JSON.stringify(result ?? {});
+  if (text.length <= maxChars) return text;
+  return JSON.stringify({
+    truncated: true,
+    original_characters: text.length,
+    preview: text.slice(0, maxChars),
+    note: 'The full tool result is stored. Re-run a narrower search or fetch a specific item by id if you need more.',
+  });
+}
+
 /**
  * Convert persisted store messages to the gateway's OpenAI-compatible format.
  */
@@ -428,7 +461,7 @@ function toGatewayMessages(messages: Message[]): GatewayMessage[] {
       return {
         role: 'tool',
         tool_call_id: msg.toolCallId ?? '',
-        content: JSON.stringify(msg.toolResult ?? {}),
+        content: toolResultContentForModel(msg.toolResult),
       };
     }
     if (msg.role === 'assistant' && msg.toolCallId) {
