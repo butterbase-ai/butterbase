@@ -26,6 +26,7 @@ import {
   OPERATOR_SANDBOX_CODE_TOOL,
   OPERATOR_BUILD_TOOL,
   OPERATOR_PENDING_DECISIONS_TOOL,
+  READ_TOOL_RESULT_TOOL,
   SKILL_CREATOR_TOOL,
   RUN_SKILL_SCRIPT_TOOL,
   PROPOSE_ACTION_TOOL,
@@ -82,6 +83,7 @@ export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
   OPERATOR_SANDBOX_CODE_TOOL,
   OPERATOR_BUILD_TOOL,
   OPERATOR_PENDING_DECISIONS_TOOL,
+  READ_TOOL_RESULT_TOOL,
   SKILL_CREATOR_TOOL,
   RUN_SKILL_SCRIPT_TOOL,
 ]);
@@ -253,6 +255,9 @@ export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Ma
    * queue for the owner's approval would never be used.
    */
   [OPERATOR_PENDING_DECISIONS_TOOL, 'allow'],
+  // A read of the conversation's own stored tool result; no tenant data, no
+  // MCP call, and the conversation comes from the turn, not an argument.
+  [READ_TOOL_RESULT_TOOL, 'allow'],
   /**
    * Office skill seams are 'approval' in the GENERAL operator table: the table
    * describes an unattended operator on any deployment, and these tools do not
