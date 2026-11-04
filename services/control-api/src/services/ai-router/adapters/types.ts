@@ -152,6 +152,10 @@ export type AdapterErrorKind =
   | 'model_not_available'
   | 'auth'
   | 'bad_request'
+  // The upstream rejected a request parameter this model does not support.
+  // The request is valid for the canonical model, so another slot may serve
+  // it; the router treats this as fallback-eligible (not a caller error).
+  | 'param_unsupported'
   | 'insufficient_credits'
   | 'unknown';
 
