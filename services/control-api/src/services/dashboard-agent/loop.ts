@@ -436,19 +436,23 @@ function toolResultModelMaxChars(): number {
  * requests over 983,616 characters) and the whole turn dies with a 400.
  *
  * The model sees a valid JSON envelope with a preview and a note; it can run a
- * narrower search or fetch a specific record by id to get the rest.
+ * narrower search or fetch a specific record by id to get the rest. When the
+ * row id is known, the envelope includes it so `read_tool_result` can search or
+ * page the full stored value without another external call.
  */
 export function toolResultContentForModel(
   result: unknown,
   maxChars = toolResultModelMaxChars(),
+  messageId?: string,
 ): string {
   const text = JSON.stringify(result ?? {});
   if (text.length <= maxChars) return text;
   return JSON.stringify({
     truncated: true,
     original_characters: text.length,
+    message_id: messageId ?? null,
     preview: text.slice(0, maxChars),
-    note: 'The full tool result is stored. Re-run a narrower search or fetch a specific item by id if you need more.',
+    note: 'The full tool result is stored. Call read_tool_result with this message_id to search or page through it.',
   });
 }
 
@@ -461,7 +465,7 @@ function toGatewayMessages(messages: Message[]): GatewayMessage[] {
       return {
         role: 'tool',
         tool_call_id: msg.toolCallId ?? '',
-        content: toolResultContentForModel(msg.toolResult),
+        content: toolResultContentForModel(msg.toolResult, toolResultModelMaxChars(), msg.id),
       };
     }
     if (msg.role === 'assistant' && msg.toolCallId) {
