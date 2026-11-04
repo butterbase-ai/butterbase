@@ -50,8 +50,14 @@ export type SkillScriptExecutor = (input: {
  * never receives an `app_id`, and it never returns credentials.
  */
 export type IntegrationReader = (input: {
+  /**
+   * Office discovery uses the same reader for the three org-scoped actions.
+   * Absent means `execute_read`, which keeps every existing caller working.
+   */
+  action?: 'execute_read' | 'list_connected' | 'list_tools';
   organizationId: string;
-  toolSlug: string;
+  toolSlug?: string;
+  toolkit?: string;
   params?: Record<string, unknown>;
   readOnly: boolean;
 }) => Promise<{ content: unknown }>;

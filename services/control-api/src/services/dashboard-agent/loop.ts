@@ -2882,43 +2882,83 @@ async function* runAgentTurnInternal(
 
         // ---- Route: organization-scoped integration read (in-process) ----
         //
-        // `execute_read` is the Office read path: it uses the ORGANIZATION's
-        // connection, accepts no `app_id`, and can never send or change
-        // anything. Every other action falls through to the normal (app-scoped,
-        // approval-gated) MCP path. Without an injected reader the action is
-        // refused rather than degrading to a different integration identity.
+        // `execute_read` and — when an org reader is injected — `list_connected`
+        // and `list_tools` are the Office organization-scoped paths: they use
+        // the ORGANIZATION's connection and accept no `app_id`, and they can
+        // never send or change anything. Every other action falls through to
+        // the normal (app-scoped, approval-gated) MCP path. Without an injected
+        // reader `execute_read` is refused rather than degrading to a different
+        // integration identity; the list actions keep their existing
+        // app-scoped behavior.
         if (tc.name === 'manage_integrations') {
           const integrationArgs = (tc.args ?? {}) as {
             action?: unknown;
             tool_slug?: unknown;
+            toolkit?: unknown;
             params?: unknown;
           };
-          if (
-            typeof integrationArgs.action === 'string'
-            && integrationArgs.action.trim().toLowerCase() === 'execute_read'
-          ) {
+          const action = typeof integrationArgs.action === 'string'
+            ? integrationArgs.action.trim().toLowerCase()
+            : '';
+          const orgScoped = action === 'execute_read'
+            || (typeof input.integrationReader === 'function'
+              && (action === 'list_connected' || action === 'list_tools'));
+          if (orgScoped) {
             toolCallsCount++;
             let payload: { result?: unknown; error?: string };
+            const reader = input.integrationReader;
             const toolSlug = typeof integrationArgs.tool_slug === 'string'
               ? integrationArgs.tool_slug.trim() : '';
-            if (typeof input.integrationReader !== 'function') {
+            const toolkit = typeof integrationArgs.toolkit === 'string'
+              ? integrationArgs.toolkit.trim() : '';
+            if (typeof reader !== 'function') {
               payload = { error: 'integration_reader_unavailable' };
             } else if (!input.organizationId) {
               payload = { error: 'organization_required' };
-            } else if (!toolSlug) {
-              payload = { error: 'tool_slug is required' };
+            } else if (action === 'execute_read') {
+              if (!toolSlug) {
+                payload = { error: 'tool_slug is required' };
+              } else {
+                try {
+                  const params = integrationArgs.params
+                    && typeof integrationArgs.params === 'object'
+                    && !Array.isArray(integrationArgs.params)
+                    ? integrationArgs.params as Record<string, unknown>
+                    : undefined;
+                  const result = await reader({
+                    action: 'execute_read',
+                    organizationId: input.organizationId,
+                    toolSlug,
+                    ...(params ? { params } : {}),
+                    readOnly: input.readOnly === true,
+                  });
+                  payload = { result: result.content };
+                } catch (err) {
+                  payload = { error: err instanceof Error ? err.message : String(err) };
+                }
+              }
+            } else if (action === 'list_tools') {
+              if (!toolkit) {
+                payload = { error: 'toolkit is required' };
+              } else {
+                try {
+                  const result = await reader({
+                    action: 'list_tools',
+                    organizationId: input.organizationId,
+                    toolkit,
+                    readOnly: true,
+                  });
+                  payload = { result: result.content };
+                } catch (err) {
+                  payload = { error: err instanceof Error ? err.message : String(err) };
+                }
+              }
             } else {
               try {
-                const params = integrationArgs.params
-                  && typeof integrationArgs.params === 'object'
-                  && !Array.isArray(integrationArgs.params)
-                  ? integrationArgs.params as Record<string, unknown>
-                  : undefined;
-                const result = await input.integrationReader({
+                const result = await reader({
+                  action: 'list_connected',
                   organizationId: input.organizationId,
-                  toolSlug,
-                  ...(params ? { params } : {}),
-                  readOnly: input.readOnly === true,
+                  readOnly: true,
                 });
                 payload = { result: result.content };
               } catch (err) {
