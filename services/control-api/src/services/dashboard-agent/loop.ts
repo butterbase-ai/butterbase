@@ -1416,7 +1416,7 @@ async function* runAgentTurnInternal(
   const replayHistory = isOperator ? trimOperatorHistory(history) : history;
 
   const messages: GatewayMessage[] = [
-    { role: 'system', content: schemaPromptBlock + getSystemPrompt() + (officeMemoryText ? `\n\n${officeMemoryText}` : '') },
+    { role: 'system', content: schemaPromptBlock + getSystemPrompt({ organizationIntegrations: typeof input.integrationReader === 'function' }) + (officeMemoryText ? `\n\n${officeMemoryText}` : '') },
     ...toGatewayMessages(replayHistory),
   ];
 
@@ -2894,6 +2894,7 @@ async function* runAgentTurnInternal(
           const integrationArgs = (tc.args ?? {}) as {
             action?: unknown;
             tool_slug?: unknown;
+            tool_name?: unknown;
             toolkit?: unknown;
             params?: unknown;
           };
@@ -2908,7 +2909,10 @@ async function* runAgentTurnInternal(
             let payload: { result?: unknown; error?: string };
             const reader = input.integrationReader;
             const toolSlug = typeof integrationArgs.tool_slug === 'string'
-              ? integrationArgs.tool_slug.trim() : '';
+              ? integrationArgs.tool_slug.trim()
+              : typeof integrationArgs.tool_name === 'string'
+                ? integrationArgs.tool_name.trim()
+                : '';
             const toolkit = typeof integrationArgs.toolkit === 'string'
               ? integrationArgs.toolkit.trim() : '';
             if (typeof reader !== 'function') {
