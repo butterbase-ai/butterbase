@@ -168,6 +168,15 @@ describe('the allow tier is the spec list, nothing more', () => {
     // agent will never do, and the duplicate proposals it exists to help avoid
     // would go up, not down.
     'list_pending_decisions',
+    // 2026-11-04, postdating the closed spec list: `read_tool_result` did not
+    // exist on 2026-08-07. It is a READ of the operator's OWN conversation's
+    // stored tool result. The conversation comes from the turn, never from a
+    // model argument, so a model-supplied id can only select a row in the
+    // conversation it is already reading. It reaches no tenant data, makes no
+    // MCP call, and cannot write, approve or execute anything. Same argument
+    // as `list_pending_decisions`, applied to the tool-result rows instead of
+    // the approval queue.
+    'read_tool_result',
   ];
 
   it('exactly these tools are allow-tier', () => {

@@ -57,7 +57,8 @@ import { getSharedDeployTreeStore, type DeployTreeStore } from './deploy-tree-st
 import { readOperatorYoloMode } from './operator-yolo.js';
 import { evaluateOperatorAccess } from './operator-access-policy.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
-import { trimOperatorHistory } from './operator-history.js';
+import { trimOperatorHistory, OPERATOR_HISTORY_MAX_CHARS, OPERATOR_HISTORY_MAX_MESSAGES } from './operator-history.js';
+import { compactReplay } from './context-compaction.js';
 import { getSystemPrompt } from './prompt.js';
 import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
@@ -1433,28 +1434,52 @@ async function* runAgentTurnInternal(
   }
 
   /**
-   * I2: bound what an OPERATOR turn replays.
+   * Bound what an OPERATOR turn replays, and compact before the bound.
    *
    * One operator conversation per org, reused forever, woken ~144x/day —
-   * replaying the whole transcript is a scheduled context-window failure. The
-   * scratchpad and the wake header now carry the continuity, so a suffix is
-   * enough. `trimOperatorHistory` picks a PAIRING-VALID cut (see its header):
-   * it can never emit an assistant `tool_calls` whose result was trimmed away,
-   * nor an orphan `role:'tool'` row — the wedge that bricks an org's operator
+   * replaying the whole transcript is a scheduled context-window failure.
+   *
+   * ORDER MATTERS. Compaction runs on the UNTRIMMED history first, so the
+   * stored summary captures what the 32k trim would otherwise discard. The
+   * trim below is a cost guard on the compacted tail, not the primary
+   * continuity mechanism. `trimOperatorHistory` still owns the cut: it can
+   * never emit an assistant `tool_calls` whose result was trimmed away, nor an
+   * orphan `role:'tool'` row — the wedge that bricks an org's operator
    * permanently.
    *
    * Nothing is deleted; `history` above is still the full stored record, and
    * `turnNumber` is deliberately computed from it so the snapshot-title
    * fallback does not reset when the replay window slides.
    *
-   * FOR A HUMAN CONVERSATION THIS IS THE SAME ARRAY BY IDENTITY. The assistant
-   * replays exactly what it replayed before — `toGatewayMessages(history)`,
-   * every row, same order. Do not "simplify" this into an unconditional call.
+   * For a human conversation `compactReplay` returns the same array by identity
+   * when the history is under budget, and `replay.messages` is that array —
+   * the assistant replays exactly what it replayed before. Do not "simplify"
+   * this into an unconditional trim.
    */
-  const replayHistory = isOperator ? trimOperatorHistory(history) : history;
+  const operatorBudget = Number(process.env.DASHBOARD_AGENT_OPERATOR_CONTEXT_BUDGET_CHARS ?? 150_000);
+  const operatorTail = Number(process.env.DASHBOARD_AGENT_OPERATOR_COMPACT_TAIL_CHARS ?? OPERATOR_HISTORY_MAX_CHARS);
+  const replay = await compactReplay({
+    pool: input.pool,
+    conversationId: input.conversationId,
+    messages: history, // untrimmed: the summary must see what the trim would drop
+    gateway: createGatewayChat(
+      input.jwt,
+      officeOrganizationId ?? null,
+      process.env.DASHBOARD_AGENT_COMPACT_MODEL,
+    ),
+    budgetChars: isOperator ? operatorBudget : undefined,
+    tailChars: isOperator ? operatorTail : undefined,
+  });
+  const replayHistory = isOperator
+    ? trimOperatorHistory(replay.messages, {
+        maxChars: OPERATOR_HISTORY_MAX_CHARS,
+        maxMessages: OPERATOR_HISTORY_MAX_MESSAGES,
+      })
+    : replay.messages;
+  const summaryBlock = replay.summary ? `\n\n# Conversation summary so far\n${replay.summary}` : '';
 
   const messages: GatewayMessage[] = [
-    { role: 'system', content: schemaPromptBlock + getSystemPrompt() + (officeMemoryText ? `\n\n${officeMemoryText}` : '') },
+    { role: 'system', content: schemaPromptBlock + getSystemPrompt() + (officeMemoryText ? `\n\n${officeMemoryText}` : '') + summaryBlock },
     ...toGatewayMessages(replayHistory),
   ];
 

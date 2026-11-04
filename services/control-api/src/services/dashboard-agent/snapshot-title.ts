@@ -22,7 +22,11 @@ export type SnapshotTitleGateway = {
  * against the AI gateway, using the same AI_GATEWAY_URL env var and bearer
  * JWT pattern as the main loop's streamChatCompletion.
  */
-export function createGatewayChat(jwt: string, organizationId: string | null = null): SnapshotTitleGateway {
+export function createGatewayChat(
+  jwt: string,
+  organizationId: string | null = null,
+  model = 'anthropic/claude-haiku-4.5',
+): SnapshotTitleGateway {
   return {
     async chat({ prompt, timeoutMs }) {
       const url = `${process.env.AI_GATEWAY_URL ?? 'http://localhost:3000'}/v1/chat/completions`;
@@ -40,7 +44,7 @@ export function createGatewayChat(jwt: string, organizationId: string | null = n
             ...(organizationId ? { 'X-Organization-Id': organizationId } : {}),
           },
           body: JSON.stringify({
-            model: 'anthropic/claude-haiku-4.5',
+            model,
             messages: [{ role: 'user', content: prompt }],
             stream: false,
           }),
