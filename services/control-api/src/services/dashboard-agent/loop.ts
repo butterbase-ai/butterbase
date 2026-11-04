@@ -28,8 +28,9 @@ import { persistPreparedApproval, findParkedProposalIntent } from './proposal-st
 import { SUBSTRATE_ESCALATION_TOOL } from './approvals-store.js';
 import { assertOperatorKeyArguments } from '../locked-key-access.js';
 import { createHash, randomUUID } from 'crypto';
-import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, SKILL_CREATOR_TOOL, RUN_SKILL_SCRIPT_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { appendMessage, listMessages, getToolResultMessage, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, isReadToolResultTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, SKILL_CREATOR_TOOL, RUN_SKILL_SCRIPT_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { parseReadToolResultArgs, readToolResultText } from './read-tool-result.js';
 import type { ActiveSkillContext, IntegrationReader, SkillCreatorExecutor, SkillScriptExecutor } from './skill-types.js';
 import { createBuildHydrator, type BuildHydration } from './build-hydration.js';
 import { callMcpTool } from './mcp-client.js';
@@ -2486,6 +2487,43 @@ async function* runAgentTurnInternal(
                 });
               }
               payload = { result: { pending, count: pending.length } };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        /**
+         * ---- Route: read_tool_result (in-process) -------------------------
+         *
+         * The handle that makes a 64k-truncated result recoverable. The row is
+         * resolved with the turn's conversation id, never a model argument, so
+         * an id from another conversation is indistinguishable from a missing
+         * one. Read-only; it cannot write, approve, or dispatch anything.
+         */
+        if (isReadToolResultTool(tc.name)) {
+          toolCallsCount++;
+          const parsed = parseReadToolResultArgs(tc.args);
+          let payload: { result?: unknown; error?: string };
+          if (!parsed.ok) {
+            payload = { error: parsed.error };
+          } else {
+            try {
+              const row = await getToolResultMessage(input.pool, input.conversationId, parsed.value.messageId);
+              payload = row
+                ? { result: readToolResultText(row.toolResult, parsed.value) }
+                : { error: 'tool_result_not_found' };
             } catch (err) {
               payload = { error: err instanceof Error ? err.message : String(err) };
             }
