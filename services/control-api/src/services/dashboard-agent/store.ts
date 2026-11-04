@@ -937,3 +937,49 @@ export async function listMessages(
     createdAt: new Date(row.created_at),
   }));
 }
+
+/**
+ * Fetch one stored tool result by its row id, scoped to the conversation.
+ *
+ * The only caller is the in-process `read_tool_result` tool. `$2` is the
+ * turn's conversation id, never a model argument, so a model-supplied id can
+ * select a row only inside the conversation it is already reading.
+ */
+export async function getToolResultMessage(
+  pool: pg.Pool,
+  conversationId: string,
+  messageId: string,
+): Promise<{ id: string; toolResult: unknown } | null> {
+  const result = await pool.query(
+    `SELECT id, tool_result
+       FROM dashboard_agent_messages
+      WHERE id = $1 AND conversation_id = $2 AND role = 'tool'`,
+    [messageId, conversationId],
+  );
+  const row = result.rows[0];
+  return row ? { id: row.id, toolResult: row.tool_result ?? null } : null;
+}
+
+/**
+ * Resolve `tool_call_id -> message row id` for the current conversation.
+ *
+ * Mid-turn compaction stubs old tool results to their stored row; a tool
+ * result appended during this turn may not have its id in hand. One scoped
+ * query fills those gaps, so no dispatch route has to remember to record it.
+ */
+export async function getToolMessageIds(
+  pool: pg.Pool,
+  conversationId: string,
+  toolCallIds: string[],
+): Promise<Map<string, string>> {
+  const ids = new Map<string, string>();
+  if (toolCallIds.length === 0) return ids;
+  const result = await pool.query(
+    `SELECT tool_call_id, id
+       FROM dashboard_agent_messages
+      WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = ANY($2::text[])`,
+    [conversationId, toolCallIds],
+  );
+  for (const row of result.rows) ids.set(row.tool_call_id, row.id);
+  return ids;
+}
