@@ -97,6 +97,8 @@ POST /v1/me/substrate/actions/propose
 
 For the capability payload schemas, see [Capability payloads](#capability-payloads).
 
+Reference fields are validated before dispatch: a `record_learning.source_artifact_id`, `record_decision.related_decision_id`, or `record_decision.supersedes` that points at a row that does not exist (or belongs to another organization) is rejected with HTTP 400 `VALIDATION_INVALID_REFERENCE` and a `details.field` naming the offending argument. No action row is written for a rejected reference.
+
 ### List
 
 ```
@@ -111,8 +113,13 @@ GET /v1/me/substrate/actions?status=executed&capability=send_email_draft&limit=2
 | `before` | ISO timestamp | _now_ |
 | `source_app_id` | string | _all_ |
 | `source_rule_id` | string | _all_ |
+| `include_noops` | `true` to include suppressed no-op rows | `false` |
 
 For ledger reads, `pending` is a compatibility alias for `proposed`. Omit `status` to read all states; an empty or unknown value returns HTTP 400 `invalid_action_status`. The alias applies only to reads and does not change action writes or outbox delivery states.
+
+`approved` is a decision fact, not a resting state: a row appears under `status=approved` once a human has approved it (`approved_at` is set), regardless of whether it is still executing, already executed, or failed. `proposed` is the only status that means "awaiting a decision".
+
+A capability can execute successfully without changing anything — an identical `upsert_entity`, or an `update_entity` whose values already match. Those rows are recorded as `executed` with `result.changed: false` and are hidden from ledger reads by default so the ledger stays signal-rich. Pass `include_noops=true` to include them.
 
 ### Approve / reject
 
@@ -131,6 +138,7 @@ Both return the updated action row. Approving or rejecting an action that is not
 | GET | /v1/me/substrate/entities | List entities |
 | GET | /v1/me/substrate/entities/\{entity_id} | Fetch one entity |
 | PATCH | /v1/me/substrate/entities/\{entity_id} | Update an entity (routed through propose) |
+| GET | /v1/me/substrate/removals | Audit log of hard entity removals |
 
 ```
 GET /v1/me/substrate/entities?type=person&q=alice&limit=20&count=true
@@ -142,6 +150,24 @@ GET /v1/me/substrate/entities?type=person&q=alice&limit=20&count=true
 | `q` | string (display-name search) | _none_ |
 | `limit` | int (1–200) | 50 |
 | `count` | `true` to include `total` in response | `false` |
+| `include_deleted` | `true` to include soft-deleted entities (with `deleted_at` set) | `false` |
+
+`retire_entity` soft-deletes an entity by stamping `deleted_at`; retired entities are hidden from entity reads by default but their rows and links remain for history. Pass `include_deleted=true` to list them, and check the `deleted_at` field on any entity to tell retired from live.
+
+### Removals
+
+```
+GET /v1/me/substrate/removals?limit=50&before=2026-05-28T00:00:00Z
+```
+
+Every row hard-removed from the `entities` table — by `delete_entity`, `merge_entities`, or out-of-band SQL — is captured by an `AFTER DELETE` trigger in `entity_removals`. Soft deletes (`retire_entity`) do not remove the row; they are visible on the entity itself as `deleted_at`. Each record keeps a full snapshot of the removed row, when it was removed, and the `action_id` that caused it (`null` for out-of-band deletes); follow the action id into the ledger to see the proposal payload, including its reason.
+
+| Query param | Type | Default |
+|---|---|---|
+| `limit` | int (1–200) | 50 |
+| `before` | ISO timestamp (keyset cursor) | _now_ |
+
+The response is `{ removals, next_before? }`; `next_before` is present only when a full page was returned.
 
 ## Source artifacts
 
@@ -400,22 +426,28 @@ upsert_entity
 
 update_entity
   required: id (string)
-  optional: display_name (string), primary_email (string, email), attrs (object)
+  optional: display_name (string), primary_email (string, email), attrs (object), canonical_keys (object)
   default_policy: auto
   note: replaces attrs wholesale; prefer patch_entity for partial updates
 
 patch_entity
   required: id (string)
-  optional: display_name (string), primary_email (string, email), attrs_patch (object, RFC 7396 merge-patch), if_updated_at (string, datetime, optimistic lock)
+  optional: display_name (string), primary_email (string, email), attrs_patch (object, RFC 7396 merge-patch), canonical_keys_patch (object), if_updated_at (string, datetime, optimistic lock)
   default_policy: auto
 
 merge_entities
   required: loser_id (string), winner_id (string), reason (string)
   default_policy: approval_required
 
+retire_entity
+  required: id (string), reason (string)
+  default_policy: auto
+  note: soft delete — stamps deleted_at; reversible, and preferred over delete_entity. Hidden from reads unless include_deleted=true.
+
 delete_entity
   required: id (string), reason (string)
   default_policy: approval_required
+  note: hard delete, not recoverable; recorded in entity_removals
 ```
 
 ### Source artifacts

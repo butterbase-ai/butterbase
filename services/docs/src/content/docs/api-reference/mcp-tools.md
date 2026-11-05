@@ -285,7 +285,7 @@ For the full HTTP request/response shapes and end-to-end video example, see the 
 | `list_available` | List curated toolkits or search the full catalog. |
 | `list_connected` | List all users with connected accounts for an app. |
 | `list_tools` | List executable tools for a connected toolkit. |
-| `execute_action` | Execute a tool on behalf of a user. |
+| `execute_action` | Execute a tool on behalf of a user. Pass the tool as `tool_name`; the alias `tool_slug` is still accepted (precedence: `tool_name`). `execute_read` is Office-only. |
 
 ## Agents
 
@@ -403,8 +403,10 @@ Costs vary by which provider the operator routes the action to. Numbers below ar
 | `exists` | Check if a key exists |
 | `ttl` | Get remaining TTL of a key in seconds |
 | `expire` | Set a TTL on an existing key |
-| `mget` | Get values of multiple keys at once |
+| `mget` | Get values of multiple keys at once. Results are returned per key (`{ key, value }` or `{ key, error }`), in the order requested |
 | `mset` | Set multiple key-value pairs at once |
+
+`get` and `mget` accept `raw: true` to return the stored JSON text without decoding it. Writes (`set`, `setnx`, `setex`, `mset`) reject `raw: true` with `raw_unsupported_for_write`.
 
 ### manage_kv example
 

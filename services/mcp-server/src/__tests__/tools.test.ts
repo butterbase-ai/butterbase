@@ -226,6 +226,21 @@ describe('MCP Server Tools', () => {
     expect(text).toContain('Butterbase');
     expect(text).toContain('Declarative schema');
   });
+
+  it('butterbase_docs documents ctx.kv and the compare-and-delete lock release', async () => {
+    const { client } = await createConnectedPair();
+    const out = await client.callTool({
+      name: 'butterbase_docs',
+      arguments: { topic: 'functions' },
+    });
+    const text = (out.content as Array<{ type: string; text?: string }>)
+      .map((c) => c.text ?? '')
+      .join('\n');
+    expect(text).toContain('ctx.kv.setnx');
+    expect(text).toContain('ctx.kv.cas');
+    expect(text).toContain('ctx.kv.del');
+    expect(text).toContain('mget');
+  });
 });
 
 describe('manage_ai decisions', () => {

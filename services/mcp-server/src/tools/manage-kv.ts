@@ -76,7 +76,7 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
       write: z.enum(['public', 'authed', 'owner', 'deny']).optional().describe('Write access role for expose'),
       by: z.number().optional().describe('Amount to increment/decrement (default 1, for incr/decr)'),
       ephemeral: z.boolean().optional().describe('Store in ephemeral DB (shorter-lived, for set/setnx)'),
-      raw: z.boolean().optional().describe('Store/retrieve raw string without JSON wrapping (for set/get)'),
+      raw: z.boolean().optional().describe('Return the stored JSON text without decoding (get/mget only). Writes reject raw=true.'),
       touch: z.boolean().optional().describe('Reset TTL to original on read (for get)'),
     },
     {
@@ -230,9 +230,19 @@ Warning: "flush" deletes ALL keys and cannot be undone. Always pass confirm: tru
         case 'mget': {
           const err = need(args.keys?.length, '"keys" array is required for mget.');
           if (err) return err;
-          const ops = args.keys!.map((k) => ({ op: 'get', key: k }));
-          const result = await apiPost(`${base}/_batch`, { ops });
-          return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
+          const ops = args.keys!.map((k) => ({
+            op: 'get',
+            key: k,
+            ...(args.raw === true ? { raw: true } : {}),
+          }));
+          const result = await apiPost(`${base}/_batch`, { ops }) as {
+            results?: Array<Record<string, unknown>>;
+          };
+          const results = (result.results ?? []).map((entry, index) => ({
+            key: args.keys![index],
+            ...entry,
+          }));
+          return { content: [{ type: 'text' as const, text: JSON.stringify({ results }, null, 2) }] };
         }
         case 'mset': {
           const err = need(args.entries && Object.keys(args.entries).length > 0, '"entries" object is required for mset.');

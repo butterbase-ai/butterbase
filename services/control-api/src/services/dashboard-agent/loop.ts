@@ -638,6 +638,21 @@ function proposalInvalidPayload(error: unknown): { code: 'proposal_invalid'; rea
   };
 }
 
+/** A sandbox infrastructure failure must read as "verification did not
+ *  happen", not as a compile error or a generic tool failure. */
+function sandboxFailurePayload(err: unknown): {
+  error: string;
+  result?: { ok: false; code: string; verification: 'unavailable'; remediation: string };
+} {
+  const code = (err as { code?: unknown })?.code;
+  const remediation = (err as { remediation?: unknown })?.remediation;
+  const message = err instanceof Error ? err.message : String(err);
+  if ((code === 'sandbox_auth_failed' || code === 'sandbox_unavailable') && typeof remediation === 'string') {
+    return { error: message, result: { ok: false, code, verification: 'unavailable', remediation } };
+  }
+  return { error: message };
+}
+
 // ---------------------------------------------------------------------------
 // Main export: runAgentTurn
 // ---------------------------------------------------------------------------
@@ -1591,6 +1606,7 @@ async function* runAgentTurnInternal(
         let proposalInput: ProposalInput | null = null;
         let proposalError: string | null = null;
         let proposalInvalid: ReturnType<typeof proposalInvalidPayload> | null = null;
+        let proposalIncompleteField: string | undefined;
         const replyProposal = async (payload: unknown) => {
           await appendMessage(input.pool, input.conversationId, { role: 'assistant', content: i === 0 ? assistantText : '', toolCallId: originalCall.id, toolName: originalCall.name, toolArgs: originalCall.args, toolResult: null, modelUsed: input.model });
           await appendMessage(input.pool, input.conversationId, { role: 'tool', content: '', toolCallId: originalCall.id, toolName: originalCall.name, toolArgs: originalCall.args, toolResult: payload });
@@ -1617,8 +1633,13 @@ async function* runAgentTurnInternal(
         if (originalCall.name === PROPOSE_ACTION_TOOL) {
           const parsed = ProposalInputSchema.safeParse(originalCall.args);
           if (!structuredProposals || !allowedToolNames.has(PROPOSE_ACTION_TOOL)) proposalError = 'proposal_unavailable';
-          else if (!parsed.success) proposalError = 'proposal_incomplete';
-          else {
+          else if (!parsed.success) {
+            proposalError = 'proposal_incomplete';
+            const issue = parsed.error.issues[0];
+            const path = issue?.code === 'unrecognized_keys' ? [issue.keys[0] ?? ''] : (issue?.path ?? []);
+            const value = path.join('.');
+            proposalIncompleteField = /^[A-Za-z0-9_.\[\]]{1,80}$/.test(value) ? value : undefined;
+          } else {
             proposalInput = parsed.data;
             try {
               const validated = await validateProposalOperation(proposalInput.operation.tool, proposalInput.operation.arguments, {
@@ -1639,6 +1660,7 @@ async function* runAgentTurnInternal(
             const payload = {
               code: proposalError,
               message: 'Supply a complete, available operation with a reason and typed references.',
+              ...(proposalError === 'proposal_incomplete' && proposalIncompleteField ? { field: proposalIncompleteField } : {}),
               ...(proposalError === 'proposal_invalid' && proposalInvalid ? proposalInvalid : {}),
             };
             await replyProposal(payload);
@@ -2631,7 +2653,7 @@ async function* runAgentTurnInternal(
               // ERRORS, not build reports: telling the model "your build
               // failed" when the source never reached the sandbox would send
               // it looking for a bug in code that never compiled.
-              payload = { error: err instanceof Error ? err.message : String(err) };
+              payload = sandboxFailurePayload(err);
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
@@ -2686,7 +2708,7 @@ async function* runAgentTurnInternal(
               const r = await input.codeExecutor(rcArgs.code);
               payload = { result: r };
             } catch (err) {
-              payload = { error: err instanceof Error ? err.message : String(err) };
+              payload = sandboxFailurePayload(err);
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });

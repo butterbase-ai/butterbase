@@ -2,6 +2,7 @@
 import type { FunctionMetadata } from "./function-loader.ts";
 import { cronOriginForExecution } from './cron-origin.ts';
 import { createCronFetch } from './cron-fetch.ts';
+import { kvMgetValues } from './kv-batch.ts';
 
 // Platform-owned do-invoker Worker: inlined into generated ctx source so
 // user code cannot read them via Deno.env or ctx.env.
@@ -794,6 +795,7 @@ export function buildWorkerCode(
       kv: (() => {
         const __kvBase = ${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL"))};
         const __kvRoot = __kvBase + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/kv";
+        const __kvMgetValues = ${kvMgetValues.toString()};
         const __kvHeaders = {
           authorization: "Bearer " + ${JSON.stringify(metadata.internal_fn_key || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
           "content-type": "application/json",
@@ -890,7 +892,7 @@ export function buildWorkerCode(
             const res = await __kvCall("POST", "_batch", { ops });
             if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
             const { results } = await res.json();
-            return results.map((r) => ("error" in r ? null : r.value));
+            return __kvMgetValues(keys, results);
           },
           async mset(entries, opts) {
             await Promise.all(
