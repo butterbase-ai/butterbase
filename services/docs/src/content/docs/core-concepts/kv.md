@@ -237,6 +237,8 @@ await ctx.kv.mset(
 );
 ```
 
+`mget` returns values in the same order as the keys. A missing key is `null`; a present key whose stored value cannot be decoded raises a `KvError` naming that key instead of returning `null`. The MCP `manage_kv` `mget` action returns `{ key, value }` / `{ key, error }` entries, and `get`/`mget` accept `raw: true` to return the stored JSON text without decoding (writes reject it).
+
 ## Error handling
 
 | Error class | HTTP status | Meaning |

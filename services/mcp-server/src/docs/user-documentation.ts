@@ -982,6 +982,33 @@ Function-specific environment variables (set via \`envVars\` when deploying) are
 
 **Important:** Use \`ctx.env\`, not \`Deno.env.get()\`. System environment variables (like database credentials) are available via \`Deno.env.get()\`, but function-specific env vars are isolated in \`ctx.env\` to prevent conflicts.
 
+**Key-value store: \`ctx.kv\`:**
+Functions share the app's KV store through \`ctx.kv\`. Methods: \`get\`, \`set\`, \`del\`, \`incr\`, \`decr\`, \`setnx\`, \`cas\`, \`exists\`, \`ttl\`, \`expire\`, \`mget\`, \`mset\`, \`expose\`, \`unexpose\`, \`listRules\`.
+
+- **Values round-trip through JSON.** \`set(key, value)\` stores any JSON value and \`get(key)\` returns the decoded value; a missing key is \`null\`. There is no raw mode inside the runtime — use the MCP \`manage_kv\` tool when you need the stored JSON text.
+- **TTL is fixed at write and does not slide.** \`set(key, value, { ttl: seconds })\` and \`setnx(key, value, { ttl })\` set it; \`expire(key, seconds)\` moves it; \`ttl(key)\` returns seconds, \`null\` when the key has no expiry, or \`null\` when absent.
+- **Atomic primitives.** \`setnx(key, value)\` writes only when the key is absent and returns \`true\` when it wrote, \`false\` otherwise. \`cas(key, expected, next)\` swaps only when the current value equals \`expected\` and returns \`true\` when it swapped.
+- **Release a lock with compare-and-delete, not get-then-delete.** \`get(key) === token\` followed by \`del(key)\` is race-prone: the TTL can expire between the two calls and a new holder's lock can be deleted. Use \`cas(key, token, null)\` and only call \`del\` when the swap succeeded.
+- **\`mget(keys)\` returns values in the same order as the keys.** A missing key is \`null\`. A present key whose stored value cannot be decoded raises a \`KvError\` naming the key — it is never reported as \`null\`.
+- **JWT/anon access** is granted per pattern with \`expose(pattern, { read, write })\`; \`listRules()\` shows the current rules.
+
+\`\`\`javascript
+export default async function handler(request, ctx) {
+  const lockKey = 'lock:daily-sync';
+  const token = crypto.randomUUID();
+  const acquired = await ctx.kv.setnx(lockKey, token, { ttl: 900 });
+  if (!acquired) return new Response('already running', { status: 409 });
+  try {
+    // ... work ...
+    const [a, b] = await ctx.kv.mget(['sync:a', 'sync:b']);
+    return Response.json({ a, b });
+  } finally {
+    const released = await ctx.kv.cas(lockKey, token, null);
+    if (released) await ctx.kv.del(lockKey);
+  }
+}
+\`\`\`
+
 ### Row-Level Security in Functions
 
 Functions respect RLS policies based on how they're invoked:
