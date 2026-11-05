@@ -285,7 +285,7 @@ For the full HTTP request/response shapes and end-to-end video example, see the 
 | `list_available` | List curated toolkits or search the full catalog. |
 | `list_connected` | List all users with connected accounts for an app. |
 | `list_tools` | List executable tools for a connected toolkit. |
-| `execute_action` | Execute a tool on behalf of a user. |
+| `execute_action` | Execute a tool on behalf of a user. Pass the tool as `tool_name`; the alias `tool_slug` is still accepted (precedence: `tool_name`). `execute_read` is Office-only. |
 
 ## Agents
 

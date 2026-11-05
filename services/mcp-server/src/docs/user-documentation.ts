@@ -3668,7 +3668,7 @@ Browse available integrations. Returns the curated list by default; pass \`searc
 
 #### manage_integrations (action: "execute_action")
 
-Execute an action on a user's connected account. The integration must be configured for the app, and the user must have a connected account.
+Execute an action on a user's connected account. The integration must be configured for the app, and the user must have a connected account. Pass the tool as \`tool_name\`; the older alias \`tool_slug\` is still accepted, and when both are sent \`tool_name\` wins. \`execute_read\` tools are Office-only; app-scoped calls should use the toolkit's regular action tools.
 
 \`\`\`json
 {
@@ -3936,6 +3936,7 @@ Agent-proposed side-effecting actions (e.g. \`send_email_draft\`) always require
 | POST   | /v1/me/substrate/actions/{id}/reject | Reject a pending action |
 | GET    | /v1/me/substrate/entities | List / search entities |
 | GET    | /v1/me/substrate/entities/{id} | Fetch one entity |
+| GET    | /v1/me/substrate/removals | Audit log of hard entity removals |
 | GET    | /v1/me/substrate/memory?q=… | Full-text search (or list-all when q omitted) across decisions/commitments/learnings/source_artifacts |
 | GET    | /v1/me/substrate/memory/list | Chronological browse with structural filters (kinds, source_artifact_id, superseded, keyset pagination) |
 | GET    | /v1/me/substrate/source-artifacts[…] | List / fetch source artifacts (meeting transcripts, email threads, documents) |
@@ -3946,6 +3947,12 @@ Agent-proposed side-effecting actions (e.g. \`send_email_draft\`) always require
 | WS     | /v1/me/substrate/stream | Live push of every ledger / entity / rule / firing change |
 
 Ledger status filters accept \`proposed\`, \`approved\`, \`rejected\`, \`executing\`, \`executed\`, \`failed\`, and \`reverted\`. For reads only, \`pending\` is an alias for \`proposed\`. Omit status for all states; an empty or unknown HTTP filter returns 400 \`invalid_action_status\`, and MCP \`manage_substrate\` action \`list_actions\` rejects it during argument validation. The alias does not change action writes or outbox delivery states.
+
+\`approved\` is a decision fact, not a resting state: a row appears under \`status=approved\` once a human approved it (\`approved_at\` is set), whether it is still executing, already executed, or failed. \`proposed\` is the only status that means "awaiting a decision". No-op rows — an identical \`upsert_entity\`, an \`update_entity\` whose values already match — are recorded as \`executed\` with \`result.changed: false\` and hidden from \`list_actions\` by default; pass \`include_noops: true\` to include them.
+
+Entity reads exclude soft-deleted rows by default. \`retire_entity\` stamps \`deleted_at\`; pass \`include_deleted: true\` on \`find_entities\` to include retired rows. \`list_removals\` returns the \`entity_removals\` audit log — every hard-removed entity row (\`delete_entity\`, \`merge_entities\`, or out-of-band SQL), with a snapshot of the removed row and the ledger \`action_id\` that caused it (\`null\` for out-of-band deletes). Soft deletes are visible on the entity as \`deleted_at\` instead.
+
+Propose validates reference fields before dispatch: a dangling \`source_artifact_id\`, \`related_decision_id\`, or \`supersedes\` returns HTTP 400 \`VALIDATION_INVALID_REFERENCE\` with \`details.field\`; the MCP tool surfaces the same error body. Argument validation errors from \`manage_substrate\` include \`field\` naming the offending top-level argument, including unknown keys.
 
 ### Propose an action
 
@@ -4055,8 +4062,8 @@ All substrate operations are exposed through a single MCP tool: \`manage_substra
 
 Action groups:
 - **Writes:** \`propose\`, \`approve\`, \`reject\`. All substrate writes (decisions, commitments, learnings, entities, source artifacts) go through \`propose\` with the appropriate \`capability\`.
-- **Ledger:** \`list_actions\`, \`get_action\`.
-- **Entities:** \`find_entities\`, \`get_entity\`.
+- **Ledger:** \`list_actions\`, \`get_action\`, \`list_removals\` (hard entity-removal audit log).
+- **Entities:** \`find_entities\`, \`get_entity\`. Pass \`include_deleted: true\` on \`find_entities\` to include soft-deleted rows.
 - **Source artifacts:** \`list_source_artifacts\`, \`get_source_artifact\`. Writes use \`propose\` with \`capability: "upsert_source_artifact"\`.
 - **Memory:** \`search_memory\` — FTS-ranked search; params: \`q\` (optional; omit or pass \`*\` to list the most recent items by \`updated_at DESC\`, no FTS ranking), \`kinds\` (subset of \`decisions\`, \`commitments\`, \`learnings\`, \`source_artifacts\`), \`limit\`, \`match\` (\`and\` [default] | \`or\` | \`phrase\`). Each result row includes \`source_artifact_id\` (back-pointer to the source artifact, nullable), \`supersedes\` (replaced decision ID, only on \`kind: 'decision'\`), and \`status\` (\`active\`/\`superseded\`/\`reversed\`/\`expired\` for decisions; \`proposed\`/\`confirmed\`/\`fulfilled\`/\`expired\`/\`broken\`/etc. for commitments; \`null\` for learnings and source_artifacts). \`list_memory\` — chronological browse (no FTS); params: \`kinds\`, \`source_artifact_id\` (restrict to rows linked to this artifact; source_artifact rows excluded when set), \`superseded\` (boolean; \`false\` excludes superseded decisions and expired commitments), \`before\` (ISO timestamp keyset cursor from \`next_before\`), \`limit\` (1–100, default 25). Returns \`{ results, next_before }\`.
 
@@ -4079,6 +4086,7 @@ Critical asymmetry: \`record_decision\` auto-approves, but \`record_principle\`,
 | record_principle | approval_required | no | Mutates policy layer |
 | supersede_decision | approval_required | no | Mutates policy layer |
 | retire_principle | approval_required | no | Mutates policy layer |
+| retire_entity | auto | yes | Soft delete: sets deleted_at; hidden from reads unless include_deleted |
 | delete_entity | approval_required | no | Hard delete, not recoverable |
 | merge_entities | approval_required | no | Loser becomes an alias |
 | bulk_revert_actions | approval_required | no | Up to 200 actions; per-action failures collected, not raised |
@@ -4146,12 +4154,14 @@ update_entity
   display_name?: string
   primary_email?: string  (email)
   attrs?: object
+  canonical_keys?: object  (replaces canonical_keys wholesale)
 
 patch_entity
   id: string
   display_name?: string
   primary_email?: string  (email)
   attrs_patch?: object  (RFC 7396 merge-patch; null value removes a key)
+  canonical_keys_patch?: object  (RFC 7396 merge-patch over canonical_keys)
   if_updated_at?: string  (datetime, optimistic concurrency lock)
 
 merge_entities
@@ -4159,9 +4169,15 @@ merge_entities
   winner_id: string
   reason: string
 
+retire_entity
+  id: string
+  reason: string
+  note: soft delete (sets deleted_at); reversible; preferred over delete_entity
+
 delete_entity
   id: string
   reason: string
+  note: hard delete; recorded in entity_removals
 
 upsert_source_artifact
   kind: string

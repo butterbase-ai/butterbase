@@ -72,7 +72,8 @@ A non-obvious asymmetry that has tripped up agent authors: **`record_decision` a
 | `record_principle` | approval_required | no | no | Record a durable principle used by the policy engine. Requires human approval. |
 | `supersede_decision` | approval_required | no | no | Mark an existing decision superseded and insert a replacement. Requires human approval. |
 | `retire_principle` | approval_required | no | no | Set a principle to `status=expired`. Requires human approval. |
-| `delete_entity` | approval_required | no | no | Hard-delete an entity. Not reversible. |
+| `retire_entity` | auto | yes | no | Soft-delete an entity by setting `deleted_at`. Hidden from reads unless `include_deleted=true`. |
+| `delete_entity` | approval_required | no | no | Hard-delete an entity. Not reversible. Recorded in `entity_removals`. |
 | `merge_entities` | approval_required | no | no | Collapse a duplicate entity into a survivor via alias. Not reversible. |
 | `bulk_revert_actions` | approval_required | no | no | Revert up to 200 ledger actions in one call. Per-action failures are collected, not raised. |
 | `send_email_draft` | approval_required | no | no | Record an intended email draft. Side-effecting; always requires approval for agent proposers. |
@@ -89,7 +90,7 @@ Dedup order: **`id` > `canonical_keys` > `primary_email` > insert new**.
 - Else if you pass non-empty `canonical_keys`, substrate looks up an entity of the same type whose canonical_keys contain every key/value pair you sent (JSONB `@>`). On hit: update and return `was_insert: false`.
 - Else if you pass `primary_email`, substrate looks up by `(type, lower(primary_email))`. On hit: update. On insert, substrate **auto-promotes** `primary_email` into `canonical_keys.email` so future calls can dedup either way.
 
-Race-safety: primary_email lookups are protected by a partial unique index. Canonical_keys-only lookups are best-effort — two near-simultaneous identical writes can still race; clean up with `merge_entities`.
+Race-safety: primary_email lookups are protected by a partial unique index, and canonical-key upserts are serialized with an advisory lock keyed on the organization, entity type and key set, so concurrent identical writes converge on one entity. Uniqueness is not enforced on `canonical_keys` itself — duplicates that predate the lock can still exist, and are repaired with `update_entity` (pass `canonical_keys`) or `merge_entities`.
 
 ### Patch (`patch_entity`)
 
@@ -125,6 +126,16 @@ Semantics:
 
 - One ledger action per merge. `reversible: false` — undoing a merge means re-creating the loser, which the platform won't do for you.
 
+### Retire (`retire_entity`)
+
+Soft delete. Stamps `deleted_at` on the entity and leaves every row and link in place; a `reason` is required. Default policy `auto`, reversible — reverting restores the previous `deleted_at` (usually `null`).
+
+```ts
+await ctx.substrate.propose('retire_entity', { id: 'ent_…', reason: 'left the company' });
+```
+
+Retired entities are excluded from entity reads by default; pass `include_deleted=true` (MCP `manage_substrate` action `find_entities`) to include them. Prefer `retire_entity` over `delete_entity` whenever the removal might need undoing or explaining later.
+
 ### Delete (`delete_entity`)
 
 Hard delete, not reversible. Requires approval by default.
@@ -133,9 +144,9 @@ Hard delete, not reversible. Requires approval by default.
 await ctx.substrate.deleteEntity('ent_…', 'manual cleanup');
 ```
 
-Prefer `merge_entities` when collapsing duplicates (preserves alias resolution). Use `delete_entity` only when the entity is genuinely garbage with no inbound references worth preserving.
+Prefer `merge_entities` when collapsing duplicates (preserves alias resolution). Use `delete_entity` only when the entity is genuinely garbage with no inbound references worth preserving, and prefer `retire_entity` when you might need the row back.
 
-For soft delete, patch the entity instead: `ctx.substrate.patchEntity(id, { deleted_at: new Date().toISOString() })` and filter on read.
+Every row that is hard-removed from `substrate.entities` — by `delete_entity`, `merge_entities`, or out-of-band SQL — is captured in `substrate.entity_removals` with a snapshot of the entity and the ledger `action_id` that caused it (`null` when it happened outside the ledger). `retire_entity` does not remove the row, so its audit is the entity's own `deleted_at`. Read the removal log with `GET /v1/me/substrate/removals` or MCP `manage_substrate` action `list_removals`.
 
 ### Idempotent proposals
 
