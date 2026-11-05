@@ -238,6 +238,14 @@ describe('structured proposal gate', () => {
     expect(refusal.result.message).toContain('"arguments"');
     expect(refusal.result.message).toContain('"reason"');
   });
+  it('names reason when a proposal input fails its own schema', async () => {
+    install();
+    oneToolCallThenStop('propose_action', { operation, reason: 'x'.repeat(2001) });
+    const events = await collect(runAgentTurn(operatorInput()));
+    const result = events.find((event: any) => event.type === 'tool_result' && event.result?.code === 'proposal_incomplete') as any;
+    expect(result).toMatchObject({ result: { code: 'proposal_incomplete', field: 'reason' } });
+  });
+
   it('returns a safe field diagnostic when proposal validation rejects arguments', async () => {
     install();
     mockValidateRegistered.mockRejectedValueOnce(Object.assign(new Error('tool_arguments_invalid'), {
