@@ -300,6 +300,29 @@ describe('build_app — dispatch', () => {
     });
   });
 
+  it('reports a sandbox auth failure as verification unavailable', async () => {
+    oneToolCallThenStop(OPERATOR_BUILD_TOOL, { app_id: APP });
+    const { cache, buildHydratorFactory } = withTree();
+    const buildExecutor = vi.fn(async () => {
+      throw Object.assign(new Error('Unauthorized'), {
+        code: 'sandbox_auth_failed',
+        remediation: 'Sandbox verification is unavailable; do not assume the code ran.',
+      });
+    }) as unknown as BuildExecutor;
+
+    const events = await collect(runAgentTurn(
+      operatorInput({ buildExecutor }),
+      { cache, buildHydratorFactory },
+    ));
+
+    expect(resultOf(events)!.error).toContain('Unauthorized');
+    expect(resultOf(events)!.result).toMatchObject({
+      ok: false,
+      code: 'sandbox_auth_failed',
+      verification: 'unavailable',
+    });
+  });
+
   it('A RED BUILD IS A RESULT, not a turn failure', async () => {
     // The whole point of the phase. Losing the turn on a compile error would
     // throw away everything the operator did before it.

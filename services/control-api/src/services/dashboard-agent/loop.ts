@@ -638,6 +638,21 @@ function proposalInvalidPayload(error: unknown): { code: 'proposal_invalid'; rea
   };
 }
 
+/** A sandbox infrastructure failure must read as "verification did not
+ *  happen", not as a compile error or a generic tool failure. */
+function sandboxFailurePayload(err: unknown): {
+  error: string;
+  result?: { ok: false; code: string; verification: 'unavailable'; remediation: string };
+} {
+  const code = (err as { code?: unknown })?.code;
+  const remediation = (err as { remediation?: unknown })?.remediation;
+  const message = err instanceof Error ? err.message : String(err);
+  if ((code === 'sandbox_auth_failed' || code === 'sandbox_unavailable') && typeof remediation === 'string') {
+    return { error: message, result: { ok: false, code, verification: 'unavailable', remediation } };
+  }
+  return { error: message };
+}
+
 // ---------------------------------------------------------------------------
 // Main export: runAgentTurn
 // ---------------------------------------------------------------------------
@@ -2638,7 +2653,7 @@ async function* runAgentTurnInternal(
               // ERRORS, not build reports: telling the model "your build
               // failed" when the source never reached the sandbox would send
               // it looking for a bug in code that never compiled.
-              payload = { error: err instanceof Error ? err.message : String(err) };
+              payload = sandboxFailurePayload(err);
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
@@ -2693,7 +2708,7 @@ async function* runAgentTurnInternal(
               const r = await input.codeExecutor(rcArgs.code);
               payload = { result: r };
             } catch (err) {
-              payload = { error: err instanceof Error ? err.message : String(err) };
+              payload = sandboxFailurePayload(err);
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
