@@ -17,6 +17,8 @@ Actions:
   - "list_tools":         List available tool actions for connected integrations
   - "execute_action":     Execute a tool action on a connected integration (e.g., send email, create event)
 
+"execute_read" is the organization-scoped read path used by Office and is not available on this app-scoped tool.
+
 Parameters by action:
   configure:          { app_id, action: "configure", toolkit, scopes?, display_name?, oauth_credentials? }
   rotate_credentials: { app_id, action: "rotate_credentials", toolkit, oauth_credentials }
@@ -24,7 +26,7 @@ Parameters by action:
   list_available:     { app_id, action: "list_available", search? }
   list_connected:     { app_id, action: "list_connected" }
   list_tools:         { app_id, action: "list_tools", toolkit? }
-  execute_action:     { app_id, action: "execute_action", tool_name, params?, user_id? }
+  execute_action:     { app_id, action: "execute_action", tool_name (or tool_slug), params?, user_id? }
 
 Curated toolkits (first-class support, no BYO credentials needed):
   gmail, google-calendar, slack, google-sheets, notion, github, hubspot, outlook, google-drive, discord
@@ -100,7 +102,8 @@ Common errors:
       search: z.string().optional().describe('Search query to find integrations by name (list_available only)'),
       // list_tools params (toolkit is already above, shared)
       // execute_action params
-      tool_name: z.string().optional().describe('Integration tool slug (e.g. GMAIL_SEND_EMAIL). Required for execute_action.'),
+      tool_name: z.string().optional().describe('Integration tool slug (e.g. GMAIL_SEND_EMAIL). Required for execute_action unless tool_slug is given.'),
+      tool_slug: z.string().optional().describe('Alias for tool_name (the Office vocabulary). Accepted for execute_action.'),
       params: z.record(z.unknown()).optional().describe('Arguments for the tool action (execute_action only)'),
       user_id: z.string().optional().describe('Execute on behalf of a specific user, service-level only (execute_action only)'),
     },
@@ -173,12 +176,13 @@ Common errors:
         }
 
         case 'execute_action': {
-          const err = need(args.tool_name, '"tool_name" is required for the "execute_action" action.');
+          const toolName = args.tool_name ?? args.tool_slug;
+          const err = need(toolName, '"tool_name" (or its alias "tool_slug") is required for the "execute_action" action.');
           if (err) return err;
           const res = await fetch(`${getBaseUrl()}/v1/${app_id}/integrations/execute`, {
             method: 'POST',
             headers: getHeaders(),
-            body: JSON.stringify({ toolName: args.tool_name, params: args.params || {}, userId: args.user_id }),
+            body: JSON.stringify({ toolName, params: args.params || {}, userId: args.user_id }),
           });
           const data = await res.json();
           return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }], ...(res.ok ? {} : { isError: true }) };

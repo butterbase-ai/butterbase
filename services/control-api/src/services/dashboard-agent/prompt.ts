@@ -84,7 +84,7 @@ export const ORGANIZATION_CONNECTIONS_APPENDIX = `
 When the user asks about a connected source or wants data from one:
 1. Call \`manage_integrations\` with \`action: "list_connected"\`. Do not list apps and do not pass \`app_id\`.
 2. Call \`manage_integrations\` with \`action: "list_tools"\` and \`toolkit: "<toolkit>"\`.
-3. Call \`manage_integrations\` with \`action: "execute_read"\`, \`tool_name: "<tool>"\`, and \`params\`. These reads are already authorized by the owner's read-only connection; do not use \`execute_action\` and do not request approval for a read.
+3. Call \`manage_integrations\` with \`action: "execute_read"\`, \`tool_slug: "<tool>"\` (\`tool_name\` is accepted as an alias), and \`params\`. These reads are already authorized by the owner's read-only connection; do not use \`execute_action\` and do not request approval for a read.
 `;
 
 export function getSystemPrompt(
