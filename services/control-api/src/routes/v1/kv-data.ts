@@ -726,7 +726,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
   // Handles: GET key, GET key/ttl, GET key/exists
   fastify.get<{
     Params: { app_id: string; '*': string };
-    Querystring: { touch?: string };
+    Querystring: { touch?: string; raw?: string };
   }>('/v1/:app_id/kv/*', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
     const wildcard = (req.params as Record<string, string>)['*'] ?? '';
