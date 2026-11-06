@@ -1,0 +1,113 @@
+---
+title: リポジトリ（送信・取得）
+description: 内容のハッシュで識別するアプリのリポジトリと、ローカルのコードを同期します。
+---
+
+# `butterbase repo`
+
+`butterbase repo`でフォルダーをアプリのスナップショットと同期します。変更のないファイルは再アップロードしません。最新5件を保持します。
+
+ユーザーのファイル用の`butterbase storage`とは別の、**ソースコード専用**の領域です。上限はファイルあたり10MB、スナップショットあたり100MBです。
+
+<span id="bind-a-folder-to-an-app"></span>
+
+## フォルダーをアプリへ紐付ける
+
+```bash
+butterbase repo init <app_id>
+```
+
+`.butterbase/config.json`に`currentApp`を保存し、`.butterbaseignore`がなければ作成します。`--force`で設定を上書きしても`pinned_snapshot_id`などは維持します。`--no-ignore`でignoreファイルの作成を省略できます。
+
+<span id="push"></span>
+
+## 送信
+
+```bash
+butterbase repo push [--message "<text>"] [--dry-run] [--json]
+```
+
+ファイルを走査してハッシュを計算し、prepareで未保存のデータだけをアップロードして確定します。成功すると`pinned_snapshot_id`を更新します。
+
+`--dry-run`はAPIを呼ばず、ハッシュ・サイズ・パスのマニフェストを表示します。
+
+<span id="pull"></span>
+
+## 取得
+
+```bash
+butterbase repo pull [--force] [--json]
+```
+
+固定したスナップショットを基準に3方向で比較します。
+
+- リモートのlatestと異なるローカルファイルは、取得して上書きします。
+- ローカルだけに存在するファイル：
+  - 固定したスナップショットから変更がなければ削除します。
+  - 変更があれば競合とし、`--force`がなければ終了コード1です。
+
+固定したスナップショットがサーバーで削除済みなら、追跡されないローカルファイルの削除には常に`--force`が必要です。
+
+<span id="status"></span>
+
+## 状態
+
+```bash
+butterbase repo status [--json]
+```
+
+`git status`に似た形式で表示します。
+
+- `M`：固定したスナップショットからローカルで変更。
+- `?`：追跡なし（固定したスナップショットにない）。
+- `D`：ローカルで削除。
+- `N`：リモートだけに新規追加。取得すると追加されます。
+
+<span id="history-and-wipe"></span>
+
+## 履歴と全削除
+
+```bash
+butterbase repo log [--json]      # snapshot history newest-first
+butterbase repo wipe              # destructive — name-confirm prompt
+```
+
+<span id="ignore-rules"></span>
+
+## 除外ルール
+
+次の順序で優先します。
+
+1. `.butterbaseignore`（`!path`で既定の除外を取り消せます）。
+2. `.gitignore`
+3. 固定の除外：`.git/`、`node_modules/`、`dist/`、`.next/`、`.turbo/`、`.DS_Store`、`.butterbase/`。
+
+<span id="app-visibility"></span>
+
+## アプリの公開範囲
+
+```bash
+butterbase visibility <public|private> [--listed|--unlisted] [--app <id>]
+```
+
+公開・非公開を指定します。公開で`--unlisted`なら一覧（`/v1/templates`、ダッシュボード、`butterbase templates`）に表示せず、IDによる直接の複製を許可します。
+
+<span id="clone-a-public-app"></span>
+
+## 公開アプリの複製
+
+```bash
+butterbase clone <source_app_id> [target_dir] [--name "<text>"] [--region <region>] [--json]
+```
+
+自分が所有する新しいアプリを作成します。CLIは次の順で処理します。
+
+1. 複製ジョブを開始。
+2. 最大5分間、完了を確認。
+3. `<target_dir>`で`butterbase repo init <new_app_id>`と`butterbase repo pull`を実行。既定のフォルダー名は新しいアプリIDです。
+
+スキーマ、RLS、関数コード、シークレットを除く設定、リポジトリ、`_seed: true`の行を複製します。エンドユーザー、シークレット、環境変数、BYOKキー、独自ドメイン、監査ログは複製しません。[複製する内容](/ja/core-concepts/database#what-a-clone-copies)を参照してください。
+
+複製ジョブの警告も表示します。例えばauth_hook_functionの関数が複製されなかった場合、紐付けをNULLのままにして警告します。
+
+失敗時はエラーを表示して終了コード1になります。HTTPの`POST /v1/clone-jobs/<job_id>/retry`で再試行できます。

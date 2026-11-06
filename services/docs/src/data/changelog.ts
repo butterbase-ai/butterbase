@@ -49,7 +49,7 @@ export const changelog: RoadmapItem[] = [
     category: 'functions',
     title: 'ctx.caller — validated caller identity',
     description: 'Every function invocation now surfaces `ctx.caller = { type, keyId, scope, userId }`. Type is one of `service_key`, `end_user_jwt`, `loopback`, or `anonymous`. The `keyId` is a non-secret api-key row id safe to log in audit trails; `userId` is the user the request is acting on behalf of (propagated through ctx.invoke chains and X-Butterbase-As-User impersonation). Stop parsing `req.headers.authorization` by hand.',
-    href: '/core-concepts/functions/#ctx-caller-who-called-this-function',
+    href: '/core-concepts/functions/#ctxcaller--who-called-this-function',
     icon: '🪪',
   },
   {
@@ -57,7 +57,7 @@ export const changelog: RoadmapItem[] = [
     category: 'functions',
     title: 'Service-key impersonation gate',
     description: 'App-scoped service keys can now assert "act on behalf of user X" via the `X-Butterbase-As-User` header — the runtime populates `ctx.user.id` before invoking. Per-function `allow_service_key_impersonation` (default `true`) lets admin-only and billing-webhook handlers opt out; the platform 403s any X-Butterbase-As-User on those endpoints at the edge. End-user JWTs and out-of-app service keys cannot impersonate. Surfaced through `deploy_function`, `manage_function action: "update_settings"`, the CLI (`bb functions deploy --no-allow-impersonation`), the SDK (`apiClient.updateFunctionSettings`), and a toggle on the dashboard function detail page.',
-    href: '/core-concepts/functions/#x-butterbase-as-user-when-you-have-to-call-from-outside',
+    href: '/core-concepts/functions/#x-butterbase-as-user--when-you-have-to-call-from-outside',
     icon: '🛂',
   },
   {

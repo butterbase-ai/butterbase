@@ -1,0 +1,233 @@
+---
+title: butterbase substrate
+description: コマンドラインからSubstrateの記憶、アクション、注意ルール、Outbox、設定を管理します。
+---
+
+# `butterbase substrate`
+
+`butterbase substrate`は、AIエージェントのユーザー単位の記憶とアクションをコマンドやスクリプトから管理します。
+
+現在のButterbase APIキーを使います。**Substrate用**のキーを次で発行してください。
+
+```bash
+butterbase keys generate --substrate
+export BUTTERBASE_API_KEY="bb_sk_..."
+```
+
+すべて`--json`でAPIの応答をそのまま出力でき、`jq`などへ渡せます。
+
+<span id="action-ledger"></span>
+
+## アクション台帳
+
+### `butterbase substrate ledger`
+
+台帳のアクション一覧を取得します。
+
+```bash
+butterbase substrate ledger --status executed --capability send_email_draft --limit 25
+butterbase substrate ledger --before 2026-05-28T00:00:00Z --json | jq '.actions[].id'
+```
+
+### `butterbase substrate propose <capability>`
+
+新しいアクションを提案します。
+
+```bash
+echo '{"to":"hello@example.com","subject":"hi","body":"hi"}' > payload.json
+butterbase substrate propose send_email_draft --payload @payload.json --idempotency-key my-key-1
+```
+
+### `butterbase substrate approve <id>` / `butterbase substrate reject <id> [--reason]`
+
+承認待ちのアクションを承認・拒否します。
+
+```bash
+butterbase substrate approve act_01H...
+butterbase substrate reject  act_01H... --reason "policy mismatch"
+```
+
+<span id="entities"></span>
+
+## エンティティ
+
+```bash
+butterbase substrate entities list --type person
+butterbase substrate entities get  ent_01H...
+echo '{"display_name":"Renamed"}' > patch.json
+butterbase substrate entities update ent_01H... --patch @patch.json
+```
+
+<span id="artifacts"></span>
+
+## 元資料
+
+会議、メール、録音、文書など、記憶の抽出元となる資料を一覧・取得します。
+
+### `butterbase substrate artifacts list`
+
+```bash
+butterbase substrate artifacts list --kind meeting_transcript --limit 25
+butterbase substrate artifacts list --q "billing migration" --json | jq '.artifacts[].id'
+```
+
+| オプション | 型 | 既定値 |
+|---|---|---|
+| `--kind <k>` | string | _すべて_ |
+| `--q <query>` | string（title＋summary＋contentの全文検索） | _なし_ |
+| `--limit <n>` | int（1〜200） | 50 |
+| `--json` | フラグ | _表形式_ |
+
+### `butterbase substrate artifacts get <id>`
+
+全文の`content`を含む資料を1件取得します。
+
+```bash
+butterbase substrate artifacts get art_01H...
+butterbase substrate artifacts get art_01H... --json | jq -r '.content'
+```
+
+<span id="memory"></span>
+
+## メモリー
+
+決定、約束、学び、元資料を横断して全文検索します。
+
+`<query>`は任意です。省略すると選択した種類の最新項目を、`--limit`の件数まで返します。
+
+```bash
+# search with a query
+butterbase substrate memory "OKR planning Q3" --limit 10
+
+# list most recent items (no query)
+butterbase substrate memory --limit 20
+
+# require all words (default)
+butterbase substrate memory "billing migration" --match and
+
+# match any word
+butterbase substrate memory "billing migration" --match or
+
+# require adjacent words (phrase search)
+butterbase substrate memory "billing migration" --match phrase
+```
+
+| オプション | 型 | 既定値 |
+|---|---|---|
+| `<query>` | string（全文検索。省略で一覧） | _なし_ |
+| `--match <mode>` | `and` \| `or` \| `phrase` | `and` |
+| `--kinds <k,...>` | カンマ区切り：`decisions`、`commitments`、`learnings`、`source_artifacts` | _すべて_ |
+| `--limit <n>` | int（1〜200） | 20 |
+| `--json` | フラグ | _表形式_ |
+
+結果の各行には`id`、`kind`、`title`、`body_text`、`rank`（検索なしならnull）、`updated_at`、`source_artifact_id`、`supersedes`、`status`を含めます。
+
+```json
+{
+  "results": [
+    {
+      "id": "dec_01…",
+      "kind": "decision",
+      "title": "Adopt substrate",
+      "body_text": "agents need shared memory",
+      "rank": 0.18,
+      "updated_at": "2026-05-31T…",
+      "source_artifact_id": null,
+      "supersedes": null,
+      "status": "active"
+    }
+  ]
+}
+```
+
+<span id="memory-list-chronological-browse"></span>
+
+## メモリーの一覧（日時順）
+
+条件で絞り込み、`updated_at DESC`で取得します。関連度での順位付けはしません。
+
+```bash
+butterbase substrate memory-list --source-artifact-id art_01H... --kinds decisions,commitments,learnings --superseded false --limit 50
+```
+
+| フラグ | 型 | 既定値 |
+|---|---|---|
+| `--kinds <k,...>` | カンマ区切り：`decisions`、`commitments`、`learnings`、`source_artifacts` | _すべて_ |
+| `--source-artifact-id <id>` | string：指定した資料に関連する行のみ。資料自体は除外。 | _なし_ |
+| `--superseded <bool>` | `true` \| `false`。falseなら置き換え済みの決定と期限切れの約束を除外。 | _すべて含める_ |
+| `--before <timestamp>` | ISO日時のカーソル。前の応答の`next_before`。 | _なし_ |
+| `--limit <n>` | int（1〜100） | 25 |
+| `--json` | フラグ | _表形式_ |
+
+## Outbox
+
+```bash
+butterbase substrate outbox list --state pending
+butterbase substrate outbox cancel ob_01H...
+butterbase substrate outbox retry  ob_01H...
+```
+
+<span id="attention-rules"></span>
+
+## 注意ルール
+
+```bash
+butterbase substrate rules list --enabled
+butterbase substrate rules get rule_01H...
+
+echo '{
+  "name": "weekly digest",
+  "trigger_cron": "0 9 * * 1",
+  "condition_mode": "snapshot_predicate",
+  "condition": { ">": [{ "var": "entity_count" }, 0] },
+  "action_capability": "send_email_draft",
+  "action_payload_template": {
+    "to": "me@example.com",
+    "subject": "Weekly digest",
+    "body": "{{entity_count}} entities."
+  }
+}' > rule.json
+
+butterbase substrate rules create --file @rule.json
+butterbase substrate rules enable  rule_01H...
+butterbase substrate rules disable rule_01H...
+butterbase substrate rules firings rule_01H... --limit 50
+butterbase substrate rules delete  rule_01H...
+```
+
+<span id="snapshots"></span>
+
+## スナップショット
+
+注意ルールの条件に使う日次の状態です。
+
+```bash
+butterbase substrate snapshots --days 7
+```
+
+<span id="settings"></span>
+
+## 設定
+
+```bash
+butterbase substrate settings show
+butterbase substrate settings yolo on
+butterbase substrate settings yolo off
+```
+
+<span id="output-formats"></span>
+
+## 出力形式
+
+- 既定：対応するコマンドでは簡潔な表形式。
+- `--json`：HTTPの応答本文をそのまま出力。スクリプト用。
+
+<span id="authentication-errors"></span>
+
+## 認証エラー
+
+`your active key is app-scoped`の場合、Substrate用のキーを発行してください。
+
+```bash
+butterbase keys generate --substrate
+```
