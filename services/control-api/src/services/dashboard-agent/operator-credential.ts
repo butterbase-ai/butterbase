@@ -19,16 +19,21 @@ function aad(orgId: string): Buffer {
   return Buffer.from(orgId, 'utf8');
 }
 
-function key(): Buffer {
+export function assertOperatorCredentialKeyReady(): void {
   const hex = process.env.OPERATOR_CRED_KEY;
-  if (!hex || hex.length !== 64) {
+  if (!hex || !/^[0-9a-fA-F]{64}$/.test(hex)) {
     throw new Error('OPERATOR_CRED_KEY must be 64 hex characters (32 bytes)');
   }
+}
+
+function key(): Buffer {
+  assertOperatorCredentialKeyReady();
+  const hex = process.env.OPERATOR_CRED_KEY!;
   return Buffer.from(hex, 'hex');
 }
 
 export async function setOperatorCredential(
-  pool: pg.Pool,
+  pool: pg.Pool | pg.PoolClient,
   orgId: string,
   serviceKey: string,
 ): Promise<void> {

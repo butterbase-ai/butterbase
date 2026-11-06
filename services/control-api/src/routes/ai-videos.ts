@@ -7,6 +7,7 @@ import { authorizeAppAiCall } from '../services/ai-router/authorize-app-call.js'
 import { config } from '../config.js';
 import { resolveAppHomeRegion, getRuntimeDbForApp } from '../services/region-resolver.js';
 import { getRedisClient } from '../services/redis.js';
+import { incrementUsage } from '../services/usage-metering.js';
 import { resolveOrgFromApp } from '../services/app-org-resolver.js';
 import {
   routeVideoSubmit, routeVideoPoll, settleVideoJob,
@@ -27,6 +28,9 @@ import { settleAfterCall, insufficientCreditsFields } from '../services/ai-route
 import { applyMarkup } from '../services/ai-router/markup.js';
 import { readAutoRefillState } from './ai-config.js';
 import { resolveMarkupPct, type MarkupSource } from '../services/ai-router/special-pricing.js';
+import { getVideoPreparationHooks } from '../services/ai-router/video-preparation-hooks.js';
+import { admitVideoPreparation, PreparationOptionError, referenceSource } from '../services/ai-router/video-preparation.js';
+import { getPreparation, listPreparationAttempts, storedVideoOutputIds, type PreparationRow, type AttemptRow } from '../services/ai-router/video-preparations.js';
 
 // Public URLs returned to clients must honor the X-Forwarded-* headers that
 // Traefik (dev) and Fly's edge (prod) set, since Fastify's trustProxy is off
@@ -117,7 +121,7 @@ function deriveFrameImages(urls: string[]): Array<Record<string, unknown>> | nul
   }));
 }
 
-export const videoSubmitSchema = z.preprocess((raw) => {
+export const videoSubmitSchema = z.preprocess((raw, ctx) => {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
   const src = raw as Record<string, unknown>;
   const aliased: string[] = [];
@@ -125,6 +129,12 @@ export const videoSubmitSchema = z.preprocess((raw) => {
     const v = src[key];
     if (typeof v === 'string' && v.length > 0) aliased.push(v);
     else if (Array.isArray(v)) for (const item of v) if (typeof item === 'string' && item.length > 0) aliased.push(item);
+  }
+  if (Array.isArray(src.reference_declarations) && src.reference_declarations.length > 0) {
+    const aliasCount = IMAGE_ALIAS_KEYS.filter(key => src[key] !== undefined).length;
+    if (aliasCount > 1 || (aliasCount > 0 && src.input_images !== undefined)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Declared inputs must use one image alias or canonical input_images' });
+    }
   }
   const next = { ...src };
   if (aliased.length > 0) {
@@ -157,7 +167,23 @@ export const videoSubmitSchema = z.preprocess((raw) => {
   input_references: z.array(z.union([z.string().url(), z.record(z.unknown())])).optional(),
   frame_images: z.array(z.record(z.unknown())).optional(),
   provider: z.record(z.unknown()).optional(),
-}).strict());
+  reference_declarations: z.array(z.object({ path: z.string(), kind: z.literal('ai_generated_fictional_character') }).strict()).max(8).optional(),
+  prepare_references: z.enum(['on_rejection', 'upfront']).optional(),
+}).strict().superRefine((body, ctx) => {
+  const declarations = body.reference_declarations ?? [];
+  const issue = (message: string) => ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  if (!declarations.length) { if (body.prepare_references === 'upfront') issue('upfront requires explicit reference declarations'); return; }
+  const paths = new Set<string>(); const sources = new Set<string>();
+  if (body.input_images?.length && body.input_references?.length) issue('Declared inputs must use one canonical image collection');
+  if (body.input_images?.length && body.frame_images && JSON.stringify(body.frame_images) !== JSON.stringify(deriveFrameImages(body.input_images))) issue('Conflicting frame_images override declared input_images');
+  for (const declaration of declarations) {
+    if (paths.has(declaration.path)) issue('Duplicate reference declaration'); paths.add(declaration.path);
+    if (body.input_images?.length && declaration.path.startsWith('/frame_images/')) issue('Use canonical input_images declaration paths');
+    try { const source = referenceSource(body, declaration.path); if (sources.has(source)) issue('Ambiguous duplicate image reference'); sources.add(source); } catch { issue('Declaration must name an existing canonical image slot'); }
+  }
+  const forbidden = new Set<string>([...IMAGE_ALIAS_KEYS, 'model', 'input_images', 'frame_images', 'input_references', 'reference_declarations', 'prepare_references']);
+  if (Object.keys(body.provider ?? {}).some(key => forbidden.has(key))) issue('Provider overrides cannot replace declared images or model');
+}));
 
 export async function aiVideoRoutes(app: FastifyInstance) {
   const adapters = await buildVideoAdapters();
@@ -174,15 +200,28 @@ export async function aiVideoRoutes(app: FastifyInstance) {
     const organizationId = await resolveOrgFromApp(runtimePool, appId);
 
     try {
-      const body = videoSubmitSchema.parse(request.body);
+      let body = videoSubmitSchema.parse(request.body);
+      const preparationRegion = await resolveAppHomeRegion(app.controlDb, appId);
+      const hooks=getVideoPreparationHooks();
+      const context={platformPool:app.controlDb,runtimePool,region:preparationRegion};
+      const scope={appId,organizationId,userId:ownerId,endUserSub};
+      const enriched=await hooks?.enrichRequest?.(context,scope,body);
+      if(enriched)body=videoSubmitSchema.parse(enriched.request);
+      const prepared = await admitVideoPreparation(
+        context,hooks,scope,body,enriched?.policy,
+      );
+      if (prepared) {
+        return reply.code(202).send({ job_id: prepared.id, status: 'pending', polling_url: `${publicProto(request)}://${publicHost(request)}/v1/${appId}/videos/completions/${prepared.id}` });
+      }
       const { pct: markupPct, source: markupSource } = await resolveMarkupPct(app.controlDb, organizationId, body.model);
       const region = await resolveAppHomeRegion(app.controlDb, appId);
 
+      const { reference_declarations: _declarations, prepare_references: _preparation, ...legacyBody } = body;
       const submit = await routeVideoSubmit(
         { platformPool: app.controlDb, runtimePool, redis: getRedisClient(),
           adapters, markupPct, markupSource,
           appId, organizationId, userId: ownerId, region },
-        body,
+        legacyBody,
       );
 
       let jobId: string;
@@ -237,6 +276,11 @@ export async function aiVideoRoutes(app: FastifyInstance) {
     const organizationId = await resolveOrgFromApp(runtimePool, appId);
 
     try {
+      const prepared = getVideoPreparationHooks() ? await getPreparation(runtimePool, jobId) : null;
+      if (prepared) {
+        if (!canReadPreparation(prepared, appId, authz.caller)) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
+        return reply.code(200).send(buildPublicPreparationResponse(`${publicProto(request)}://${publicHost(request)}`, appId, prepared, await listPreparationAttempts(runtimePool, jobId)));
+      }
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
       // End-users can only see jobs they submitted themselves. 404 (not 403)
@@ -294,6 +338,34 @@ export async function aiVideoRoutes(app: FastifyInstance) {
     const organizationId = await resolveOrgFromApp(runtimePool, appId);
 
     try {
+      const preparationHooks = getVideoPreparationHooks();
+      const prepared = preparationHooks ? await getPreparation(runtimePool, jobId) : null;
+      if (prepared && preparationHooks) {
+        if (!canReadPreparation(prepared, appId, authz.caller)) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
+        if (prepared.status !== 'completed') return reply.code(409).send({ error: 'job_not_completed', code: 'JOB_NOT_COMPLETED', current_status: prepared.status });
+        const output = storedVideoOutputIds(prepared.terminal_outcome) ?? prepared.terminal_outcome?.output;
+        if (index >= (output?.length ?? 0)) return reply.code(400).send({ error: 'invalid_index', code: 'INVALID_INDEX' });
+        const attempt = (await listPreparationAttempts(runtimePool, jobId)).find(a => a.terminal_outcome?.status === 'completed' && a.settlement_status === 'acknowledged');
+        if (!attempt) return reply.code(502).send({ error: 'content_unavailable', code: 'CONTENT_UNAVAILABLE' });
+        const region = await resolveAppHomeRegion(app.controlDb, appId);
+        const content = await preparationHooks.content({ platformPool: app.controlDb, runtimePool, region }, attempt, index,
+          { ...(request.headers.range ? { range: request.headers.range } : {}) });
+        const stream = Readable.fromWeb(content.stream as any);
+        if (storedVideoOutputIds(prepared.terminal_outcome)) {
+          let bytes = 0, metered = false;
+          stream.on('data', chunk => { bytes += Buffer.byteLength(chunk); });
+          const meter = () => {
+            if (metered) return; metered = true;
+            if (bytes) void incrementUsage(organizationId, ownerId, 'bandwidth_bytes', bytes, appId)
+              .catch(() => app.log.warn({ appId }, 'video: content bandwidth metering failed'));
+          };
+          stream.once('end', meter); stream.once('close', meter);
+          reply.header('Accept-Ranges', 'bytes');
+        }
+        if (content.contentLength !== undefined) reply.header('Content-Length', content.contentLength);
+        if (content.contentRange) reply.header('Content-Range', content.contentRange);
+        return reply.code(content.statusCode ?? 200).header('Content-Type', content.contentType).send(stream);
+      }
       const job = await getVideoJob(runtimePool, jobId);
       if (!job || job.app_id !== appId) return reply.code(404).send({ error: 'job_not_found', code: 'JOB_NOT_FOUND' });
       if (authz.caller.kind === 'end_user' && job.end_user_sub !== authz.caller.sub) {
@@ -399,6 +471,7 @@ export function buildPublicJobResponse(absoluteBase: string, appId: string, job:
 }
 
 export async function handleVideoError(app: FastifyInstance, reply: any, organizationId: string, error: unknown) {
+  if (error instanceof PreparationOptionError) return reply.code(400).send({ error: error.message, code: error.code });
   if (error instanceof InsufficientCreditsError) {
     const ar = await readAutoRefillState(app.controlDb, organizationId).catch(() => ({
       enabled: false, amountUsd: null, monthlyAllowanceUsd: 0, topupUsd: 0,
@@ -426,4 +499,21 @@ export async function handleVideoError(app: FastifyInstance, reply: any, organiz
   if (isHttpError(error)) throw error;
   app.log.error({ err: error }, 'Failed to process video request');
   return reply.code(500).send(apiError(error, 'Failed to process video request'));
+}
+
+/** Same NULL-sensitive end-user scope as legacy; polling never advances preparation. */
+export function canReadPreparation(job: PreparationRow, appId: string, caller: import('../services/ai-router/authorize-app-call.js').AppAiCaller): boolean {
+  return job.app_id === appId && !job.deleted_at && (caller.kind !== 'end_user' || job.end_user_sub === caller.sub);
+}
+export function buildPublicPreparationResponse(base: string, appId: string, job: PreparationRow, attempts: AttemptRow[] = []) {
+  const pollingUrl = `${base}/v1/${appId}/videos/completions/${job.id}`;
+  const terminal = ['completed','failed','cancelled','expired'].includes(job.status);
+  const settled = terminal && attempts.every(a => a.settlement_status === 'acknowledged');
+  const output = storedVideoOutputIds(job.terminal_outcome) ?? job.terminal_outcome?.output;
+  return { job_id: job.id, status: job.status, model: job.model, polling_url: pollingUrl,
+    ...(job.status === 'pending' && job.stage === 'preparing_references' ? { stage: 'preparing_references' } : {}),
+    content_urls: job.status === 'completed' ? output?.map((_, i) => `${pollingUrl}/content?index=${i}`) ?? null : null,
+    error: job.terminal_outcome?.error ?? null, created_at: job.created_at,
+    charged_credits_usd: settled ? attempts.reduce((sum, a) => sum + Number(a.settlement_receipt?.chargedUsd ?? 0), 0) : null,
+    settled_at: settled ? attempts.map(a => a.settled_at).filter(Boolean).sort((a,b) => b!.getTime()-a!.getTime())[0] ?? null : null };
 }

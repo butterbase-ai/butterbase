@@ -1,7 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { DEFAULT_ASSISTANT_MODEL, resolveAssistantModel } from './assistant-model.js';
 
 describe('resolveAssistantModel', () => {
+  afterEach(() => vi.unstubAllEnvs());
   it('falls back to the default when no id is supplied', () => {
     expect(resolveAssistantModel()).toBe(DEFAULT_ASSISTANT_MODEL);
     expect(resolveAssistantModel(null)).toBe(DEFAULT_ASSISTANT_MODEL);
@@ -29,9 +30,24 @@ describe('resolveAssistantModel', () => {
     expect(resolveAssistantModel('  openai/gpt-6-astra  ')).toBe('openai/gpt-6-astra');
   });
 
-  it('keeps qwen3.8-max as the default', () => {
-    // Pinned in PREFERRED_ROUTER_BY_MODEL (select.ts) — changing this id
-    // without updating that map silently drops the direct-vendor routing.
-    expect(DEFAULT_ASSISTANT_MODEL).toBe('qwen/qwen3.8-max');
+  it('defaults to the catalog ID for DeepSeek V4.1 Flash', () => {
+    expect(DEFAULT_ASSISTANT_MODEL).toBe('deepseek/deepseek-v4.1-flash');
+  });
+
+  it('reads the deployment default at resolution time', () => {
+    vi.stubEnv('DASHBOARD_ASSISTANT_MODEL', '  vendor/first-model  ');
+    expect(resolveAssistantModel()).toBe('vendor/first-model');
+    vi.stubEnv('DASHBOARD_ASSISTANT_MODEL', 'vendor/second-model');
+    expect(resolveAssistantModel()).toBe('vendor/second-model');
+    vi.stubEnv('DASHBOARD_ASSISTANT_MODEL', '   ');
+    expect(resolveAssistantModel()).toBe(DEFAULT_ASSISTANT_MODEL);
+  });
+
+  it('prefers an explicit choice, then the saved model, over the deployment default', () => {
+    vi.stubEnv('DASHBOARD_ASSISTANT_MODEL', 'vendor/deployment-model');
+    expect(resolveAssistantModel('vendor/requested-model', 'vendor/saved-model')).toBe('vendor/requested-model');
+    expect(resolveAssistantModel(undefined, '  vendor/saved-model  ')).toBe('vendor/saved-model');
+    expect(resolveAssistantModel('   ', 'vendor/saved-model')).toBe('vendor/saved-model');
+    expect(resolveAssistantModel(undefined, '   ')).toBe('vendor/deployment-model');
   });
 });

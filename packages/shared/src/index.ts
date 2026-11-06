@@ -8,3 +8,5 @@ export * from './response-types.js';
 export * from './billing/index.js';
 export * from './quota/index.js';
 export * from './ai-router/index.js';
+export * from './office.js';
+export * from './office-http.js';

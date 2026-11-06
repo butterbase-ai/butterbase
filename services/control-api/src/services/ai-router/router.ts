@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import type { Redis } from 'ioredis';
 import { readCatalogEntry, readEnabledRouters } from './catalog.js';
+import { normalizedVideoSkuRate } from './video-sku-pricing.js';
 import { rankRoutersForModel, rankRoutersPresenceMode, rankRoutersWaterfall, estimateWorstCaseUsd, pickStickyRouter } from './select.js';
 import { markSlotDown, readDownSlots, COOLDOWN_TRIGGER_KINDS } from './slot-cooldown.js';
 import {
@@ -11,6 +12,7 @@ import {
   ttlSecondsFor,
   type StickyBindings,
 } from './sticky-bindings.js';
+import { stripUnsupportedSamplingParams } from './model-param-policy.js';
 import { config } from '../../config.js';
 import { estimatePromptTokens } from './tokenizer.js';
 import { applyMarkup } from './markup.js';
@@ -32,7 +34,10 @@ import type { RouterName } from './normalize.js';
 // the caller's — so we should transparently try the next provider before ever
 // surfacing anything to the client. Adapters set this via HTTP 402 or via
 // body-level detection of new-api / OpenAI / Anthropic credit-exhaust codes.
-const FALLBACK_KINDS: ReadonlySet<string> = new Set(['transport', 'rate_limit', 'model_not_available', 'insufficient_credits', 'unknown']);
+// `param_unsupported` means this upstream's model rejects a parameter another
+// slot may accept (e.g. Gemini 3.6+ sampling params on a strict reseller), so
+// the chain must continue instead of failing the caller.
+const FALLBACK_KINDS: ReadonlySet<string> = new Set(['transport', 'rate_limit', 'model_not_available', 'insufficient_credits', 'param_unsupported', 'unknown']);
 
 /**
  * Slot names we might see in the ranker output. Kept in one place so the
@@ -297,9 +302,21 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     : orderedCandidates;
 
   const fallbackChain: string[] = [];
+  // Strip params the canonical model itself ignores (Gemini 3.6+ sampling
+  // controls) so a strict reseller cannot turn an otherwise-valid request into
+  // a 400. Applies to every candidate: the canonical model is the same, and
+  // the upstream ignores these fields anyway.
+  const outboundReq = stripUnsupportedSamplingParams(
+    req as unknown as Record<string, unknown>,
+    canonicalId,
+  ) as unknown as ChatCompletionRequest;
   let result: AdapterResult | null = null;
   let chosenRouter: RouterName | null = null;
   let lastError: unknown = null;
+  // Distinguish "no upstream is healthy" (502) from "every upstream rejected
+  // the same parameter" (a 400 the caller can act on).
+  let attemptedFailures = 0;
+  let sawNonParamFailure = false;
 
   for (const candidate of candidates) {
     const adapter = ctx.adapters.get(candidate.name);
@@ -314,7 +331,7 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     }
     try {
       const upstreamId = candidate.upstreamId ?? adapter.toUpstreamId(canonicalId);
-      result = await adapter.chatCompletion(req, upstreamId);
+      result = await adapter.chatCompletion(outboundReq, upstreamId);
       chosenRouter = candidate.name;
       // Write/refresh the sticky binding on success so subsequent turns in
       // the same session/prefix-context land back on this router for cache
@@ -330,6 +347,8 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
     } catch (err) {
       lastError = err;
       if (err instanceof AdapterError && FALLBACK_KINDS.has(err.kind)) {
+        attemptedFailures += 1;
+        if (err.kind !== 'param_unsupported') sawNonParamFailure = true;
         // Cool the slot down for a TTL window so subsequent fresh requests
         // don't keep re-attempting a known-degraded provider. Auth /
         // bad_request are caller-scoped (see COOLDOWN_TRIGGER_KINDS) and
@@ -356,6 +375,12 @@ export async function routeChatCompletion(ctx: RouteContext, req: ChatCompletion
 
   if (!result || !chosenRouter) {
     await settleCall(0, 0);
+    // Every attempted upstream rejected the same parameter: no provider is
+    // unhealthy, the request cannot be served as shaped. Surface the adapter's
+    // 400 (mapped by the routes to an actionable message) rather than a 502.
+    if (attemptedFailures > 0 && !sawNonParamFailure && lastError instanceof AdapterError) {
+      throw lastError;
+    }
     const err = new RouterError('ROUTER_FALLBACK_EXHAUSTED', 502, 'Model is temporarily unavailable. Please try again or use a different model.', fallbackChain);
     (err as any).cause = lastError;
     throw err;
@@ -682,6 +707,8 @@ function ratePerSecondFromRouter(
   rawPricing: unknown,
   req: VideoGenerationRequest,
 ): number | null {
+  const normalized = normalizedVideoSkuRate(rawPricing, req);
+  if (normalized) return normalized.rateUsdPerSecond;
   const rp = rawPricing as
     | {
         pricing_skus?: Record<string, string>;

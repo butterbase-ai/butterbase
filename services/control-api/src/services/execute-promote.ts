@@ -56,6 +56,7 @@
  * behind in each case.
  */
 import type pg from 'pg';
+import { config } from '../config.js';
 import {
   replaySchema,
   replayRls,
@@ -480,7 +481,7 @@ export async function executePromote(deps: PromoteDeps, job: CloneJob): Promise<
             `SELECT deployment_backend FROM apps WHERE id = $1`,
             [prodAppId],
           );
-          const deploymentBackend = backendRow.rows[0]?.deployment_backend ?? 'pages';
+          const deploymentBackend = backendRow.rows[0]?.deployment_backend ?? config.deployment.defaultBackend;
           if (deploymentBackend !== 'wfp') {
             await appendCloneJobWarnings(controlDb, jobId, [
               'The frontend deploy was submitted to Cloudflare Pages and is still building — this '

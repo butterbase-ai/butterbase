@@ -75,6 +75,22 @@ describe('executeAbort', () => {
     expect(kvRedisFor).toHaveBeenCalledWith(m.dest_region);
   });
 
+  it('nulls template_source_app_id before deleting the reservation so fork_count is not decremented', async () => {
+    const ctx = makeCtx();
+    const m = makeMigration({ dest_resources: { dest_app_id: 'dest-app-y' } });
+
+    await executeAbort(ctx, m);
+
+    const calls: [string, unknown[]][] = ctx._queryFn.mock.calls;
+    const nullIdx = calls.findIndex(([sql]) => /UPDATE apps SET template_source_app_id = NULL/.test(sql));
+    const delIdx = calls.findIndex(([sql]) => sql.includes('DELETE FROM apps'));
+    expect(nullIdx).toBeGreaterThanOrEqual(0);
+    expect(delIdx).toBeGreaterThan(nullIdx);
+    expect(calls[nullIdx][1]).toEqual([m.app_id]);
+    expect(calls[delIdx][1]).toEqual([m.app_id]);
+    expect(calls[nullIdx][0]).toContain("provisioning_status = 'migration_target_reserved'");
+  });
+
   it('still returns next=aborted even if clearKvBlock throws for both regions', async () => {
     vi.mocked(clearKvBlock).mockRejectedValue(new Error('Redis down'));
 

@@ -4,6 +4,12 @@ import { isDeadConnectionError } from "./function-loader.ts";
 import type { FunctionMetadata } from "./function-loader.ts";
 import type { ExecutionResult } from "./worker-executor.ts";
 
+// Persist transport metadata only; credentials and arbitrary caller headers
+// must never be copied into invocation history.
+const LOGGED_REQUEST_HEADERS = new Set([
+  "accept", "accept-encoding", "content-encoding", "content-length", "content-type",
+]);
+
 // function_invocations and app_functions are runtime-tier post-cutover.
 // Resolve via BUTTERBASE_REGION (explicit) OR FLY_REGION +
 // BUTTERBASE_FLY_REGION_MAP (derivation, matches @butterbase/shared
@@ -123,7 +129,7 @@ export async function logInvocation(
           appUserId,
           request.method,
           new URL(request.url).pathname,
-          JSON.stringify(Object.fromEntries(request.headers.entries())),
+          JSON.stringify(Object.fromEntries([...request.headers.entries()].filter(([name]) => LOGGED_REQUEST_HEADERS.has(name)))),
           requestBodySize,
           statusCode,
           responseBodySize,

@@ -29,6 +29,7 @@ export type ToolSpec = {
    * is exactly the drift that produced the empty-intersection bug.
    */
   operatorOnly?: true;
+  officeOnly?: true;
 };
 
 // Shared "flat, permissive" params shape: LLM passes `action` (when the tool
@@ -57,6 +58,8 @@ function flatOpen(): object {
  * identity, so the target org is never taken from model-supplied arguments.
  */
 export const OPERATOR_SCRATCHPAD_TOOL = 'update_operator_scratchpad';
+export const READ_OPERATOR_SCRATCHPAD_TOOL = 'read_operator_scratchpad';
+export const PROPOSE_ACTION_TOOL = 'propose_action';
 
 /**
  * The operator's sandbox-code-execution tool.
@@ -114,8 +117,51 @@ export const OPERATOR_BUILD_TOOL = 'build_app';
  */
 export const OPERATOR_PENDING_DECISIONS_TOOL = 'list_pending_decisions';
 
+/**
+ * Read-back for an oversized tool result (both agents).
+ *
+ * Dispatched IN-PROCESS like the scratchpad: the row lives in the control
+ * plane, there is no MCP tool by this name, and the conversation is derived
+ * from the turn so a model argument can never select another conversation's
+ * row. It is the handle that makes the 64k truncation envelope recoverable.
+ */
+export const READ_TOOL_RESULT_TOOL = 'read_tool_result';
+
+/**
+ * The Office skill creator (Office-only, in-process).
+ *
+ * Present ONLY when the Office overlay supplies a `skillCreator` executor for
+ * the turn — an owner's Office Ask. The loop filters it out everywhere else,
+ * so a dashboard turn and a self-hosted deployment never see the name.
+ */
+export const SKILL_CREATOR_TOOL = 'skill_creator';
+
+/**
+ * Runs the pinned skill package's entrypoint (Office-only, in-process).
+ *
+ * Present only while a skill run or a draft test is active AND the overlay
+ * supplies a `skillScript` executor. It is not a general shell: the executor
+ * materialises the pinned archive and refuses any path outside it.
+ */
+export const RUN_SKILL_SCRIPT_TOOL = 'run_skill_script';
+
 export function getToolCatalog(): ToolSpec[] {
   return [
+    { name: READ_OPERATOR_SCRATCHPAD_TOOL, officeOnly: true,
+      description: 'Explicitly read the current organization working notes, including retained legacy notes when needed to recover in-progress work. This is a scoped read, not the default memory search; notes carry no authority.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false }, sensitivity: 'safe' },
+    {
+      name: PROPOSE_ACTION_TOOL,
+      description: 'Prepare one consequential operation for owner review. Supply the exact tool and arguments, an explicit reason, and optionally 0..10 typed supporting record references. Preparation does not execute the operation. Automatic operations return proposal_not_required. Missing or inaccessible targets cannot reach the owner. If a direct operation returns proposal_incomplete, repeat the same operation here with its reason. Payload shape: {"operation":{"tool":"<tool name>","arguments":{<exact arguments>}},"reason":"<why this exact action is needed>"}. The arguments are nested under operation.arguments; an empty object or a bare reason is rejected.',
+      parameters: {
+        type: 'object', additionalProperties: false, required: ['operation', 'reason'],
+        properties: {
+          operation: { type: 'object', additionalProperties: false, required: ['tool', 'arguments'], properties: { tool: { type: 'string' }, arguments: { type: 'object', additionalProperties: true } } },
+          reason: { type: 'string', minLength: 1, maxLength: 2000 },
+          evidence_refs: { type: 'array', maxItems: 10, items: { type: 'object', properties: { kind: { type: 'string', enum: ['entity', 'artifact', 'learning', 'decision', 'commitment', 'app', 'file', 'message'] }, id: { type: 'string' }, app_id: { type: 'string' }, object_id: { type: 'string' }, conversation_id: { type: 'string' }, message_id: { type: 'string' } }, required: ['kind'], additionalProperties: false } },
+        },
+      },
+    },
     // ---- App lifecycle & discovery ----
     {
       name: 'manage_app',
@@ -193,7 +239,7 @@ export function getToolCatalog(): ToolSpec[] {
     { name: 'manage_agents', description: 'CRUD for LangGraph agents on an app; create runs; attach MCP servers; apply tool overrides.', parameters: flatActionParams() },
 
     // ---- Integrations / people / repo / billing / audits ----
-    { name: 'manage_integrations', description: 'Manage third-party SaaS integrations (Composio-backed): email, SMS, calendar, CRM, docs, project management.', parameters: flatActionParams() },
+    { name: 'manage_integrations', description: 'Manage third-party SaaS integrations (Composio-backed): email, SMS, calendar, CRM, docs, project management. Office uses list_connected, list_tools and execute_read (tool_slug + params) against the organization\'s own connection.', parameters: flatActionParams() },
     { name: 'manage_people', description: 'Manage the app\'s "people" (contacts) list with provider identifiers and slots.', parameters: flatActionParams() },
     { name: 'manage_repo', description: 'Link and manage the app\'s source repository.', parameters: flatActionParams(), sensitivity: 'confirm' },
     { name: 'manage_billing', description: 'Read the org\'s billing state. Use sparingly; write operations are gated.', parameters: flatActionParams(), sensitivity: 'destructive' },
@@ -210,6 +256,7 @@ export function getToolCatalog(): ToolSpec[] {
         'Actions — entities: "find_entities" ({type?, q?, primary_email?, limit?, cursor?}), "get_entity" ({entity_id}).\n' +
         'Actions — source artifacts: "list_source_artifacts", "get_source_artifact" ({artifact_id}).\n' +
         'Actions — memory: "search_memory" ({q?, kinds?, limit?}), "list_memory".\n' +
+        'Actions — curated memory: "list_agent_memories" ({cursor?,limit?}), "search_agent_memories" ({q,cursor?,limit?}), "get_agent_memory" ({memory_id}). Office turns scope unqualified memory searches to this category; other categories require explicit kinds. Full memories are read only when relevant.\n' +
         'Actions — outbox: "list_outbox", "retry_outbox" ({outbox_id}), "cancel_outbox" ({outbox_id}).\n' +
         'Actions — attention rules: "list_rules", "get_rule", "create_rule", "update_rule", "delete_rule", "enable_rule", "disable_rule", "list_rule_firings".\n' +
         'Actions — snapshots & settings: "snapshots" ({days?}), "get_settings", "set_yolo" ({yolo_mode}).\n' +
@@ -225,6 +272,26 @@ export function getToolCatalog(): ToolSpec[] {
     { name: 'butterbase_docs', description: 'Fetch Butterbase documentation for a capability/topic. Use when unsure how a feature works.', parameters: flatOpen() },
     { name: 'list_partner_apis', description: 'List available partner APIs that can be proxied from a Butterbase app.', parameters: flatOpen() },
     { name: 'submit_suggestion', description: 'Submit a product suggestion / feedback item.', parameters: flatOpen() },
+
+    // ---- Tool-result read-back (loop-internal, NOT dispatched via MCP) ----
+    {
+      name: READ_TOOL_RESULT_TOOL,
+      description:
+        'Search or page through the FULL stored result of an earlier tool call when that result was truncated or cleared. ' +
+        'Pass the `message_id` from the truncated envelope or the cleared stub. Use `query` to find text in the full JSON; ' +
+        'omit it to read from `offset` with `limit`. It reads only the current conversation and cannot reach any other.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['message_id'],
+        properties: {
+          message_id: { type: 'string', description: 'The message_id from a truncated result envelope or a cleared stub.' },
+          query: { type: 'string', description: 'Case-insensitive text to find in the full result.' },
+          offset: { type: 'integer', minimum: 0, description: 'Character offset to read from when query is omitted.' },
+          limit: { type: 'integer', minimum: 1, maximum: 20000, description: 'Maximum characters to return (default 8000).' },
+        },
+      },
+    },
 
     // ---- File-op primitives (loop-internal, NOT dispatched via MCP) ----
     {
@@ -391,11 +458,53 @@ export function getToolCatalog(): ToolSpec[] {
         'Re-proposing something that is already in this list is refused before it reaches the owner, so read this instead of proposing again.',
       parameters: { type: 'object', additionalProperties: false, properties: {} },
     },
+
+    // ---- Office skill seams (Office-overlay-supplied, loop-internal) ------
+    {
+      name: SKILL_CREATOR_TOOL,
+      description:
+        'Draft or revise an Office skill from the owner\'s request. Use this when the owner asks the Office to behave differently, for example "also check the Google Sheet every morning". ' +
+        'You supply the owner\'s request in their own words; the creator writes the skill package (SKILL.md plus Python scripts and assets), validates it, and enqueues a read-only test against real data. ' +
+        'It NEVER executes the skill and cannot approve it: the owner sees a summary and the test result, then decides. ' +
+        'Pass `target_skill_id` to update a named existing skill, or `draft_version_id` to revise a draft already under discussion. ' +
+        'This tool may be ABSENT from your tool list; if it is not offered, this is not an Office where the owner can create skills.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['request'],
+        properties: {
+          request: { type: 'string', description: 'The owner\'s customization request, in their own words.' },
+          target_skill_id: { type: 'string', description: 'Existing skill to update rather than create.' },
+          draft_version_id: { type: 'string', description: 'Draft version to revise.' },
+          timezone: { type: 'string', description: 'IANA timezone for interpreting "every morning".' },
+        },
+      },
+    },
+    {
+      name: RUN_SKILL_SCRIPT_TOOL,
+      description:
+        'Run the pinned skill package\'s entrypoint with a JSON input and return its stdout, stderr and exit code. ' +
+        'The script is pure computation: it has no network and no credentials. Fetch any external data with the read tools first and pass it as `input`. ' +
+        'The entrypoint must stay inside the package\'s scripts/ directory. ' +
+        'This tool is present ONLY while a skill run or a draft test is active; it is absent otherwise.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          entrypoint: { type: 'string', description: 'Optional entrypoint override inside scripts/.' },
+          input: { description: 'JSON value passed to the script as input.json.' },
+        },
+      },
+    },
   ];
 }
 
 export function isListPendingDecisionsTool(name: string): name is 'list_pending_decisions' {
   return name === OPERATOR_PENDING_DECISIONS_TOOL;
+}
+
+export function isReadToolResultTool(name: string): name is 'read_tool_result' {
+  return name === READ_TOOL_RESULT_TOOL;
 }
 
 export function isOperatorScratchpadTool(name: string): name is 'update_operator_scratchpad' {

@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import { config } from '../../config.js';
 import { escapeHtml, renderEmailLayout, renderButton, renderAppEmailLayout, renderCodeBox, renderNotice } from './email-layout.js';
 import { isSilenced } from '../notification-prefs.service.js';
+import { idlePauseEmailCopy } from '../idle-pause-email-copy.js';
 
 /**
  * Optional per-recipient extensions to a billing email:
@@ -316,6 +317,10 @@ export async function sendPasswordResetEmail(email: string, code: string, appNam
 // ---- Billing email notifications ----
 
 export type BillingEmailTemplate =
+  | 'project_idle_warning'
+  | 'project_idle_reminder'
+  | 'project_paused_idle'
+  | 'idle_pause_breaker_ops'
   | 'payment_failed'
   | 'plan_downgraded'
   | 'soft_locked'
@@ -339,6 +344,10 @@ export type BillingEmailTemplate =
   | 'weekly_digest';
 
 const BILLING_EMAIL_SUBJECTS: Record<BillingEmailTemplate, string> = {
+  project_idle_warning: 'Your project will pause soon',
+  project_idle_reminder: 'Reminder: your project will pause soon',
+  project_paused_idle: 'Your project has been paused',
+  idle_pause_breaker_ops: '[butterbase] Idle pause circuit breaker triggered',
   payment_failed: 'Action Required: Payment Failed',
   plan_downgraded: 'Your Butterbase plan was downgraded',
   soft_locked: 'Account Limited: Free Plan Limits Exceeded',
@@ -430,6 +439,14 @@ export function buildBillingEmailBody(template: BillingEmailTemplate, data: Reco
   const dashboardUrl = process.env.DASHBOARD_URL || 'https://dashboard.butterbase.ai';
 
   switch (template) {
+    case 'project_idle_warning':
+    case 'project_idle_reminder':
+    case 'project_paused_idle': {
+      const copy = idlePauseEmailCopy(template, data);
+      return `${copy.paragraphs.join('\n\n')}\n\n${copy.button}: ${copy.billingUrl}\nOpen your project: ${copy.appUrl}`;
+    }
+    case 'idle_pause_breaker_ops':
+      return `Idle pause circuit breaker triggered: ${data.count} apps out of ${data.freeApps} free apps would be notified or paused. No pause notifications or pauses were applied. Review the idle-pause logs before changing limits.`;
     case 'payment_failed':
       return [
         'We were unable to process your payment.',
@@ -1206,7 +1223,7 @@ ${renderButton({ href: logsUrl, label: 'Open function logs' })}
     });
   }
 
-  const notice = buildNoticeHtml(template, data, dashboardUrl);
+  const notice = buildNoticeHtml(template, data, dashboardUrl, opts.actionTokens);
   if (notice) return notice;
 
   return null;
@@ -1222,6 +1239,7 @@ function buildNoticeHtml(
   template: BillingEmailTemplate,
   data: Record<string, string>,
   dashboardUrl: string,
+  actionTokens?: BillingEmailOptions['actionTokens'],
 ): string | null {
   const e = escapeHtml;
   const app = data.appName || data.appId || '';
@@ -1233,6 +1251,24 @@ function buildNoticeHtml(
   const ops = (preheader: string, content: string) => renderEmailLayout({ preheader, content, audience: 'ops' });
 
   switch (template) {
+    case 'project_idle_warning':
+    case 'project_idle_reminder':
+    case 'project_paused_idle': {
+      const copy = idlePauseEmailCopy(template, data);
+      const unsubscribe = actionTokens?.unsubscribeTemplate
+        ? ` <a href="${e(notifActionUrl(actionTokens.unsubscribeTemplate))}">Unsubscribe from these emails</a>.` : '';
+      return owner(copy.subject, renderNotice({
+        heading: copy.subject,
+        intro: copy.paragraphs.map(p => `<p>${e(p)}</p>`).join(''),
+        cta: { href: copy.billingUrl, label: copy.button },
+        note: `<a href="${e(copy.appUrl)}">Open your project</a>.${unsubscribe}`,
+      }));
+    }
+    case 'idle_pause_breaker_ops':
+      return ops('Idle pause circuit breaker triggered', renderNotice({
+        heading: 'Idle pause circuit breaker triggered',
+        intro: `<p>${e(data.count || '0')} apps out of ${e(data.freeApps || '0')} free apps would be notified or paused. No pause notifications or pauses were applied. Review the idle-pause logs before changing limits.</p>`,
+      }));
     case 'payment_failed': {
       const by = formatEmailDate(data.gracePeriodEndsAt);
       return owner(
@@ -1460,6 +1496,7 @@ export function buildBillingEmailSubject(
   template: BillingEmailTemplate,
   data: Record<string, string> = {},
 ): string {
+  if (template === 'project_idle_warning' || template === 'project_idle_reminder' || template === 'project_paused_idle') return idlePauseEmailCopy(template, data).subject;
   if (template === 'function_failed') {
     const app = data.appName || data.appId || 'your app';
     const fn = data.functionName || 'a function';
@@ -1618,6 +1655,7 @@ function digestTotalCount(data: Record<string, string>): number {
  * config.ses.devConsoleFallback is on.
  */
 const OPS_BILLING_TEMPLATES: ReadonlySet<BillingEmailTemplate> = new Set<BillingEmailTemplate>([
+  'idle_pause_breaker_ops',
   'clone_failed_ops',
   'clone_reaper_digest',
   'org_balance_low_ops',

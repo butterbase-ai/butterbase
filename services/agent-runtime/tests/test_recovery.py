@@ -103,3 +103,65 @@ async def test_recover_stale_runs(pg_pool):
             await c.execute("DELETE FROM agent_runs WHERE id = $1", fresh_id)
             await c.execute("DELETE FROM agents WHERE app_id = $1", app_id)
             await c.execute("DELETE FROM apps WHERE id = $1", app_id)
+
+
+@pytest.mark.asyncio
+async def test_recovery_skips_paused_apps(pg_pool):
+    """A paused app's stale runs are left untouched (still 'running'); they are
+    picked up by the first restart after the app is resumed."""
+    live_app = f"app_recovery_live_{uuid.uuid4().hex[:8]}"
+    paused_app = f"app_recovery_paused_{uuid.uuid4().hex[:8]}"
+    r_live = uuid.uuid4()
+    r_paused = uuid.uuid4()
+    app_ids = [live_app, paused_app]
+
+    try:
+        async with pg_pool.acquire() as c:
+            for app_id, paused in ((live_app, False), (paused_app, True)):
+                await c.execute(
+                    "INSERT INTO apps "
+                    "(id, owner_id, name, db_name, region, provisioning_status, "
+                    "deployment_backend, access_mode, paused) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) "
+                    "ON CONFLICT (id) DO NOTHING",
+                    app_id,
+                    "00000000-0000-0000-0000-000000000001",
+                    "Recovery Paused Test App",
+                    f"recovery_test_{uuid.uuid4().hex[:8]}",
+                    "local",
+                    "ready",
+                    "pages",
+                    "public",
+                    paused,
+                )
+                agent_id = await c.fetchval(
+                    "INSERT INTO agents (app_id, name, graph_spec) "
+                    "VALUES ($1, $2, '{}'::jsonb) "
+                    "RETURNING id",
+                    app_id,
+                    f"agent_{uuid.uuid4().hex[:8]}",
+                )
+                await c.execute(
+                    """
+                    INSERT INTO agent_runs
+                    (id, app_id, agent_id, caller_kind, input, status, last_heartbeat, attempt)
+                    VALUES ($1, $2, $3, 'function', '{}'::jsonb, 'running',
+                            now() - interval '60 seconds', 1)
+                    """,
+                    r_paused if paused else r_live,
+                    app_id,
+                    agent_id,
+                )
+
+        recovered_ids = await recover_stale_runs(pg_pool, stale_after_seconds=30)
+
+        assert str(r_live) in recovered_ids
+        assert str(r_paused) not in recovered_ids
+        async with pg_pool.acquire() as c:
+            status = await c.fetchval("SELECT status FROM agent_runs WHERE id = $1", r_paused)
+        assert status == "running"
+    finally:
+        async with pg_pool.acquire() as c:
+            await c.execute("DELETE FROM agent_runs WHERE app_id = ANY($1::text[])", app_ids)
+            await c.execute("DELETE FROM agents WHERE app_id = ANY($1::text[])", app_ids)
+            await c.execute("DELETE FROM apps WHERE id = ANY($1::text[])", app_ids)

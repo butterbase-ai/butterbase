@@ -10,7 +10,8 @@
   ],
   "vars": {
     "BUTTERBASE_REGION": "us-east-1",
-    "CONTROL_API_URL": "https://api.butterbase.ai"
+    "CONTROL_API_URL": "https://api.butterbase.ai",
+    "DASHBOARD_URL": "https://dashboard.butterbase.ai"
   },
   "kv_namespaces": [
     {

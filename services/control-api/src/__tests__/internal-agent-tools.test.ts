@@ -6,6 +6,12 @@ import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import Fastify from 'fastify';
 import { databasePlugin } from '../plugins/database.js';
 import { internalAgentToolsRoutes } from '../routes/internal-agent-tools.js';
+import { dispatchBuiltin } from '../services/agent-tools/builtin-dispatcher.js';
+import { invokeFunction } from '../services/function-invoke.js';
+import { assertAppIdNotPaused } from '../plugins/pause-gate.js';
+import { AppPausedError } from '../services/app-resolver.js';
+
+vi.mock('../plugins/pause-gate.js', () => ({ assertAppIdNotPaused: vi.fn() }));
 
 // ---------------------------------------------------------------------------
 // Mock the builtin dispatcher so we don't need a live data-plane DB
@@ -36,6 +42,13 @@ const VALID_RUN_ID = '00000000-0000-0000-0000-000000000001';
 const app = Fastify({ logger: false });
 
 beforeAll(async () => {
+  // Mirrors the AppPausedError mapping in index.ts.
+  app.setErrorHandler((error, _req, reply) => {
+    if (error instanceof AppPausedError) {
+      return reply.status(503).send({ code: 'APP_PAUSED', message: error.message });
+    }
+    return reply.status(500).send({ message: (error as Error).message });
+  });
   app.register(databasePlugin);
   app.register(internalAgentToolsRoutes);
   await app.ready();
@@ -125,6 +138,26 @@ describe('POST /internal/agent-tools/builtin/:tool_name', () => {
     expect(body.error).toMatch(/unknown builtin tool/);
   });
 
+  it('refuses a paused app with 503 and never dispatches', async () => {
+    vi.mocked(dispatchBuiltin).mockClear();
+    vi.mocked(assertAppIdNotPaused).mockRejectedValueOnce(new AppPausedError('app_1', null, 'idle_reaper'));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/internal/agent-tools/builtin/query_table',
+      headers: { 'x-internal-service-token': TOKEN },
+      payload: {
+        app_id: 'app_1',
+        run_id: VALID_RUN_ID,
+        caller_kind: 'dashboard',
+        caller_user_id: null,
+        args: { table: 'items' },
+      },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().code).toBe('APP_PAUSED');
+    expect(dispatchBuiltin).not.toHaveBeenCalled();
+  });
+
   it('returns 400 when run_id is not a valid UUID', async () => {
     const res = await app.inject({
       method: 'POST',
@@ -197,6 +230,27 @@ describe('POST /internal/agent-tools/function-invoke', () => {
       },
     });
     expect(res.statusCode).toBe(401);
+  });
+
+  it('refuses a paused app with 503 and never calls invokeFunction', async () => {
+    vi.mocked(invokeFunction).mockClear();
+    vi.mocked(assertAppIdNotPaused).mockRejectedValueOnce(new AppPausedError('app_1', null, 'idle_reaper'));
+    const res = await app.inject({
+      method: 'POST',
+      url: '/internal/agent-tools/function-invoke',
+      headers: { 'x-internal-service-token': TOKEN },
+      payload: {
+        app_id: 'app_1',
+        run_id: VALID_RUN_ID,
+        caller_kind: 'dashboard',
+        caller_user_id: null,
+        function_name: 'my-function',
+        args: {},
+      },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().code).toBe('APP_PAUSED');
+    expect(invokeFunction).not.toHaveBeenCalled();
   });
 
   it('returns 400 when function_name is missing', async () => {

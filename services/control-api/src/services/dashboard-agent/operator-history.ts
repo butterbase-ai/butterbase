@@ -112,8 +112,12 @@ export function replayCost(msg: Message): number {
  *
  * `invalid[i] === true` means "keeping `messages.slice(i)` breaks a
  * call/result pairing". Index range is [0, n]; `n` is the empty suffix.
+ *
+ * Exported for `context-compaction.ts`, whose prompt budget can force a cut
+ * earlier than the trim selected. Reusing this table keeps that shrinker
+ * pairing-valid without a second copy of the rules.
  */
-function invalidCutPoints(messages: Message[]): boolean[] {
+export function invalidCutPoints(messages: Message[]): boolean[] {
   const n = messages.length;
   const invalid = new Array<boolean>(n + 1).fill(false);
 

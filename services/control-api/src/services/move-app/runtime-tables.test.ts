@@ -47,3 +47,14 @@ describe('move-app runtime tables registry', () => {
     expect(childNames.has('agent_webhook_deliveries')).toBe(true);
   });
 });
+
+// These tables intentionally have no cascading apps FK: app deletion must keep
+// provider cleanup handles and unsettled attempt receipts recoverable.
+describe('durable video preparation table classification', () => {
+  it('moves all four app-owned tables in foreign-key-safe order', () => {
+    const tables = [...MOVE_APP_RUNTIME_TABLES] as string[];
+    for (const name of ['ai_video_preparations', 'ai_video_attempts', 'ai_reference_asset_groups', 'ai_reference_assets']) expect(tables).toContain(name);
+    expect(tables.indexOf('ai_video_preparations')).toBeLessThan(tables.indexOf('ai_video_attempts'));
+    expect(tables.indexOf('ai_reference_asset_groups')).toBeLessThan(tables.indexOf('ai_reference_assets'));
+  });
+});

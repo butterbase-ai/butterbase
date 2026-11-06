@@ -17,7 +17,11 @@
  * ceremony; they are the control.
  */
 import { describe, it, expect, vi } from 'vitest';
+import type pg from 'pg';
 import { createHttpFrontendMcp } from '../frontend-http.js';
+import { executeApprovedOperatorTool } from '../substrate-approval-bridge.js';
+import { captureApprovalOperation, workingTreeArtifact } from '../approval-operation.js';
+import { WorkingTreeCache } from '../working-tree.js';
 
 const JWT = 'bb_sk_test';
 const APP = 'app_1234';
@@ -142,6 +146,56 @@ describe('narrowness — this is the security control, not ceremony', () => {
   });
 });
 
+/**
+ * A hung create/start/list leg is a real production failure mode: the approval
+ * request has no response boundary, the build job sits PENDING, and the owner
+ * sees a blank gateway error. Every request needs a bound, and a timed-out one
+ * must say so rather than surfacing a bare "aborted".
+ */
+describe('requests are bounded', () => {
+  /** A fetch that only settles when the request signal aborts — like a black-holed socket. */
+  function hangingFetch(): typeof fetch {
+    return vi.fn((_url: any, init: any = {}) => new Promise<Response>((_resolve, reject) => {
+      const signal = (init as RequestInit).signal;
+      if (!signal) return;
+      signal.addEventListener(
+        'abort',
+        () => reject(new DOMException('This operation was aborted', 'AbortError')),
+        { once: true },
+      );
+    })) as unknown as typeof fetch;
+  }
+
+  it('bounds start_from_source and names the route it gave up on', async () => {
+    const mcp = createHttpFrontendMcp({
+      baseUrl: 'http://api.test',
+      fetchImpl: hangingFetch(),
+      startTimeoutMs: 20,
+    });
+
+    await expect(
+      mcp.call('manage_frontend', {
+        action: 'start_from_source',
+        app_id: APP,
+        deployment_id: 'dep_1',
+        lockfile_hash: 'aaaaaaaa',
+      }, JWT),
+    ).rejects.toThrow(/\/start timed out after 20ms/);
+  });
+
+  it('bounds the other calls at the request timeout', async () => {
+    const mcp = createHttpFrontendMcp({
+      baseUrl: 'http://api.test',
+      fetchImpl: hangingFetch(),
+      requestTimeoutMs: 20,
+    });
+
+    await expect(
+      mcp.call('manage_frontend', { action: 'list_deployments', app_id: APP }, JWT),
+    ).rejects.toThrow(/frontend GET .*timed out after 20ms/);
+  });
+});
+
 describe('failures surface as errors, not as silent success', () => {
   it('throws with the status and body on a non-2xx', async () => {
     const f = fakeFetch(() => ({ status: 409, body: { error: { message: 'source zip missing' } } }));
@@ -158,5 +212,59 @@ describe('failures surface as errors, not as silent success', () => {
     const f = fakeFetch(() => ({ status: 204 }));
     await expect(mk(f).call('manage_frontend', { action: 'list_deployments', app_id: APP }, JWT))
       .resolves.toBeNull();
+  });
+});
+
+/**
+ * Task 8 — the approval boundary sits IN FRONT of this transport.
+ *
+ * The transport routes around `turnMcp`, so its own narrowness is not the
+ * whole story: an approved `deploy_frontend` replays through here with the
+ * approving human's JWT. What must never happen is that a build the owner did
+ * NOT approve is shipped because the working tree moved after the proposal.
+ * The executor rebuilds the artifact identity from the CURRENT tree and
+ * refuses on any difference — before this transport is constructed, before
+ * any fetch, before the advisory lock.
+ *
+ * The pool is a stub on purpose: a correct refusal happens strictly ahead of
+ * every database touch, which is part of the property being pinned.
+ */
+describe('a changed approval never reaches the deploy transport', () => {
+  it('refuses with approval_operation_changed and makes no HTTP call', async () => {
+    const cache = new WorkingTreeCache();
+    cache.write('conv-1', APP, 'src/App.tsx', 'artifact A');
+    const artifactA = workingTreeArtifact(APP, cache.get('conv-1', APP))!;
+    expect(artifactA).toBeDefined();
+
+    // The tree changes BEFORE the owner's click.
+    cache.write('conv-1', APP, 'src/App.tsx', 'artifact B');
+
+    const fetchMock = vi.fn();
+    const prevFetch = global.fetch;
+    global.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const result = await executeApprovedOperatorTool({} as pg.Pool, {
+        approvalId: '6f9619ff-8b86-d011-b42d-00c04fc964ff',
+        name: 'deploy_frontend',
+        args: { app_id: APP },
+        jwt: JWT,
+        orgId: '11111111-1111-4111-8111-111111111111',
+        approval: {
+          conversationId: 'conv-1',
+          approvedOperation: captureApprovalOperation({
+            toolName: 'deploy_frontend',
+            args: { app_id: APP },
+            artifact: artifactA,
+          }),
+        },
+        officeConsequential: true,
+        cache,
+      });
+
+      expect(result).toMatchObject({ ok: false, code: 'approval_operation_changed' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      global.fetch = prevFetch;
+    }
   });
 });

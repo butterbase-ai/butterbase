@@ -1,6 +1,7 @@
 import fp from 'fastify-plugin';
 import websocket from '@fastify/websocket';
-import { RealtimeManager } from '../services/realtime-manager.js';
+import { RealtimeManager, broadcastCloseApp } from '../services/realtime-manager.js';
+import { onPauseStateChanged } from '../services/app-pause.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -20,6 +21,9 @@ export const realtimePlugin = fp(
       error: (...args: unknown[]) => app.log.error(args[0] as object, args[1] as string ?? ''),
     });
     app.decorate('realtimeManager', manager);
+
+    // A pause must drop already-open sockets on every instance, not just block new connects.
+    onPauseStateChanged(({ appId, paused }) => (paused ? broadcastCloseApp(appId) : undefined));
 
     // Start background timers after the server is ready
     app.addHook('onReady', async () => {

@@ -49,6 +49,34 @@ const ARGS = {
   trigger: { type: 'http', config: { method: 'POST', auth: 'none' } },
 };
 
+/**
+ * A hung function deploy is the same failure class as a hung upload: the
+ * approval request has no response boundary and the deploy job sits pending.
+ * The transport must bound the request and say what timed out.
+ */
+describe('function deploy requests are bounded', () => {
+  it('times out a hung deploy and names the route', async () => {
+    const impl = vi.fn((_url: any, init: any = {}) => new Promise<Response>((_resolve, reject) => {
+      const signal = (init as RequestInit).signal;
+      if (!signal) return;
+      signal.addEventListener(
+        'abort',
+        () => reject(new DOMException('This operation was aborted', 'AbortError')),
+        { once: true },
+      );
+    })) as unknown as typeof fetch;
+
+    const mcp = createHttpFunctionMcp({
+      baseUrl: 'https://api.test',
+      fetchImpl: impl,
+      requestTimeoutMs: 20,
+    });
+
+    await expect(mcp.call('deploy_function', ARGS, JWT))
+      .rejects.toThrow(/POST \/v1\/.*\/functions timed out after 20ms/);
+  });
+});
+
 describe('deploy_function over HTTP', () => {
   it('posts to the app-scoped functions route with the org credential', async () => {
     const { impl, calls } = fakeFetch(() => ({ body: { id: 'fn_1', url: 'https://api/fn/conflicts_check' } }));

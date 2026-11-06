@@ -31,6 +31,11 @@ import rateLimitPlugin from './plugins/rate-limit.js';
 import quotaEnforcementPlugin from './plugins/quota-enforcement.js';
 import flyReplayPlugin from './plugins/fly-replay.js';
 import migrationGuardPlugin from './plugins/migration-guard.js';
+import pauseGatePlugin from './plugins/pause-gate.js';
+import appActivityPlugin from './plugins/app-activity.js';
+import idlePauseReaperPlugin from './plugins/idle-pause-reaper.js';
+import idlePauseUpgradeReconcilerPlugin from './plugins/idle-pause-upgrade-reconciler.js';
+import { registerFrontendPauseSync } from './services/frontend-pause-sync.js';
 import { healthRoutes } from './routes/health.js';
 import { initRoutes } from './routes/init.js';
 import { schemaRoutes } from './routes/schema.js';
@@ -38,6 +43,7 @@ import { autoApiRoutes } from './routes/auto-api.js';
 import { rlsRoutes } from './routes/rls.js';
 import { oauthConfigRoutes } from './routes/oauth-config.js';
 import { auditLogRoutes } from './routes/audit-logs.js';
+import { pruneAuditEvents } from './services/audit-retention.js';
 import { mcpRoutes } from './routes/mcp.js';
 import { wellKnownRoutes } from './routes/well-known.js';
 import { oauthRoutes } from './routes/oauth.js';
@@ -76,6 +82,7 @@ import { peopleRoutes } from './routes/people.js';
 import { peopleWebhookRoutes } from './routes/people-webhook.js';
 import { aiVideoRoutes } from './routes/ai-videos.js';
 import { aiImageRoutes } from './routes/ai-images.js';
+import { startVideoPreparationWorker } from './services/ai-router/video-preparation-worker.js';
 import { startVideoSweeper } from './services/ai-router/video-sweeper.js';
 import { startResponsesSweeper } from './services/ai-router/responses-sweeper.js';
 import { startEmailLookupSweeper } from './services/people/email-lookup-sweeper.js';
@@ -105,8 +112,9 @@ import type { AuthProvider } from './services/auth-provider.js';
 import { config, assertRegionConfig, assertInternalEmailSecret } from './config.js';
 import { assertNeonProjectsConfig } from './services/neon-projects.js';
 import { createAgentError } from './services/error-handler.js';
-import { AppNotFoundError, AppAuthRequiredError, AppPausedError } from './services/app-resolver.js';
+import { AppNotFoundError, AppAuthRequiredError, AppPausedError, pausedRemediation } from './services/app-resolver.js';
 import { AuthorizationError, NotFoundError, ValidationError, ConflictError } from './services/api-errors.js';
+import { assertOperatorAccessPolicyReady } from './services/dashboard-agent/operator-access-policy.js';
 import { startFlushWorker, reconcileUsage } from './services/usage-metering.js';
 import { getRedisClient, shutdownRedis } from './services/redis.js';
 import { enforceExpiredGracePeriods } from './services/billing-service.js';
@@ -430,8 +438,8 @@ app.setErrorHandler((error: any, request, reply) => {
     return reply.status(503).send(createAgentError({
       code: 'APP_PAUSED',
       message: error.message,
-      remediation: 'Resume the app with `butterbase apps resume <app-id>` (or manage_app action="resume" via MCP).',
-      details: { reason: error.reason },
+      remediation: `${pausedRemediation(error.pausedBy, error.reason)} Owners can resume with \`butterbase apps resume <app-id>\` or manage_app action="resume" via MCP.`,
+      details: { reason: error.reason, paused_by: error.pausedBy },
     }));
   }
 
@@ -559,17 +567,49 @@ try {
   }
   app.log.info('Cloud overlays loaded');
 } catch (err) {
+  // A cloud deployment that requires the operator access policy must not fall
+  // back to the permissive OSS default when the overlay fails to load.
+  if (config.operatorAccessPolicyRequired) throw err;
   app.log.info(
     { err: (err as Error)?.message },
     'No cloud overlays found, running in OSS mode (Noop billing, Unlimited quotas)',
   );
 }
 
+// Office lifecycle registration runs after every plugin has loaded (so
+// app.controlDb exists) and before listen(). In required mode a missing or
+// broken policy fails startup instead of serving with the no-op default.
+app.addHook('onReady', async () => {
+  try {
+    // @ts-expect-error — overlay path resolved at runtime
+    const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/bootstrap.js');
+    await overlay.bootstrapOfficeServices({ controlPool: app.controlDb });
+  } catch (err) {
+    if (config.operatorAccessPolicyRequired) throw err;
+    app.log.info(
+      { err: (err as Error)?.message },
+      'No Office overlay found, Office lifecycle disabled',
+    );
+  }
+  assertOperatorAccessPolicyReady(config.operatorAccessPolicyRequired);
+});
+
 app.register(internalLeaseRoutes);
 app.register(kvCredentialsRoutes);
 app.register(kvResolveJwtRoutes);
 app.register(visitBeaconRoutes);
 app.register(internalEmailRoutes);
+// Pause gate: before kv-quota so a paused app is refused before quota work.
+// Route plugins registered BEFORE this line do not get the gate (encapsulated
+// plugins copy parent hooks at load), so app-scoped route plugins must be
+// registered after it.
+app.register(pauseGatePlugin);
+app.register(appActivityPlugin);
+app.register(idlePauseReaperPlugin);
+app.register(idlePauseUpgradeReconcilerPlugin);
+// Paused page (spec §5.6): keep dispatch-worker KV in step with apps.paused.
+// Registered as a plugin so app.controlDb (decorated by the database plugin) exists.
+app.register(async (instance) => { registerFrontendPauseSync(instance.controlDb); });
 // kv-quota MUST be registered before kv-data/expose/admin routes so the
 // preHandler hook and kvAccount decoration are available when those routes mount.
 app.register(kvQuotaPlugin);
@@ -740,6 +780,16 @@ try {
 } catch (err) {
   // OSS mode (overlay not built) is expected and must not throw.
   console.warn('[control-api] app-copy worker not started:', err);
+}
+try {
+  // @ts-expect-error — overlay path resolved at runtime
+  const overlay = await import('../../../cloud-overlays/dist/cloud-overlays/office/routes.js');
+  await app.register(overlay.officeRoutes);
+} catch (err) {
+  // OSS mode (overlay not built) is expected and must not throw — but a
+  // genuine registration error must fail startup when the policy is required.
+  if (config.operatorAccessPolicyRequired) throw err;
+  console.warn('[control-api] office overlay routes not registered:', err);
 }
 app.register(apiKeyRoutes);
 app.register(realtimeRoutes);
@@ -1021,13 +1071,17 @@ Promise.resolve(app.ready())
             // and per-region runtime DBs (auth + per-app writes), so prune both.
             const retentionDeletes: Array<{ sql: string; label: string }> = [
               { sql: `DELETE FROM function_invocations WHERE started_at < now() - interval '7 days'`, label: 'function_invocations' },
-              { sql: `DELETE FROM audit_events WHERE created_at < now() - interval '180 days'`, label: 'audit_events' },
             ];
             for (const { sql, label } of retentionDeletes) {
               await app.controlDb.query(sql).catch((err) => {
                 app.log.error({ err, table: label, scope: 'control-plane' }, 'Retention prune failed');
               });
             }
+            await pruneAuditEvents(app.controlDb).then((result) => {
+              app.log.info({ ...result, scope: 'control-plane' }, 'Audit retention batch pass finished');
+            }).catch((err) => {
+              app.log.error({ err, scope: 'control-plane' }, 'Audit retention batch pass failed');
+            });
 
             const runtimeDeletes: Array<{ sql: string; label: string }> = [
               ...retentionDeletes,
@@ -1048,6 +1102,11 @@ Promise.resolve(app.ready())
                   app.log.error({ err, table: label, region, scope: 'runtime-plane' }, 'Retention prune failed');
                 });
               }
+              await pruneAuditEvents(pool).then((result) => {
+                app.log.info({ ...result, region, scope: 'runtime-plane' }, 'Audit retention batch pass finished');
+              }).catch((err) => {
+                app.log.error({ err, region, scope: 'runtime-plane' }, 'Audit retention batch pass failed');
+              });
             }
             // Daily paid-conversion snapshot. Subscription rows carry no
             // status history, so a day not captured here is a day of the
@@ -1088,6 +1147,8 @@ Promise.resolve(app.ready())
           app.log.error({ err }, 'video-sweeper: failed to start');
         });
     }
+
+    if (process.env.SKIP_VIDEO_PREPARATION_WORKER !== '1') (app as any).videoPreparationStop = startVideoPreparationWorker(app);
 
     // Fork-count sweeper: processes cross-region fork_count_decrements outbox
     // rows that the runtime DELETE trigger cannot handle (different-region source).
@@ -1154,7 +1215,7 @@ Promise.resolve(app.ready())
     // to this instance's own region — app_environments is a regional
     // runtime-plane table, same as the other per-region background jobs.
     if (process.env.SKIP_STAGING_REAPER !== '1') {
-      const stagingReaperStop = startStagingReaper(app.runtimeDb(regionConfig.instanceRegion), app.log);
+      const stagingReaperStop = startStagingReaper(app.runtimeDb(regionConfig.instanceRegion), app.log, app.controlDb, regionConfig.instanceRegion);
       (app as any).stagingReaperStop = stagingReaperStop;
     }
   })
@@ -1214,7 +1275,9 @@ if (process.env.NODE_ENV !== 'test') {
       if ((app as any).analyticsPullerInterval) clearInterval((app as any).analyticsPullerInterval);
       if ((app as any).kvReconcileInterval) clearInterval((app as any).kvReconcileInterval);
       if ((app as any).orphanReconcilerInterval) clearInterval((app as any).orphanReconcilerInterval);
+      if ((app as any).videoPreparationStop) (app as any).videoPreparationStop();
       if ((app as any).videoSweeperStop) (app as any).videoSweeperStop();
+      if ((app as any).stagingReaperStop) (app as any).stagingReaperStop();
       if ((app as any).forkSweeperHandle) await (app as any).forkSweeperHandle.stop().catch(() => {});
       if ((app as any).responsesSweeperHandle) await (app as any).responsesSweeperHandle.stop().catch(() => {});
       if ((app as any).peopleEmailSweeperHandle) await (app as any).peopleEmailSweeperHandle.stop().catch(() => {});

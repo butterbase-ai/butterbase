@@ -70,6 +70,8 @@ export interface VideoPollResult {
   unsignedUrls?: string[];
   providerCostUsd?: number;
   error?: string;
+  /** Optional structured upstream rejection details for provider-specific policy. */
+  failure?: Record<string, unknown>;
 }
 
 export interface ImageGenerationRequest {
@@ -111,6 +113,8 @@ export interface ImageSupportedParams {
   topLevel: ReadonlySet<string>;
   /** Whitelisted keys inside the `provider: {...}` bag. */
   provider: ReadonlySet<string>;
+  /** Optional model-specific limits, checked before reserving credits. */
+  validate?(request: ImageGenerationRequest): { param: string; message: string } | null;
 }
 
 export interface AdapterUsage {
@@ -148,6 +152,10 @@ export type AdapterErrorKind =
   | 'model_not_available'
   | 'auth'
   | 'bad_request'
+  // The upstream rejected a request parameter this model does not support.
+  // The request is valid for the canonical model, so another slot may serve
+  // it; the router treats this as fallback-eligible (not a caller error).
+  | 'param_unsupported'
   | 'insufficient_credits'
   | 'unknown';
 

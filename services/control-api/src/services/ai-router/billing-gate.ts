@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { grantLease, settleLease, type SettleResult } from '../lease-service.js';
 import { config } from '../../config.js';
+import { roundCreditUsd } from '../credit-precision.js';
 
 export interface LeaseHandle {
   leaseId: string;
@@ -8,7 +9,7 @@ export interface LeaseHandle {
   expiresAt: Date;
 }
 
-/** Smallest value satisfying CHECK (amount_usd > 0) on NUMERIC(12,4). */
+/** Nominal reservation amount; actual settlement preserves eight USD decimals. */
 export const MIN_LEASE_USD = 0.0001;
 
 export class InsufficientCreditsError extends Error {
@@ -88,11 +89,10 @@ export async function acquireForEstimatedCost(
   estimatedUsd: number,
   ttlSeconds: number
 ): Promise<LeaseHandle> {
-  // credit_leases.amount_usd is NUMERIC(12,4) with a CHECK (amount_usd > 0).
-  // Any positive value smaller than 0.00005 rounds to 0.0000 and trips the
-  // constraint, so floor at MIN_LEASE_USD — the smallest representable positive.
-  // This also covers the zero-cost estimate edge case (empty embedding etc.).
-  const requested = estimatedUsd < MIN_LEASE_USD ? MIN_LEASE_USD : estimatedUsd;
+  // Keep the existing nominal reservation floor, including for zero estimates.
+  // This is a hold, not a minimum charge: settlement refunds the unused portion
+  // at eight-decimal precision after the upstream reports the actual cost.
+  const requested = roundCreditUsd(Math.max(MIN_LEASE_USD, estimatedUsd));
   const res = await grantLease(platformPool, {
     userId,
     organizationId,

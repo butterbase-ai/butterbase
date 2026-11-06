@@ -114,7 +114,7 @@ describe('MCP Server Tools', () => {
     const actions = (tool!.inputSchema as unknown as { properties: { action: { enum: string[] } } })
       .properties.action.enum;
     expect(actions.sort()).toEqual([
-      'check_template_updates', 'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'get_env', 'get_template_release', 'link_substrate', 'list', 'list_template_releases', 'move', 'move_status', 'pause', 'preview_clone_env_vars', 'publish_template_release', 'secure', 'set_clone_webhook', 'set_substrate_autopropagate', 'set_visibility', 'teardown_source_replica', 'unlink_substrate', 'update_access_mode', 'update_cors', 'update_env', 'update_from_template',
+      'check_template_updates', 'clone', 'delete', 'find_templates', 'get_clone_job', 'get_config', 'get_env', 'get_template_release', 'link_substrate', 'list', 'list_template_releases', 'move', 'move_status', 'pause', 'preview_clone_env_vars', 'publish_template_release', 'resume', 'secure', 'set_clone_webhook', 'set_substrate_autopropagate', 'set_visibility', 'teardown_source_replica', 'unlink_substrate', 'update_access_mode', 'update_cors', 'update_env', 'update_from_template',
     ]);
     const names = result.tools.map((t) => t.name);
     for (const removed of [
@@ -225,6 +225,21 @@ describe('MCP Server Tools', () => {
       .join('\n');
     expect(text).toContain('Butterbase');
     expect(text).toContain('Declarative schema');
+  });
+
+  it('butterbase_docs documents ctx.kv and the compare-and-delete lock release', async () => {
+    const { client } = await createConnectedPair();
+    const out = await client.callTool({
+      name: 'butterbase_docs',
+      arguments: { topic: 'functions' },
+    });
+    const text = (out.content as Array<{ type: string; text?: string }>)
+      .map((c) => c.text ?? '')
+      .join('\n');
+    expect(text).toContain('ctx.kv.setnx');
+    expect(text).toContain('ctx.kv.cas');
+    expect(text).toContain('ctx.kv.del');
+    expect(text).toContain('mget');
   });
 });
 

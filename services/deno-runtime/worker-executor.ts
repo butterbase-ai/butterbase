@@ -1,5 +1,8 @@
 // Isolated function executor using Web Workers
 import type { FunctionMetadata } from "./function-loader.ts";
+import { cronOriginForExecution } from './cron-origin.ts';
+import { createCronFetch } from './cron-fetch.ts';
+import { kvMgetValues } from './kv-batch.ts';
 
 // Platform-owned do-invoker Worker: inlined into generated ctx source so
 // user code cannot read them via Deno.env or ctx.env.
@@ -70,8 +73,13 @@ export async function executeFunction(
     const dbUrl = buildDatabaseUrl(metadata.app_id, metadata.db_connection_string);
 
     // Parse request
-    const requestBody = request.body ? await request.text() : null;
     const requestHeaders = Object.fromEntries(request.headers.entries());
+    const originToken = requestHeaders['x-butterbase-cron-origin'];
+    const cronOrigin = cronOriginForExecution(originToken, metadata.app_id, Deno.env.get('BUTTERBASE_INTERNAL_SECRET'), metadata.timeout_ms);
+    const requestBody = request.body ? new Uint8Array(await request.arrayBuffer()) : null;
+    // Keep platform metadata out of the user-facing Request. It remains in the
+    // fetch closure, without exposing the platform signing secret to user code.
+    delete requestHeaders['x-butterbase-cron-origin'];
 
     // Reconstruct public API URL instead of internal runtime URL
     const url = new URL(request.url);
@@ -86,6 +94,7 @@ export async function executeFunction(
       requestBody,
       userId,
       caller,
+      cronOrigin,
     });
 
     // Execute in Web Worker with timeout
@@ -353,13 +362,28 @@ export function buildWorkerCode(
     requestUrl: string;
     requestMethod: string;
     requestHeaders: Record<string, string>;
-    requestBody: string | null;
+    requestBody: string | Uint8Array | null;
     userId?: string;
     caller?: CallerInfo;
+    cronOrigin?: string;
   }
 ): string {
+  // Embed bytes as base64 data, never decoded text or executable source. Keep
+  // legacy string callers (including empty-string absence) compatible.
+  const requestBodyCode = context.requestBody instanceof Uint8Array
+    ? `Uint8Array.from(atob(${JSON.stringify(btoa(Array.from(context.requestBody, byte => String.fromCharCode(byte)).join("")))}), c => c.charCodeAt(0))`
+    : context.requestBody ? JSON.stringify(context.requestBody) : null;
+
   return `
     import { Pool } from "https://deno.land/x/postgres@v0.19.3/mod.ts";
+
+    ${context.cronOrigin ? `
+    globalThis.fetch = (${createCronFetch.toString()})(
+      globalThis.fetch.bind(globalThis),
+      ${JSON.stringify(context.cronOrigin)},
+      ${JSON.stringify([Deno.env.get('API_BASE_URL') || 'http://localhost:4000', Deno.env.get('CONTROL_API_URL') || '', DO_INVOKER_URL])}
+    );
+    ` : ''}
 
     // Sandbox: replace Deno.env with a frozen stub so user code and
     // library internals cannot read host environment variables.
@@ -405,7 +429,7 @@ export function buildWorkerCode(
     const request = new Request("${context.requestUrl}", {
       method: "${context.requestMethod}",
       headers: ${JSON.stringify(context.requestHeaders)},
-      ${context.requestBody ? `body: ${JSON.stringify(context.requestBody)},` : ""}
+      ${requestBodyCode !== null ? `body: ${requestBodyCode},` : ""}
     });
 
     // Shared row converter for BigInt compatibility
@@ -771,6 +795,7 @@ export function buildWorkerCode(
       kv: (() => {
         const __kvBase = ${JSON.stringify(Deno.env.get("CONTROL_API_URL") || Deno.env.get("API_BASE_URL"))};
         const __kvRoot = __kvBase + "/v1/" + ${JSON.stringify(metadata.app_id)} + "/kv";
+        const __kvMgetValues = ${kvMgetValues.toString()};
         const __kvHeaders = {
           authorization: "Bearer " + ${JSON.stringify(metadata.internal_fn_key || metadata.env_vars?.BUTTERBASE_SERVICE_KEY || Deno.env.get("BUTTERBASE_FUNCTION_SERVICE_KEY") || '')},
           "content-type": "application/json",
@@ -867,7 +892,7 @@ export function buildWorkerCode(
             const res = await __kvCall("POST", "_batch", { ops });
             if (!res.ok) __kvThrow(res, await res.json().catch(() => null));
             const { results } = await res.json();
-            return results.map((r) => ("error" in r ? null : r.value));
+            return __kvMgetValues(keys, results);
           },
           async mset(entries, opts) {
             await Promise.all(

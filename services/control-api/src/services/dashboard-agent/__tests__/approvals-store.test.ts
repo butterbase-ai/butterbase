@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import {
   createApproval,
@@ -146,6 +147,22 @@ describe('Approvals Store', () => {
     expect(approval.denyReason).toBeNull();
     expect(approval.createdAt).toBeDefined();
     expect(approval.resolvedAt).toBeNull();
+  });
+
+  it('createApproval honours a pre-allocated id (deploy snapshot key)', async () => {
+    const id = randomUUID();
+    const approval = await createApproval(pool, {
+      id,
+      conversationId,
+      turnMessageId: '00000000-0000-0000-0000-000000000003',
+      toolName: 'deploy_frontend',
+      toolArgs: { app_id: 'app-1' },
+      sensitivity: 'destructive',
+    });
+
+    // The snapshot store is keyed by this exact id; the row must use it.
+    expect(approval.id).toBe(id);
+    expect((await getApproval(pool, id, testUserId))!.id).toBe(id);
   });
 
   it('getApproval owner path', async () => {
