@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import fs from 'fs-extra';
@@ -9,8 +10,8 @@ async function requireAppId(appId?: string): Promise<string> {
 
   const currentAppId = await getCurrentAppId();
   if (!currentAppId) {
-    console.log(chalk.red('✗ No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.log(chalk.red(text('✗ No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
 
@@ -19,27 +20,27 @@ async function requireAppId(appId?: string): Promise<string> {
 
 export async function storageListCommand(options: { app?: string }) {
   const appId = await requireAppId(options.app);
-  const spinner = ora('Fetching storage objects...').start();
+  const spinner = ora(text('Fetching storage objects...')).start();
 
   try {
     const response: any = await listStorageObjects(appId);
     spinner.stop();
 
     if (!response.objects || response.objects.length === 0) {
-      console.log(chalk.yellow('No files found'));
+      console.log(chalk.yellow(text('No files found')));
       return;
     }
 
-    console.log(chalk.blue('\nStorage objects:\n'));
+    console.log(chalk.blue(text('\nStorage objects:\n')));
     for (const obj of response.objects) {
       console.log(chalk.bold(obj.filename));
-      console.log(chalk.gray(`  ID: ${obj.id}`));
-      console.log(chalk.gray(`  Size: ${(obj.size_bytes / 1024).toFixed(2)} KB`));
-      console.log(chalk.gray(`  Type: ${obj.content_type}`));
+      console.log(chalk.gray(msg`  ID: ${obj.id}`));
+      console.log(chalk.gray(msg`  Size: ${(obj.size_bytes / 1024).toFixed(2)} KB`));
+      console.log(chalk.gray(msg`  Type: ${obj.content_type}`));
       console.log();
     }
   } catch (error) {
-    spinner.fail('Failed to fetch storage objects');
+    spinner.fail(text('Failed to fetch storage objects'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
@@ -49,11 +50,11 @@ export async function storageUploadCommand(file: string, options: { app?: string
   const appId = await requireAppId(options.app);
 
   if (!await fs.pathExists(file)) {
-    console.log(chalk.red(`✗ File not found: ${file}`));
+    console.log(chalk.red(msg`✗ File not found: ${file}`));
     process.exit(1);
   }
 
-  const spinner = ora('Uploading file...').start();
+  const spinner = ora(text('Uploading file...')).start();
 
   try {
     const stats = await fs.stat(file);
@@ -81,15 +82,15 @@ export async function storageUploadCommand(file: string, options: { app?: string
     });
 
     if (!uploadResponse.ok) {
-      throw new Error('Failed to upload file to storage');
+      throw new Error(text('Failed to upload file to storage'));
     }
 
-    spinner.succeed('File uploaded');
-    console.log(chalk.green('\n✓ File uploaded successfully!'));
-    console.log(chalk.gray(`  Object ID: ${uploadData.objectId}`));
-    console.log(chalk.gray(`  Object Key: ${uploadData.objectKey}`));
+    spinner.succeed(text('File uploaded'));
+    console.log(chalk.green(text('\n✓ File uploaded successfully!')));
+    console.log(chalk.gray(msg`  Object ID: ${uploadData.objectId}`));
+    console.log(chalk.gray(msg`  Object Key: ${uploadData.objectKey}`));
   } catch (error) {
-    spinner.fail('Failed to upload file');
+    spinner.fail(text('Failed to upload file'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
@@ -99,18 +100,18 @@ export async function storageDeleteCommand(objectId: string, options: { app?: st
   const appId = await requireAppId(options.app);
 
   if (!objectId) {
-    console.log(chalk.red('✗ Object ID is required'));
-    console.log(chalk.gray('Usage: butterbase storage delete <object-id>'));
+    console.log(chalk.red(text('✗ Object ID is required')));
+    console.log(chalk.gray(text('Usage: butterbase storage delete <object-id>')));
     process.exit(1);
   }
 
-  const spinner = ora('Deleting object...').start();
+  const spinner = ora(text('Deleting object...')).start();
 
   try {
     await deleteStorageObject(appId, objectId);
-    spinner.succeed('Object deleted');
+    spinner.succeed(text('Object deleted'));
   } catch (error) {
-    spinner.fail('Failed to delete object');
+    spinner.fail(text('Failed to delete object'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
@@ -122,36 +123,36 @@ export async function storageConfigCommand(options: { app?: string; publicRead?:
   if (options.publicRead !== undefined) {
     // Update storage config
     if (!['true', 'false'].includes(options.publicRead)) {
-      console.log(chalk.red('✗ --public-read must be "true" or "false"'));
+      console.log(chalk.red(text('✗ --public-read must be "true" or "false"')));
       process.exit(1);
     }
     const publicReadEnabled = options.publicRead === 'true';
-    const spinner = ora('Updating storage configuration...').start();
+    const spinner = ora(text('Updating storage configuration...')).start();
 
     try {
       const response: any = await updateStorageConfig(appId, { publicReadEnabled });
-      spinner.succeed('Storage configuration updated');
-      console.log(chalk.green(`\n✓ publicReadEnabled: ${response.storage_config.publicReadEnabled}`));
+      spinner.succeed(text('Storage configuration updated'));
+      console.log(chalk.green(msg`\n✓ publicReadEnabled: ${response.storage_config.publicReadEnabled}`));
     } catch (error) {
-      spinner.fail('Failed to update storage configuration');
+      spinner.fail(text('Failed to update storage configuration'));
       console.error(chalk.red((error as Error).message));
       process.exit(1);
     }
   } else {
     // Show current storage config
-    const spinner = ora('Fetching storage configuration...').start();
+    const spinner = ora(text('Fetching storage configuration...')).start();
 
     try {
       const response: any = await getAppConfig(appId);
       spinner.stop();
 
       const storageConfig = response.storage_config || {};
-      console.log(chalk.blue('\nStorage configuration:\n'));
+      console.log(chalk.blue(text('\nStorage configuration:\n')));
       console.log(chalk.bold('  publicReadEnabled:'), storageConfig.publicReadEnabled ? chalk.green('true') : chalk.yellow('false'));
       console.log(chalk.bold('  maxFileSizeMb:'), chalk.gray(storageConfig.maxFileSizeMb ?? 10));
       console.log(chalk.bold('  allowedContentTypes:'), chalk.gray(JSON.stringify(storageConfig.allowedContentTypes ?? ['*/*'])));
     } catch (error) {
-      spinner.fail('Failed to fetch storage configuration');
+      spinner.fail(text('Failed to fetch storage configuration'));
       console.error(chalk.red((error as Error).message));
       process.exit(1);
     }

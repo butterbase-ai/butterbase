@@ -1,3 +1,4 @@
+import { msg } from './i18n.js';
 import chalk from 'chalk';
 import { ButterbaseError } from '@butterbase/sdk';
 
@@ -10,9 +11,9 @@ import { ButterbaseError } from '@butterbase/sdk';
 export function renderError(e: unknown): string {
   if (e instanceof ButterbaseError) {
     const lines = [chalk.red(`${e.name}: ${e.message}`)];
-    if (e.code)        lines.push(chalk.gray(`  code:        ${e.code}`));
-    if (e.status)      lines.push(chalk.gray(`  status:      ${e.status}`));
-    if (e.remediation) lines.push(chalk.yellow(`  remediation: ${e.remediation}`));
+    if (e.code)        lines.push(chalk.gray(msg`  code:        ${e.code}`));
+    if (e.status)      lines.push(chalk.gray(msg`  status:      ${e.status}`));
+    if (e.remediation) lines.push(chalk.yellow(msg`  remediation: ${e.remediation}`));
     return lines.join('\n');
   }
   if (e instanceof Error) return chalk.red(e.message);

@@ -1,3 +1,4 @@
+import { msg } from './i18n.js';
 import { register } from 'tsx/esm/api';
 import path from 'node:path';
 
@@ -28,7 +29,7 @@ export async function loadKvConfig(filePath: string): Promise<KvConfig> {
       : rawDefault;
     if (!config || !Array.isArray(config.expose)) {
       throw new Error(
-        `${filePath} must export a default value from defineKvConfig({ expose: [...] })`,
+        msg`${filePath} must export a default value from defineKvConfig({ expose: [...] })`,
       );
     }
     return config;

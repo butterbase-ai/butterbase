@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { text } from '../src/lib/i18n.js';
 import { Command } from 'commander';
+import { configureCliLocale } from '../src/lib/locale-command.js';
 import { registerOfficeCommands } from '../src/commands/office.js';
 import chalk from 'chalk';
 import { readFileSync } from 'node:fs';
@@ -187,6 +189,7 @@ function resolveVersion(): string {
 }
 
 const program = new Command();
+configureCliLocale(program);
 
 program
   .name('butterbase')
@@ -1648,7 +1651,7 @@ program
   .option('--json', 'Output raw JSON on success')
   .action((sourceAppId, targetDir, opts) => {
     if (opts.retry && sourceAppId) {
-      console.error('Error: --retry and <source-app-id> are mutually exclusive. Provide one or the other.');
+      console.error(text('Error: --retry and <source-app-id> are mutually exclusive. Provide one or the other.'));
       process.exit(1);
       return;
     }
@@ -1656,7 +1659,7 @@ program
       return cloneRetryCommand(opts.retry, targetDir, opts);
     }
     if (!sourceAppId) {
-      console.error('Error: <source-app-id> is required unless --retry is provided.');
+      console.error(text('Error: <source-app-id> is required unless --retry is provided.'));
       process.exit(1);
       return;
     }

@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 // submodules/butterbase-oss/packages/cli/src/commands/repo.ts
 import chalk from 'chalk';
 import ora from 'ora';
@@ -15,7 +16,7 @@ async function requireBoundApp(opts: { app?: string }): Promise<string> {
   if (opts.app) return opts.app;
   const bound = await getBoundAppId();
   if (!bound) {
-    console.log(chalk.red('✗ no app bound to this folder. Run `butterbase repo init <app_id>` first.'));
+    console.log(chalk.red(text('✗ no app bound to this folder. Run `butterbase repo init <app_id>` first.')));
     process.exit(1);
   }
   return bound!;
@@ -28,7 +29,7 @@ export async function repoInitCommand(
   const projectPath = path.resolve(process.cwd(), '.butterbase/config.json');
   const existing = await loadProjectConfig();
   if (existing && !opts.force) {
-    console.log(chalk.red(`✗ .butterbase/config.json already exists (currentApp=${(existing as any).currentApp ?? '?'}). Use --force to overwrite.`));
+    console.log(chalk.red(msg`✗ .butterbase/config.json already exists (currentApp=${(existing as any).currentApp ?? '?'}). Use --force to overwrite.`));
     process.exit(1);
   }
   await saveProjectConfig({ ...(existing ?? {}), currentApp: appId });
@@ -50,7 +51,7 @@ export async function repoInitCommand(
     }
   }
 
-  console.log(chalk.green(`✓ bound ${path.relative(process.cwd(), projectPath)} → app ${appId}`));
+  console.log(chalk.green(msg`✓ bound ${path.relative(process.cwd(), projectPath)} → app ${appId}`));
 }
 
 export async function repoWipeCommand(opts: { app?: string; yes?: boolean }) {
@@ -59,17 +60,17 @@ export async function repoWipeCommand(opts: { app?: string; yes?: boolean }) {
     const { ok } = await prompts({
       type: 'text',
       name: 'ok',
-      message: `Type the app id "${appId}" to wipe its repo (cannot be undone)`,
+      message: msg`Type the app id "${appId}" to wipe its repo (cannot be undone)`,
     });
     if (ok !== appId) {
-      console.log(chalk.yellow('aborted'));
+      console.log(chalk.yellow(text('aborted')));
       return;
     }
   }
-  const spinner = ora('Wiping repo…').start();
+  const spinner = ora(text('Wiping repo…')).start();
   try {
     const res = await repoApi.wipe(appId);
-    spinner.succeed(`Repo wiped for ${res.app_id}`);
+    spinner.succeed(msg`Repo wiped for ${res.app_id}`);
     await setPinnedSnapshotId(null);
   } catch (e) {
     spinner.fail((e as Error).message);
@@ -85,7 +86,7 @@ export async function repoLogCommand(opts: { app?: string; json?: boolean }) {
     return;
   }
   if (snapshots.length === 0) {
-    console.log(chalk.gray('(no snapshots yet — run `butterbase repo push`)'));
+    console.log(chalk.gray(text('(no snapshots yet — run `butterbase repo push`)')));
     return;
   }
   for (const s of snapshots) {
@@ -102,18 +103,18 @@ export async function repoPushCommand(opts: {
   const appId = await requireBoundApp(opts);
   const root = process.cwd();
 
-  const walkSpin = ora('Walking project tree…').start();
+  const walkSpin = ora(text('Walking project tree…')).start();
   const ig = await loadIgnoreRules(root);
   const walked: WalkedFile[] = [];
   for await (const f of walkRepo(root, ig)) walked.push(f);
-  walkSpin.succeed(`Walked ${walked.length} files`);
+  walkSpin.succeed(msg`Walked ${walked.length} files`);
 
   if (walked.length === 0) {
-    console.log(chalk.yellow('✗ nothing to push — every file is ignored or the folder is empty'));
+    console.log(chalk.yellow(text('✗ nothing to push — every file is ignored or the folder is empty')));
     process.exit(1);
   }
 
-  const hashSpin = ora('Hashing files…').start();
+  const hashSpin = ora(text('Hashing files…')).start();
   let files: FileEntry[];
   try {
     files = await buildManifest(walked);
@@ -123,14 +124,14 @@ export async function repoPushCommand(opts: {
     return;
   }
   const totalBytes = files.reduce((n, f) => n + f.size, 0);
-  hashSpin.succeed(`Hashed ${files.length} files (${formatBytes(totalBytes)})`);
+  hashSpin.succeed(msg`Hashed ${files.length} files (${formatBytes(totalBytes)})`);
 
   if (opts.dryRun) {
     if (opts.json) {
       console.log(JSON.stringify({ files, total_bytes: totalBytes, file_count: files.length }, null, 2));
     } else {
       for (const f of files) console.log(`${f.sha256.slice(0, 12)}  ${formatBytes(f.size).padStart(8)}  ${f.path}`);
-      console.log(chalk.gray(`-- ${files.length} files, ${formatBytes(totalBytes)} total`));
+      console.log(chalk.gray(msg`-- ${files.length} files, ${formatBytes(totalBytes)} total`));
     }
     return;
   }
@@ -146,7 +147,7 @@ export async function repoPushCommand(opts: {
       const m = missing[i];
       const abs = absBySha.get(m.sha256);
       if (!abs) {
-        console.log(chalk.red(`✗ server asked for blob ${m.sha256} that isn't in our manifest`));
+        console.log(chalk.red(msg`✗ server asked for blob ${m.sha256} that isn't in our manifest`));
         process.exit(1);
       }
       const upSpin = ora(`${label} ${i + 1}/${missing.length} ${m.sha256.slice(0, 12)}…`).start();
@@ -161,7 +162,7 @@ export async function repoPushCommand(opts: {
     }
   };
 
-  const prepSpin = ora('Preparing snapshot…').start();
+  const prepSpin = ora(text('Preparing snapshot…')).start();
   let prep;
   try {
     prep = await repoApi.prepare(appId, opts.message === undefined ? { files } : { files, message: opts.message });
@@ -170,13 +171,13 @@ export async function repoPushCommand(opts: {
     process.exit(1);
     return;
   }
-  prepSpin.succeed(`Snapshot id ${prep.snapshot_id.slice(0, 12)} — ${prep.missing_blobs.length} new blobs to upload`);
+  prepSpin.succeed(msg`Snapshot id ${prep.snapshot_id.slice(0, 12)} — ${prep.missing_blobs.length} new blobs to upload`);
 
   await uploadMissing(prep.missing_blobs, 'Uploading');
 
   const requestBody = opts.message === undefined ? { files } : { files, message: opts.message };
 
-  const commitSpin = ora('Committing snapshot…').start();
+  const commitSpin = ora(text('Committing snapshot…')).start();
   let commitRes;
   try {
     commitRes = await repoApi.commit(appId, requestBody);
@@ -194,12 +195,12 @@ export async function repoPushCommand(opts: {
       ...(details?.missing_shas ?? []),
       ...(details?.size_mismatches?.map(s => s.sha256) ?? []),
     ]);
-    commitSpin.warn(`Commit returned 409 for ${stillMissing.size} blob(s). Re-uploading and retrying once…`);
+    commitSpin.warn(msg`Commit returned 409 for ${stillMissing.size} blob(s). Re-uploading and retrying once…`);
     let reprep;
     try {
       reprep = await repoApi.prepare(appId, requestBody);
     } catch (e2) {
-      console.log(chalk.red(`✗ re-prepare failed: ${(e2 as Error).message}`));
+      console.log(chalk.red(msg`✗ re-prepare failed: ${(e2 as Error).message}`));
       process.exit(1);
       return;
     }
@@ -207,12 +208,12 @@ export async function repoPushCommand(opts: {
     try {
       commitRes = await repoApi.commit(appId, requestBody);
     } catch (e2) {
-      console.log(chalk.red(`✗ commit still failing after retry: ${(e2 as Error).message}`));
+      console.log(chalk.red(msg`✗ commit still failing after retry: ${(e2 as Error).message}`));
       process.exit(1);
       return;
     }
   }
-  commitSpin.succeed(`Committed ${commitRes.snapshot_id.slice(0, 12)} (${commitRes.file_count} files, ${formatBytes(commitRes.total_bytes)})`);
+  commitSpin.succeed(msg`Committed ${commitRes.snapshot_id.slice(0, 12)} (${commitRes.file_count} files, ${formatBytes(commitRes.total_bytes)})`);
 
   await setPinnedSnapshotId(commitRes.snapshot_id);
 
@@ -243,7 +244,7 @@ export async function repoPullCommand(opts: { app?: string; force?: boolean; jso
 
   const pinned = await getPinnedSnapshotId();
 
-  const latestSpin = ora('Fetching latest snapshot…').start();
+  const latestSpin = ora(text('Fetching latest snapshot…')).start();
   let latest;
   try {
     latest = await repoApi.getLatest(appId);
@@ -252,10 +253,10 @@ export async function repoPullCommand(opts: { app?: string; force?: boolean; jso
     process.exit(1);
     return;
   }
-  latestSpin.succeed(`Remote latest: ${latest.snapshot_id.slice(0, 12)}`);
+  latestSpin.succeed(msg`Remote latest: ${latest.snapshot_id.slice(0, 12)}`);
 
   if (pinned === latest.snapshot_id) {
-    console.log(chalk.gray('Already up to date.'));
+    console.log(chalk.gray(text('Already up to date.')));
     return;
   }
 
@@ -271,7 +272,7 @@ export async function repoPullCommand(opts: { app?: string; force?: boolean; jso
       const p = await repoApi.getSnapshot(appId, pinned);
       pinnedManifestFiles = p.manifest.files;
     } catch {
-      console.log(chalk.yellow(`⚠ pinned snapshot ${pinned.slice(0,12)} no longer on server (pruned). Local untracked deletions will require --force.`));
+      console.log(chalk.yellow(msg`⚠ pinned snapshot ${pinned.slice(0,12)} no longer on server (pruned). Local untracked deletions will require --force.`));
     }
   }
   const pinnedSha = new Map<string, string>();
@@ -305,9 +306,9 @@ export async function repoPullCommand(opts: { app?: string; force?: boolean; jso
   }
 
   if (conflicts.length > 0 && !opts.force) {
-    console.log(chalk.red(`✗ ${conflicts.length} local file(s) deleted on the remote but modified locally:`));
+    console.log(chalk.red(msg`✗ ${conflicts.length} local file(s) deleted on the remote but modified locally:`));
     for (const p of conflicts) console.log(`    ${p}`);
-    console.log(chalk.gray('Re-run with --force to drop local changes for those files.'));
+    console.log(chalk.gray(text('Re-run with --force to drop local changes for those files.')));
     process.exit(1);
   }
   // With --force, the conflicts also get deleted.
@@ -316,14 +317,14 @@ export async function repoPullCommand(opts: { app?: string; force?: boolean; jso
   if (toDownload.length === 0 && toDelete.length === 0) {
     // No file changes — just bump the pin and done.
     await setPinnedSnapshotId(latest.snapshot_id);
-    console.log(chalk.gray('Nothing to change locally; pin updated.'));
+    console.log(chalk.gray(text('Nothing to change locally; pin updated.')));
     return;
   }
 
   // Apply downloads.
   for (let i = 0; i < toDownload.length; i++) {
     const f = toDownload[i];
-    const dlSpin = ora(`Fetching ${i + 1}/${toDownload.length} ${f.path}`).start();
+    const dlSpin = ora(msg`Fetching ${i + 1}/${toDownload.length} ${f.path}`).start();
     try {
       const url = await repoApi.getBlobUrl(appId, f.sha256);
       const buf = await downloadBlob(url.downloadUrl);
@@ -339,7 +340,7 @@ export async function repoPullCommand(opts: { app?: string; force?: boolean; jso
   // Apply deletes.
   for (const p of toDelete) {
     await fs.remove(path.join(root, p));
-    console.log(chalk.gray(`  deleted ${p}`));
+    console.log(chalk.gray(msg`  deleted ${p}`));
   }
 
   await setPinnedSnapshotId(latest.snapshot_id);
@@ -350,7 +351,7 @@ export async function repoPullCommand(opts: { app?: string; force?: boolean; jso
       deleted: toDelete,
     }, null, 2));
   } else {
-    console.log(chalk.green(`✓ pulled snapshot ${latest.snapshot_id.slice(0, 12)} — ${toDownload.length} downloaded, ${toDelete.length} deleted`));
+    console.log(chalk.green(msg`✓ pulled snapshot ${latest.snapshot_id.slice(0, 12)} — ${toDownload.length} downloaded, ${toDelete.length} deleted`));
   }
 }
 
@@ -429,10 +430,10 @@ export async function repoStatusCommand(opts: { app?: string; json?: boolean }) 
   }
 
   console.log(`${chalk.bold('app')}      ${appId}`);
-  console.log(`${chalk.bold('pinned')}   ${pinned ? pinned.slice(0, 12) : chalk.gray('(none)')}`);
-  console.log(`${chalk.bold('remote')}   ${remoteLatest ? remoteLatest.slice(0, 12) : chalk.gray('(no snapshots)')}`);
+  console.log(`${chalk.bold(text('pinned'))}   ${pinned ? pinned.slice(0, 12) : chalk.gray(text('(none)'))}`);
+  console.log(`${chalk.bold(text('remote'))}   ${remoteLatest ? remoteLatest.slice(0, 12) : chalk.gray(text('(no snapshots)'))}`);
   if (pinned && remoteLatest && pinned !== remoteLatest) {
-    console.log(chalk.yellow('⚠ pin is behind remote — run `butterbase repo pull`'));
+    console.log(chalk.yellow(text('⚠ pin is behind remote — run `butterbase repo pull`')));
   }
   console.log();
   let printed = 0;
@@ -446,5 +447,5 @@ export async function repoStatusCommand(opts: { app?: string; json?: boolean }) 
       chalk.green('N');
     console.log(`  ${tag} ${f.path}`);
   }
-  if (printed === 0) console.log(chalk.green('working tree clean'));
+  if (printed === 0) console.log(chalk.green(text('working tree clean')));
 }

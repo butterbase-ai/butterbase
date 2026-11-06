@@ -1,3 +1,4 @@
+import { text as cliText, msg } from './i18n.js';
 import { getMergedConfig } from './config.js';
 import { parseApiError } from '@butterbase/sdk';
 
@@ -22,12 +23,12 @@ async function fetchJson(url: string, init?: RequestInit): Promise<{ status: num
     const code: string | undefined = cause?.code ?? (err as any)?.code;
     const origin = safeOrigin(url);
     const hint = isLocalOrigin(origin)
-      ? ` Run \`butterbase config set endpoint https://api.butterbase.ai\` to point at the hosted platform.`
+      ? cliText(` Run \`butterbase config set endpoint https://api.butterbase.ai\` to point at the hosted platform.`)
       : '';
     if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'ETIMEDOUT' || code === 'EAI_AGAIN') {
-      throw new Error(`Could not reach ${origin} (${code}).${hint}`);
+      throw new Error(msg`Could not reach ${origin} (${code}).${hint}`);
     }
-    throw new Error(`Network error reaching ${origin}: ${(err as Error)?.message ?? String(err)}`);
+    throw new Error(msg`Network error reaching ${origin}: ${(err as Error)?.message ?? String(err)}`);
   }
 
   if (res.status === 204) return { status: 204, body: {} };
@@ -38,9 +39,9 @@ async function fetchJson(url: string, init?: RequestInit): Promise<{ status: num
     return { status: res.status, body: JSON.parse(text) };
   } catch {
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status} from ${safeOrigin(url)} (non-JSON response: ${truncate(text, 200)})`);
+      throw new Error(msg`HTTP ${res.status} from ${safeOrigin(url)} (non-JSON response: ${truncate(text, 200)})`);
     }
-    throw new Error(`Unexpected non-JSON response from ${safeOrigin(url)}: ${truncate(text, 200)}`);
+    throw new Error(msg`Unexpected non-JSON response from ${safeOrigin(url)}: ${truncate(text, 200)}`);
   }
 }
 
@@ -87,7 +88,7 @@ function extractErrorMessage(body: any): string {
   if (typeof body.error === 'string') return body.error;
   if (body.error?.message) return body.error.message;
   if (body.message) return body.message;
-  return 'Request failed';
+  return cliText('Request failed');
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
@@ -305,7 +306,7 @@ export async function uploadBinary(url: string, buffer: Buffer, contentType: str
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Upload failed (${res.status}): ${text}`);
+    throw new Error(msg`Upload failed (${res.status}): ${text}`);
   }
 }
 

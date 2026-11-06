@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import prompts from 'prompts';
@@ -20,7 +21,7 @@ function getCliPackageRoot(): string {
     }
     const parent = path.dirname(dir);
     if (parent === dir) {
-      throw new Error('Could not locate CLI package root (templates directory missing)');
+      throw new Error(text('Could not locate CLI package root (templates directory missing)'));
     }
     dir = parent;
   }
@@ -91,19 +92,19 @@ async function copyTemplate(
 }
 
 export async function initCommand(template?: string) {
-  console.log(chalk.blue('🚀 Initialize Butterbase Project\n'));
+  console.log(chalk.blue(text('🚀 Initialize Butterbase Project\n')));
 
   // Get project name
   const { projectName } = await prompts({
     type: 'text',
     name: 'projectName',
-    message: 'Project name:',
+    message: text('Project name:'),
     initial: 'my-butterbase-app',
-    validate: (value) => value.length > 0 || 'Project name is required',
+    validate: (value) => value.length > 0 || text('Project name is required'),
   });
 
   if (!projectName) {
-    console.log(chalk.yellow('Cancelled'));
+    console.log(chalk.yellow(text('Cancelled')));
     process.exit(0);
   }
 
@@ -112,16 +113,16 @@ export async function initCommand(template?: string) {
     const { selectedTemplate } = await prompts({
       type: 'select',
       name: 'selectedTemplate',
-      message: 'Select a template:',
+      message: text('Select a template:'),
       choices: [
         { title: 'React + Vite', value: 'react-vite' },
-        { title: 'Next.js (coming soon)', value: 'nextjs', disabled: true },
-        { title: 'Vue + Vite (coming soon)', value: 'vue-vite', disabled: true },
+        { title: text('Next.js (coming soon)'), value: 'nextjs', disabled: true },
+        { title: text('Vue + Vite (coming soon)'), value: 'vue-vite', disabled: true },
       ],
     });
 
     if (!selectedTemplate) {
-      console.log(chalk.yellow('Cancelled'));
+      console.log(chalk.yellow(text('Cancelled')));
       process.exit(0);
     }
 
@@ -134,7 +135,7 @@ export async function initCommand(template?: string) {
   const { appId } = await prompts({
     type: 'text',
     name: 'appId',
-    message: 'Butterbase App ID (leave empty to create later):',
+    message: text('Butterbase App ID (leave empty to create later):'),
     initial: config.currentApp || '',
   });
 
@@ -144,18 +145,18 @@ export async function initCommand(template?: string) {
   const targetDir = path.join(process.cwd(), projectName);
 
   if (await fs.pathExists(targetDir)) {
-    console.log(chalk.red(`✗ Directory "${projectName}" already exists`));
+    console.log(chalk.red(msg`✗ Directory "${projectName}" already exists`));
     process.exit(1);
   }
 
-  const spinner = ora('Creating project...').start();
+  const spinner = ora(text('Creating project...')).start();
 
   try {
     // Get template directory
     const templateDir = path.join(getCliPackageRoot(), 'templates', template!);
 
     if (!await fs.pathExists(templateDir)) {
-      throw new Error(`Template "${template}" not found`);
+      throw new Error(msg`Template "${template}" not found`);
     }
 
     // Create target directory
@@ -178,24 +179,24 @@ export async function initCommand(template?: string) {
       await fs.copy(envExamplePath, envPath);
     }
 
-    spinner.succeed('Project created!');
+    spinner.succeed(text('Project created!'));
 
-    console.log(chalk.green('\n✓ Project initialized successfully!\n'));
-    console.log(chalk.gray('Next steps:\n'));
+    console.log(chalk.green(text('\n✓ Project initialized successfully!\n')));
+    console.log(chalk.gray(text('Next steps:\n')));
     console.log(chalk.white(`  cd ${projectName}`));
     console.log(chalk.white(`  npm install`));
     console.log(chalk.white(`  npm run dev`));
 
-    console.log(chalk.cyan('\n\ud83e\udd16 AI Agent Integration:'));
-    console.log(chalk.white('  .mcp.json has been created for Claude Code / MCP integration.'));
-    console.log(chalk.gray('  Set your API key: ') + chalk.white('export BUTTERBASE_API_KEY=bb_sk_...'));
-    console.log(chalk.gray('  Install skills:   ') + chalk.white('claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills && claude plugin install butterbase-skills@butterbase-skills'));
+    console.log(chalk.cyan(text('\n\ud83e\udd16 AI Agent Integration:')));
+    console.log(chalk.white(text('  .mcp.json has been created for Claude Code / MCP integration.')));
+    console.log(chalk.gray(text('  Set your API key: ')) + chalk.white('export BUTTERBASE_API_KEY=bb_sk_...'));
+    console.log(chalk.gray(text('  Install skills:   ')) + chalk.white('claude plugin marketplace add https://github.com/butterbase-ai/butterbase-skills && claude plugin install butterbase-skills@butterbase-skills'));
 
     if (!appId) {
-      console.log(chalk.yellow('\n⚠ Remember to update .env with your Butterbase App ID'));
+      console.log(chalk.yellow(text('\n⚠ Remember to update .env with your Butterbase App ID')));
     }
   } catch (error) {
-    spinner.fail('Failed to create project');
+    spinner.fail(text('Failed to create project'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }

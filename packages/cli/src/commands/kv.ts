@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import prompts from 'prompts';
@@ -9,7 +10,7 @@ async function requireAppId(opt?: string): Promise<string> {
   if (opt) return opt;
   const cur = await getCurrentAppId();
   if (!cur) {
-    console.log(chalk.red('✗ no app — use `butterbase apps use <id>` or --app'));
+    console.log(chalk.red(text('✗ no app — use `butterbase apps use <id>` or --app')));
     process.exit(1);
     return undefined as unknown as string;
   }
@@ -25,7 +26,7 @@ function parseTtl(t: string | undefined): number | null | undefined {
   if (t === 'null' || t === 'forever') return null;
   // Support shorthand like 30d / 1h / 60s
   const m = /^(\d+)\s*([smhd])?$/.exec(t.trim());
-  if (!m) { console.log(chalk.red(`✗ bad --ttl: ${t}`)); process.exit(1); }
+  if (!m) { console.log(chalk.red(msg`✗ bad --ttl: ${t}`)); process.exit(1); }
   const n = Number(m[1]);
   const mult = ({ s: 1, m: 60, h: 3600, d: 86400 } as Record<string, number>)[m[2] ?? 's'] ?? 1;
   return n * mult;
@@ -41,13 +42,13 @@ export async function kvSetCommand(key: string, value: string, opts: { app?: str
   const appId = await requireAppId(opts.app);
   const ttl = parseTtl(opts.ttl);
   await kvApi.set(appId, key, parseValue(value), { ttl, ephemeral: opts.ephemeral });
-  console.log(chalk.green(`✓ set ${key}`));
+  console.log(chalk.green(msg`✓ set ${key}`));
 }
 
 export async function kvDelCommand(key: string, opts: { app?: string }) {
   const appId = await requireAppId(opts.app);
   const res = await kvApi.del(appId, key);
-  console.log(chalk.green(`✓ del — ${JSON.stringify(res)}`));
+  console.log(chalk.green(msg`✓ del — ${JSON.stringify(res)}`));
 }
 
 export async function kvLsCommand(opts: { app?: string; prefix?: string; limit?: string }) {
@@ -55,7 +56,7 @@ export async function kvLsCommand(opts: { app?: string; prefix?: string; limit?:
   const limit = Number(opts.limit ?? '100');
   const res = await kvApi.scan(appId, opts.prefix ?? '', limit) as { keys: string[]; cursor: string };
   for (const k of res.keys) console.log(k);
-  if (res.cursor !== '0') console.log(chalk.gray(`-- next cursor: ${res.cursor}`));
+  if (res.cursor !== '0') console.log(chalk.gray(msg`-- next cursor: ${res.cursor}`));
 }
 
 export async function kvStatsCommand(opts: { app?: string }) {
@@ -65,33 +66,33 @@ export async function kvStatsCommand(opts: { app?: string }) {
 
 export async function kvFlushCommand(opts: { app?: string; confirm?: boolean; includeConfig?: boolean }) {
   if (!opts.confirm) {
-    console.log(chalk.red('✗ refusing to flush without --confirm'));
+    console.log(chalk.red(text('✗ refusing to flush without --confirm')));
     process.exit(1);
     return;
   }
   const appId = await requireAppId(opts.app);
-  const spinner = ora('Flushing KV…').start();
+  const spinner = ora(text('Flushing KV…')).start();
   const res = await kvApi.flush(appId, opts.includeConfig);
-  spinner.succeed(`Flushed (${JSON.stringify(res)})`);
+  spinner.succeed(msg`Flushed (${JSON.stringify(res)})`);
 }
 
 export async function kvRulesCommand(opts: { app?: string }) {
   const appId = await requireAppId(opts.app);
   const { rules } = await kvApi.listRules(appId) as { rules: { pattern: string; read: string; write: string }[] };
-  if (rules.length === 0) { console.log(chalk.gray('(no rules)')); return; }
-  for (const r of rules) console.log(`${r.pattern.padEnd(40)}  read=${r.read}  write=${r.write}`);
+  if (rules.length === 0) { console.log(chalk.gray(text('(no rules)'))); return; }
+  for (const r of rules) console.log(msg`${r.pattern.padEnd(40)}  read=${r.read}  write=${r.write}`);
 }
 
 export async function kvExposeCommand(pattern: string, opts: { app?: string; read: string; write: string }) {
   const appId = await requireAppId(opts.app);
   await kvApi.expose(appId, pattern, opts.read, opts.write);
-  console.log(chalk.green(`✓ exposed ${pattern}`));
+  console.log(chalk.green(msg`✓ exposed ${pattern}`));
 }
 
 export async function kvUnexposeCommand(pattern: string, opts: { app?: string }) {
   const appId = await requireAppId(opts.app);
   await kvApi.unexpose(appId, pattern);
-  console.log(chalk.green(`✓ unexposed ${pattern}`));
+  console.log(chalk.green(msg`✓ unexposed ${pattern}`));
 }
 
 // ---------------------------------------------------------------------------
@@ -156,27 +157,27 @@ export async function kvApplyCommand(opts: {
 
   // 4. Print preview
   if (!hasChanges) {
-    console.log(chalk.gray('No changes — already up-to-date.'));
+    console.log(chalk.gray(text('No changes — already up-to-date.')));
     return;
   }
 
   for (const r of diff.remove) {
-    console.log(chalk.red(`  - ${r.pattern}  read=${r.read}  write=${r.write}`));
+    console.log(chalk.red(msg`  - ${r.pattern}  read=${r.read}  write=${r.write}`));
   }
   for (const r of diff.change) {
     console.log(
       chalk.yellow(
-        `  ~ ${r.pattern}  read=${r.from.read}->${r.read}  write=${r.from.write}->${r.write}`,
+        msg`  ~ ${r.pattern}  read=${r.from.read}->${r.read}  write=${r.from.write}->${r.write}`,
       ),
     );
   }
   for (const r of diff.add) {
-    console.log(chalk.green(`  + ${r.pattern}  read=${r.read}  write=${r.write}`));
+    console.log(chalk.green(msg`  + ${r.pattern}  read=${r.read}  write=${r.write}`));
   }
 
   // 5. Dry-run stops here
   if (opts.dryRun) {
-    console.log(chalk.gray('\n(dry-run — no changes applied)'));
+    console.log(chalk.gray(text('\n(dry-run — no changes applied)')));
     return;
   }
 
@@ -185,17 +186,17 @@ export async function kvApplyCommand(opts: {
     const { confirmed } = await prompts({
       type: 'confirm',
       name: 'confirmed',
-      message: 'Apply these changes?',
+      message: text('Apply these changes?'),
       initial: false,
     });
     if (!confirmed) {
-      console.log(chalk.gray('Aborted.'));
+      console.log(chalk.gray(text('Aborted.')));
       return;
     }
   }
 
   // 7. Apply: removes first, then changes (unexpose→expose), then pure adds
-  const spinner = ora('Applying…').start();
+  const spinner = ora(text('Applying…')).start();
   try {
     for (const r of diff.remove) {
       await kvApi.unexpose(appId, r.pattern);
@@ -208,10 +209,10 @@ export async function kvApplyCommand(opts: {
       await kvApi.expose(appId, r.pattern, r.read, r.write);
     }
     spinner.succeed(
-      `Applied: ${diff.remove.length} removed, ${diff.add.length} added, ${diff.change.length} changed.`,
+      msg`Applied: ${diff.remove.length} removed, ${diff.add.length} added, ${diff.change.length} changed.`,
     );
   } catch (err) {
-    spinner.fail('Apply failed');
+    spinner.fail(text('Apply failed'));
     throw err;
   }
 }
