@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -9,11 +10,12 @@ import { Sun, Moon, Laptop } from 'lucide-react';
 import { useTheme } from '@/lib/theme';
 
 export function ThemeToggle() {
+  useUiLocale();
   const { setTheme } = useTheme();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="Toggle theme" className="relative">
+        <Button variant="ghost" size="icon" aria-label={uiText("Toggle theme")} className="relative">
           <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
           <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
         </Button>
@@ -21,16 +23,13 @@ export function ThemeToggle() {
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={() => setTheme('light')}>
           <Sun className="mr-2 h-4 w-4" />
-          Light
-        </DropdownMenuItem>
+          {uiText("Light")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => setTheme('dark')}>
           <Moon className="mr-2 h-4 w-4" />
-          Dark
-        </DropdownMenuItem>
+          {uiText("Dark")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => setTheme('system')}>
           <Laptop className="mr-2 h-4 w-4" />
-          System
-        </DropdownMenuItem>
+          {uiText("System")}</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

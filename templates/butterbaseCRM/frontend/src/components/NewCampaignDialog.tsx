@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
@@ -16,6 +17,7 @@ interface Props {
 }
 
 export function NewCampaignDialog({ defaultListId }: Props) {
+  useUiLocale();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [listId, setListId] = useState(defaultListId ?? '');
@@ -42,7 +44,7 @@ export function NewCampaignDialog({ defaultListId }: Props) {
   const peopleLists = (lists ?? []).filter((l) => l.entity_type === 'people');
 
   async function submit() {
-    if (!userId) { toast.error('No user'); return; }
+    if (!userId) { toast.error(uiText('No user')); return; }
     if (!name.trim() || !listId || !subject.trim() || !body.trim()) return;
     try {
       const campaign = await create.mutateAsync({
@@ -56,15 +58,15 @@ export function NewCampaignDialog({ defaultListId }: Props) {
       });
       if (startNow) {
         await start.mutateAsync(campaign.id);
-        toast.success(`Campaign “${campaign.name}” started`);
+        toast.success(uiMessage`Campaign “${campaign.name}” started`);
       } else {
-        toast.success(`Draft “${campaign.name}” saved`);
+        toast.success(uiMessage`Draft “${campaign.name}” saved`);
       }
       setOpen(false);
       setName(''); setSubject(''); setBody('Hi {{first_name}},\n\n');
       navigate(`/campaigns?campaign=${campaign.id}`);
     } catch (e: any) {
-      toast.error(e?.message ?? 'Failed to create campaign');
+      toast.error(e?.message ?? uiText('Failed to create campaign'));
     }
   }
 
@@ -75,27 +77,26 @@ export function NewCampaignDialog({ defaultListId }: Props) {
       <DialogTrigger asChild>
         <Button size="sm" className="h-9 gap-1.5 bg-foreground text-background hover:bg-foreground/85">
           <Plus className="h-3.5 w-3.5" />
-          New campaign
-        </Button>
+          {uiText("New campaign")}</Button>
       </DialogTrigger>
       <DialogContent className="max-w-xl">
         <DialogHeader>
-          <DialogTitle className="font-display tracking-tight">New email campaign</DialogTitle>
+          <DialogTitle className="font-display tracking-tight">{uiText("New email campaign")}</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
           <div>
-            <Label className="eyebrow !text-[10px]">Name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Q3 fintech intro" className="mt-1" />
+            <Label className="eyebrow !text-[10px]">{uiText("Name")}</Label>
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={uiText("Q3 fintech intro")} className="mt-1" />
           </div>
           <div>
-            <Label className="eyebrow !text-[10px]">Audience list</Label>
+            <Label className="eyebrow !text-[10px]">{uiText("Audience list")}</Label>
             <Select value={listId} onValueChange={setListId}>
               <SelectTrigger className="mt-1">
-                <SelectValue placeholder="Pick a people list" />
+                <SelectValue placeholder={uiText("Pick a people list")} />
               </SelectTrigger>
               <SelectContent>
                 {peopleLists.length === 0 ? (
-                  <div className="px-3 py-2 text-[12px] text-muted-foreground">No people lists yet — run AI search and click “Save as list”.</div>
+                  <div className="px-3 py-2 text-[12px] text-muted-foreground">{uiText("No people lists yet — run AI search and click “Save as list”.")}</div>
                 ) : peopleLists.map((l) => (
                   <SelectItem key={l.id} value={l.id}>{l.name} · {l.member_count}</SelectItem>
                 ))}
@@ -103,19 +104,19 @@ export function NewCampaignDialog({ defaultListId }: Props) {
             </Select>
           </div>
           <div>
-            <Label className="eyebrow !text-[10px]">Subject</Label>
-            <Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Quick question for {{first_name}}" className="mt-1" />
+            <Label className="eyebrow !text-[10px]">{uiText("Subject")}</Label>
+            <Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder={uiText("Quick question for {{first_name}}")} className="mt-1" />
           </div>
           <div>
-            <Label className="eyebrow !text-[10px]">Body</Label>
+            <Label className="eyebrow !text-[10px]">{uiText("Body")}</Label>
             <Textarea value={body} onChange={(e) => setBody(e.target.value)} className="mt-1 min-h-[160px] font-mono text-[12.5px]" />
             <p className="mt-1 text-[11px] text-muted-foreground">
-              Variables: <code>{'{{first_name}}'}</code>, <code>{'{{last_name}}'}</code>, <code>{'{{full_name}}'}</code>, <code>{'{{title}}'}</code>, <code>{'{{company}}'}</code>, <code>{'{{email}}'}</code>
+              {uiText("Variables: ")}<code>{'{{first_name}}'}</code>, <code>{'{{last_name}}'}</code>, <code>{'{{full_name}}'}</code>, <code>{'{{title}}'}</code>, <code>{'{{company}}'}</code>, <code>{'{{email}}'}</code>
             </p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <Label className="eyebrow !text-[10px]">Daily limit (max 30)</Label>
+              <Label className="eyebrow !text-[10px]">{uiText("Daily limit (max 30)")}</Label>
               <Input
                 type="number"
                 min={1}
@@ -126,7 +127,7 @@ export function NewCampaignDialog({ defaultListId }: Props) {
               />
             </div>
             <div>
-              <Label className="eyebrow !text-[10px]">Throttle (sec between sends)</Label>
+              <Label className="eyebrow !text-[10px]">{uiText("Throttle (sec between sends)")}</Label>
               <Input
                 type="number"
                 min={60}
@@ -139,13 +140,12 @@ export function NewCampaignDialog({ defaultListId }: Props) {
           </div>
           <label className="flex items-center gap-2 pt-1 text-[12.5px] text-muted-foreground">
             <input type="checkbox" checked={startNow} onChange={(e) => setStartNow(e.target.checked)} />
-            Start sending immediately (otherwise saves as draft)
-          </label>
+            {uiText("Start sending immediately (otherwise saves as draft)")}</label>
           <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>Cancel</Button>
+            <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>{uiText("Cancel")}</Button>
             <Button onClick={submit} disabled={busy || !name.trim() || !listId || !subject.trim() || !body.trim()} className="bg-foreground text-background hover:bg-foreground/85 gap-2">
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              {startNow ? 'Create & start' : 'Save draft'}
+              {startNow ? uiText('Create & start') : uiText('Save draft')}
             </Button>
           </div>
         </div>

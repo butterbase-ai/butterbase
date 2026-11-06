@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useEffect, useRef, useState } from 'react';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -29,6 +30,7 @@ function normalizeUrl(raw: string): string | null {
 }
 
 export function InlineEditCell({ value, placeholder, disabled, type = 'text', onSave, className }: Props) {
+  useUiLocale();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value ?? '');
   const [saving, setSaving] = useState(false);
@@ -89,8 +91,8 @@ export function InlineEditCell({ value, placeholder, disabled, type = 'text', on
             type="button"
             onClick={(e) => { e.stopPropagation(); setEditing(true); }}
             className="invisible rounded p-0.5 text-muted-foreground hover:text-foreground group-hover:visible"
-            title="Edit"
-            aria-label="Edit"
+            title={uiText("Edit")}
+            aria-label={uiText("Edit")}
           >
             <Pencil className="h-3 w-3" />
           </button>

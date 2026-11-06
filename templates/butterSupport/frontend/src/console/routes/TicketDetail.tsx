@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -24,6 +25,7 @@ import { cn } from '@/console/lib/utils';
 import { toast } from '@/console/components/ui/toast';
 
 export function TicketDetail() {
+  useUiLocale();
   const { ticketId } = useParams<{ ticketId: string }>();
   const qc = useQueryClient();
 
@@ -181,7 +183,7 @@ export function TicketDetail() {
           <ArrowLeft className="h-3.5 w-3.5" />
         </Link>
         <div className="flex-1 min-w-0">
-          <div className="section-label mb-0.5">Ticket · {ticketId.slice(0, 8)}</div>
+          <div className="section-label mb-0.5">{uiText("Ticket · ")}{ticketId.slice(0, 8)}</div>
           <div className="flex items-center gap-2 min-w-0">
             {subjectEditing ? (
               <input
@@ -197,7 +199,7 @@ export function TicketDetail() {
                     qc.invalidateQueries({ queryKey: ['ticket', ticketId] });
                     qc.invalidateQueries({ queryKey: ['tickets'] });
                   } catch (err: any) {
-                    toast.error(err?.message || 'Failed to save subject');
+                    toast.error(err?.message || uiText('Failed to save subject'));
                   }
                 }}
                 onKeyDown={(e) => {
@@ -205,7 +207,7 @@ export function TicketDetail() {
                   if (e.key === 'Escape') { setSubjectEditing(false); setSubjectDraft(ticketQ.data?.subject || ''); }
                 }}
                 className="font-display text-xl tracking-tight text-foreground bg-transparent border border-butter-300/60 rounded-md px-2 py-0.5 flex-1 min-w-0 focus:outline-none focus:ring-2 focus:ring-butter-300/40"
-                placeholder="Ticket subject"
+                placeholder={uiText("Ticket subject")}
                 maxLength={200}
               />
             ) : (
@@ -213,9 +215,9 @@ export function TicketDetail() {
                 type="button"
                 onClick={() => { setSubjectDraft(ticketQ.data?.subject || ''); setSubjectEditing(true); }}
                 className="font-display text-xl tracking-tight truncate text-foreground text-left hover:text-caramel transition-colors min-w-0"
-                title="Click to edit subject"
+                title={uiText("Click to edit subject")}
               >
-                {ticketQ.data?.subject || <span className="italic text-muted-foreground">(no subject)</span>}
+                {ticketQ.data?.subject || <span className="italic text-muted-foreground">{uiText("(no subject)")}</span>}
               </button>
             )}
             {!subjectEditing && (
@@ -223,7 +225,7 @@ export function TicketDetail() {
                 type="button"
                 onClick={() => { setSubjectDraft(ticketQ.data?.subject || ''); setSubjectEditing(true); }}
                 className="rounded-full p-1 text-muted-foreground/60 hover:bg-paper-warm hover:text-foreground transition-colors shrink-0"
-                title="Edit subject"
+                title={uiText("Edit subject")}
               >
                 <Pencil className="h-3 w-3" />
               </button>
@@ -239,18 +241,18 @@ export function TicketDetail() {
                     if (next) {
                       qc.invalidateQueries({ queryKey: ['ticket', ticketId] });
                       qc.invalidateQueries({ queryKey: ['tickets'] });
-                      toast.success(next, { title: 'Retitled' });
+                      toast.success(next, { title: uiText('Retitled') });
                     } else {
-                      toast.info('No subject generated — is there a customer message on this ticket?');
+                      toast.info(uiText('No subject generated — is there a customer message on this ticket?'));
                     }
                   } catch (err: any) {
-                    toast.error(err?.message || 'Retitle failed');
+                    toast.error(err?.message || uiText('Retitle failed'));
                   } finally {
                     setRetitling(false);
                   }
                 }}
                 className="rounded-full p-1 text-muted-foreground/60 hover:bg-paper-warm hover:text-caramel transition-colors shrink-0 disabled:opacity-50"
-                title="Regenerate subject with AI"
+                title={uiText("Regenerate subject with AI")}
               >
                 <Sparkles className={cn('h-3 w-3', retitling && 'animate-spin')} />
               </button>
@@ -261,34 +263,32 @@ export function TicketDetail() {
               ? ticketQ.data.customer_email
                 ? `${ticketQ.data.customer_name} · ${ticketQ.data.customer_email}`
                 : ticketQ.data.customer_name
-              : ticketQ.data?.customer_email || 'Anonymous visitor'}
+              : ticketQ.data?.customer_email || uiText('Anonymous visitor')}
           </div>
         </div>
         <PresenceIndicator ticketId={ticketId} />
         {ticketQ.data?.status && <Badge>{ticketQ.data.status.replace(/_/g, ' ')}</Badge>}
         <button
           className="text-xs text-muted-foreground inline-flex items-center gap-1.5 hover:text-caramel transition-colors"
-          onClick={() => toast.info('Widget link not yet wired (v1 TODO)')}
+          onClick={() => toast.info(uiText('Widget link not yet wired (v1 TODO)'))}
         >
-          <ExternalLink className="h-3 w-3" /> Open in widget
-        </button>
+          <ExternalLink className="h-3 w-3" /> {uiText(" Open in widget")}</button>
       </div>
 
       {openEscalation && <EscalationBar escalation={openEscalation} />}
 
       {readonly && (
         <div className="border-b border-butter-300/60 bg-butter-50 px-7 py-2.5 text-xs text-caramel-deep">
-          <span className="font-mono uppercase tracking-[0.18em] text-caramel mr-2">read-only</span>
+          <span className="font-mono uppercase tracking-[0.18em] text-caramel mr-2">{uiText("read-only")}</span>
           {readonlyReason === 'not_authenticated'
-            ? 'Sign in to drive this ticket. Showing live state only.'
-            : 'This ticket is being driven by another user. State refreshes via Postgres realtime.'}
+            ? uiText('Sign in to drive this ticket. Showing live state only.')
+            : uiText('This ticket is being driven by another user. State refreshes via Postgres realtime.')}
         </div>
       )}
 
       <div className="flex items-center gap-2 border-b border-rule-soft bg-paper-warm px-7 py-2.5">
         <Button size="sm" variant="outline" onClick={() => do_.send({ cmd: 'diagnose' })} disabled={readonly}>
-          <Lightbulb className="h-3.5 w-3.5" /> Diagnose
-        </Button>
+          <Lightbulb className="h-3.5 w-3.5" /> {uiText(" Diagnose")}</Button>
         {import.meta.env.VITE_ENABLE_RERUN_WITH_HINT === 'true' && (
           <Button
             size="sm"
@@ -299,8 +299,7 @@ export function TicketDetail() {
             }}
             disabled={readonly}
           >
-            <RefreshCw className="h-3.5 w-3.5" /> Rerun with hint
-          </Button>
+            <RefreshCw className="h-3.5 w-3.5" /> {uiText(" Rerun with hint")}</Button>
         )}
         {import.meta.env.VITE_ENABLE_MANUAL_ESCALATE === 'true' && (
           <Button
@@ -312,8 +311,7 @@ export function TicketDetail() {
             }}
             disabled={readonly}
           >
-            <AlertTriangle className="h-3.5 w-3.5" /> Escalate
-          </Button>
+            <AlertTriangle className="h-3.5 w-3.5" /> {uiText(" Escalate")}</Button>
         )}
         <Button
           size="sm"
@@ -323,15 +321,15 @@ export function TicketDetail() {
               await bb.from('support_tickets').update({ status: 'resolved' }).eq('id', ticketId);
               qc.invalidateQueries({ queryKey: ['ticket', ticketId] });
               qc.invalidateQueries({ queryKey: ['tickets'] });
-              toast.success('Ticket resolved');
+              toast.success(uiText('Ticket resolved'));
             } catch (e: any) {
-              toast.error(e?.message || 'Failed to resolve');
+              toast.error(e?.message || uiText('Failed to resolve'));
             }
           }}
           disabled={readonly || ticketQ.data?.status === 'resolved'}
-          title={ticketQ.data?.status === 'resolved' ? 'Already resolved' : undefined}
+          title={ticketQ.data?.status === 'resolved' ? uiText('Already resolved') : undefined}
         >
-          <CheckCircle2 className="h-3.5 w-3.5" /> {ticketQ.data?.status === 'resolved' ? 'Resolved' : 'Resolve'}
+          <CheckCircle2 className="h-3.5 w-3.5" /> {ticketQ.data?.status === 'resolved' ? uiText('Resolved') : uiText('Resolve')}
         </Button>
         <Button
           size="sm"
@@ -344,10 +342,9 @@ export function TicketDetail() {
             setPolicyOpen(true);
           }}
           disabled={readonly}
-          title="Promote this ticket's resolution into a reusable policy stored in substrate"
+          title={uiText("Promote this ticket's resolution into a reusable policy stored in substrate")}
         >
-          <ScrollText className="h-3.5 w-3.5" /> Convert to policy
-        </Button>
+          <ScrollText className="h-3.5 w-3.5" /> {uiText(" Convert to policy")}</Button>
         <div className="ml-auto flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
           <span
             className={cn(
@@ -355,7 +352,7 @@ export function TicketDetail() {
               do_.connected ? 'bg-positive shadow-[0_0_8px_rgba(127,176,105,0.7)] animate-pulse-soft' : 'bg-muted-foreground/50',
             )}
           />
-          DO · {do_.connected ? 'live' : 'offline'} · {do_.state}
+          {uiText("DO · ")}{do_.connected ? uiText('live') : uiText('offline')} · {do_.state}
         </div>
       </div>
 
@@ -378,11 +375,11 @@ export function TicketDetail() {
           <Tabs defaultValue="activity" className="flex h-full min-h-0 flex-col">
             <div className="px-5 pt-4">
               <TabsList>
-                <TabsTrigger value="activity">Activity</TabsTrigger>
-                <TabsTrigger value="diagnosis">Diagnosis</TabsTrigger>
-                <TabsTrigger value="customer">Customer</TabsTrigger>
+                <TabsTrigger value="activity">{uiText("Activity")}</TabsTrigger>
+                <TabsTrigger value="diagnosis">{uiText("Diagnosis")}</TabsTrigger>
+                <TabsTrigger value="customer">{uiText("Customer")}</TabsTrigger>
                 <TabsTrigger value="proposals">
-                  Proposals{pendingProposals.length ? ` · ${pendingProposals.length}` : ''}
+                  {uiText("Proposals")}{pendingProposals.length ? ` · ${pendingProposals.length}` : ''}
                 </TabsTrigger>
               </TabsList>
             </div>
@@ -403,7 +400,7 @@ export function TicketDetail() {
               <TabsContent value="proposals">
                 <div className="p-5 space-y-3">
                   {(proposalsQ.data || []).length === 0 ? (
-                    <div className="text-sm text-muted-foreground">No proposals yet.</div>
+                    <div className="text-sm text-muted-foreground">{uiText("No proposals yet.")}</div>
                   ) : (
                     (proposalsQ.data || []).map((p) => (
                       <ProposalCard
@@ -423,52 +420,50 @@ export function TicketDetail() {
       <Dialog open={policyOpen} onOpenChange={setPolicyOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Convert ticket to policy</DialogTitle>
+            <DialogTitle>{uiText("Convert ticket to policy")}</DialogTitle>
             <DialogDescription>
-              Promote this resolution into a reusable policy. Recorded in substrate as a <code>policy_decision</code> so future agents and teammates can reference it. Admin/owner only.
-            </DialogDescription>
+              {uiText("Promote this resolution into a reusable policy. Recorded in substrate as a ")}<code>policy_decision</code> {uiText(" so future agents and teammates can reference it. Admin/owner only.")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3 pt-2">
             <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">Title</label>
+              <label className="text-xs font-medium text-muted-foreground">{uiText("Title")}</label>
               <Input
                 value={policyTitle}
                 onChange={(e) => setPolicyTitle(e.target.value)}
-                placeholder="e.g. Refund policy for accidental duplicate charges"
+                placeholder={uiText("e.g. Refund policy for accidental duplicate charges")}
                 maxLength={200}
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">Policy text</label>
+              <label className="text-xs font-medium text-muted-foreground">{uiText("Policy text")}</label>
               <Textarea
                 value={policyContent}
                 onChange={(e) => setPolicyContent(e.target.value)}
-                placeholder="The exact policy. Plain language. Future agents will read this."
+                placeholder={uiText("The exact policy. Plain language. Future agents will read this.")}
                 rows={6}
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Scope (optional)</label>
+                <label className="text-xs font-medium text-muted-foreground">{uiText("Scope (optional)")}</label>
                 <Input
                   value={policyScope}
                   onChange={(e) => setPolicyScope(e.target.value)}
-                  placeholder="e.g. billing, EU customers"
+                  placeholder={uiText("e.g. billing, EU customers")}
                 />
               </div>
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Rationale (optional)</label>
+                <label className="text-xs font-medium text-muted-foreground">{uiText("Rationale (optional)")}</label>
                 <Input
                   value={policyRationale}
                   onChange={(e) => setPolicyRationale(e.target.value)}
-                  placeholder="Why this policy exists"
+                  placeholder={uiText("Why this policy exists")}
                 />
               </div>
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" size="sm" onClick={() => setPolicyOpen(false)} disabled={policySubmitting}>
-                Cancel
-              </Button>
+                {uiText("Cancel")}</Button>
               <Button
                 size="sm"
                 disabled={policySubmitting || !policyTitle.trim() || !policyContent.trim()}
@@ -482,17 +477,17 @@ export function TicketDetail() {
                       rationale: policyRationale.trim() || undefined,
                       source_ticket_id: ticketId,
                     });
-                    toast.success('Policy recorded to substrate');
+                    toast.success(uiText('Policy recorded to substrate'));
                     setPolicyOpen(false);
                   } catch (e: any) {
                     const msg = e?.message || 'Failed to record policy';
-                    toast.error(msg.includes('forbidden') ? 'Admins only — your account does not have permission' : msg);
+                    toast.error(msg.includes('forbidden') ? uiText('Admins only — your account does not have permission') : msg);
                   } finally {
                     setPolicySubmitting(false);
                   }
                 }}
               >
-                {policySubmitting ? 'Recording…' : 'Record policy'}
+                {policySubmitting ? uiText('Recording…') : uiText('Record policy')}
               </Button>
             </div>
           </div>
@@ -503,6 +498,7 @@ export function TicketDetail() {
 }
 
 function CustomerCard({ email }: { email?: string | null }) {
+  useUiLocale();
   const q = useQuery({
     queryKey: ['substrate-entity', email],
     queryFn: async () => {
@@ -515,17 +511,17 @@ function CustomerCard({ email }: { email?: string | null }) {
     },
     enabled: !!email,
   });
-  if (!email) return <div className="p-5 text-sm text-muted-foreground">No customer email on this ticket.</div>;
+  if (!email) return <div className="p-5 text-sm text-muted-foreground">{uiText("No customer email on this ticket.")}</div>;
   return (
     <div className="p-5 space-y-4 text-sm">
       <div>
-        <div className="section-label mb-1.5">Email</div>
+        <div className="section-label mb-1.5">{uiText("Email")}</div>
         <div className="font-mono text-foreground/90">{email}</div>
       </div>
       <div>
-        <div className="section-label mb-1.5">Substrate entity</div>
+        <div className="section-label mb-1.5">{uiText("Substrate entity")}</div>
         {q.isLoading ? (
-          <div className="font-mono text-[11px] text-muted-foreground">Loading…</div>
+          <div className="font-mono text-[11px] text-muted-foreground">{uiText("Loading…")}</div>
         ) : (
           <pre className="max-h-80 overflow-auto rounded-xl border border-rule-soft bg-paper-warm p-3 font-mono text-[11px] whitespace-pre-wrap text-foreground/80">
             {JSON.stringify(q.data, null, 2)}

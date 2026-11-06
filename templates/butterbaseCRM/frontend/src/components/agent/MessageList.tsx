@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useEffect, useMemo, useRef } from 'react';
 import type { AgentMessage, AgentProposal } from '@/lib/types';
 import { AssistantBubble } from './AssistantBubble';
@@ -17,6 +18,7 @@ interface Props {
 }
 
 export function MessageList({ messages, proposals, streamingAssistantText, streamingToolCalls, optimisticUserText, onProposalResolved }: Props) {
+  useUiLocale();
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const items = useMemo(() => {
@@ -34,8 +36,7 @@ export function MessageList({ messages, proposals, streamingAssistantText, strea
     <div ref={scrollRef} className="flex-1 min-h-0 overflow-auto px-3 py-4 space-y-3">
       {items.length === 0 && !streamingAssistantText && (
         <p className="font-editorial italic text-[13px] text-muted-foreground text-center mt-6">
-          Ask anything about your workspace — companies, deals, pipeline. I can also propose changes.
-        </p>
+          {uiText("Ask anything about your workspace — companies, deals, pipeline. I can also propose changes.")}</p>
       )}
 
       {items.map((it) => {

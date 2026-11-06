@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../../i18n";
 import * as React from 'react';
 import { create } from 'zustand';
 import { CheckCircle2, AlertTriangle, Info, XCircle, X } from 'lucide-react';
@@ -82,6 +83,7 @@ const ACCENT: Record<ToastVariant, string> = {
 };
 
 function ToastCard({ t, onClose }: { t: ToastItem; onClose: () => void }) {
+  useUiLocale();
   const Icon = ICONS[t.variant];
   return (
     <div
@@ -107,7 +109,7 @@ function ToastCard({ t, onClose }: { t: ToastItem; onClose: () => void }) {
         </p>
       </div>
       <button
-        aria-label="Dismiss notification"
+        aria-label={uiText("Dismiss notification")}
         onClick={onClose}
         className="self-start rounded-sm p-1 text-muted-foreground opacity-60 hover:opacity-100 hover:bg-muted transition-opacity"
       >
@@ -118,11 +120,12 @@ function ToastCard({ t, onClose }: { t: ToastItem; onClose: () => void }) {
 }
 
 export function ToastViewport() {
+  useUiLocale();
   const toasts = useToastStore((s) => s.toasts);
   const requestDismiss = useToastStore((s) => s.requestDismiss);
   return (
     <div
-      aria-label="Notifications"
+      aria-label={uiText("Notifications")}
       className="pointer-events-none fixed bottom-4 right-4 z-[100] flex flex-col gap-2"
     >
       {toasts.map((t) => (

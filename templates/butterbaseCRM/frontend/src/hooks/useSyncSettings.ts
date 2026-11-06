@@ -1,3 +1,4 @@
+import { uiText } from "../i18n";
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { bb } from '@/lib/butterbase';
 import { qk } from '@/lib/queryKeys';
@@ -42,7 +43,7 @@ export function useUpdateSyncSettings() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (patch: Partial<Pick<SyncSettings, 'google_autosync_enabled' | 'notetaker_auto_enabled' | 'notetaker_name'>>) => {
-      if (!ws) throw new Error('no workspace');
+      if (!ws) throw new Error(uiText('no workspace'));
       // Routed through a function because the platform's PATCH-by-id route
       // assumes the PK column is `id`, but sync_settings is keyed by workspace_id.
       const { data, error } = await bb.functions.invoke<SyncSettings>('upsert-sync-settings', {

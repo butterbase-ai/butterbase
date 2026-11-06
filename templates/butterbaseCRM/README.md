@@ -1,5 +1,7 @@
 # butterbaseCRM
 
+[English](README.md) | [日本語](README.ja.md)
+
 **An open-source, substrate-native CRM for founders — companies, people, deals and meetings that live in an agent-readable memory layer, not just another Postgres table.**
 
 Built on [Butterbase](https://butterbase.ai). Apache-2.0 — see the [root LICENSE](../../LICENSE).

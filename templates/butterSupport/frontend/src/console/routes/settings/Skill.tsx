@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../../i18n";
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { bb } from '@/console/lib/bb';
@@ -43,6 +44,7 @@ function label(s: string) {
 }
 
 export function SkillSettings() {
+  useUiLocale();
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({
     queryKey: ['support_skill'],
@@ -83,7 +85,7 @@ export function SkillSettings() {
       setSavedAt(new Date().toLocaleTimeString());
       qc.invalidateQueries({ queryKey: ['support_skill'] });
     } catch (e: any) {
-      toast.error(e?.message || 'Save failed');
+      toast.error(e?.message || uiText('Save failed'));
     } finally {
       setBusy(false);
     }
@@ -96,19 +98,18 @@ export function SkillSettings() {
 
   return (
     <SettingsPage
-      label="Skills"
-      title={<>Agent <em>personality</em></>}
-      description="Tone, formality, citation discipline, and freeform context — all injected into the agent's prompts."
+      label={uiText("Skills")}
+      title={<>{uiText("Agent ")}<em>{uiText("personality")}</em></>}
+      description={uiText("Tone, formality, citation discipline, and freeform context — all injected into the agent's prompts.")}
     >
 
       <Card>
         <CardHeader>
-          <CardTitle>Behavioral dimensions</CardTitle>
+          <CardTitle>{uiText("Behavioral dimensions")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            These shape the agent's tone and posture. They are injected into every reply prompt.
-          </p>
+            {uiText("These shape the agent's tone and posture. They are injected into every reply prompt.")}</p>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field name="Tone">
@@ -143,11 +144,11 @@ export function SkillSettings() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <span>Freeform context</span>
+            <span>{uiText("Freeform context")}</span>
             <span
-              title="Temporary knowledge you want the AI agent to have — anything the agent should know that isn't in your docs (product caveats, current promotions, phrases to prefer or avoid). Appended verbatim to the prompt."
+              title={uiText("Temporary knowledge you want the AI agent to have — anything the agent should know that isn't in your docs (product caveats, current promotions, phrases to prefer or avoid). Appended verbatim to the prompt.")}
               className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-muted-foreground/40 text-[10px] font-medium text-muted-foreground"
-              aria-label="About freeform context"
+              aria-label={uiText("About freeform context")}
             >
               ?
             </span>
@@ -158,18 +159,18 @@ export function SkillSettings() {
             value={freeform}
             onChange={(e) => setFreeform(e.target.value)}
             rows={8}
-            placeholder="e.g. We are running a 20% off summer promo through July 15. Don't mention pricing tiers above $99 — those are enterprise-only."
+            placeholder={uiText("e.g. We are running a 20% off summer promo through July 15. Don't mention pricing tiers above $99 — those are enterprise-only.")}
           />
         </CardContent>
       </Card>
 
       <div className="flex items-center gap-3 pt-1">
         <Button onClick={save} disabled={!dirty || busy || isLoading}>
-          {busy ? 'Saving…' : 'Save changes'}
+          {busy ? uiText('Saving…') : uiText('Save changes')}
         </Button>
         <div className="font-mono text-[11px] text-muted-foreground">
-          {data && <>v{data.version} · updated {new Date(data.updated_at).toLocaleString()}</>}
-          {savedAt && <span className="ml-2 text-positive">saved at {savedAt}</span>}
+          {data && <>v{data.version} {uiText(" · updated ")}{new Date(data.updated_at).toLocaleString()}</>}
+          {savedAt && <span className="ml-2 text-positive">{uiText("saved at ")}{savedAt}</span>}
         </div>
       </div>
     </SettingsPage>
@@ -177,6 +178,7 @@ export function SkillSettings() {
 }
 
 function Field({ name, children }: { name: string; children: React.ReactNode }) {
+  useUiLocale();
   return (
     <label className="block">
       <span className="mb-2 block font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">{name}</span>

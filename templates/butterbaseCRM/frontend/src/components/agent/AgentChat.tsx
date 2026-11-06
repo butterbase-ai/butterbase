@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useEffect, useState, useMemo, type FormEvent } from 'react';
 import { useLocation } from 'react-router-dom';
 import { Send } from 'lucide-react';
@@ -26,6 +27,7 @@ interface Props {
 }
 
 export function AgentChat({ threadId, workspaceId, mode, onThreadIdChange, onUiEvent, fullscreen }: Props) {
+  useUiLocale();
   const [draft, setDraft] = useState('');
   const { state, send, clearUiEvent } = useAgentStream();
   const location = useLocation();
@@ -168,7 +170,7 @@ export function AgentChat({ threadId, workspaceId, mode, onThreadIdChange, onUiE
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit(e as any); } }}
-          placeholder="Ask anything…"
+          placeholder={uiText("Ask anything…")}
           className="flex-1 resize-none text-[13.5px]"
           disabled={state.status === 'streaming'}
         />

@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import ReactMarkdown from 'react-markdown';
 import { MoreVertical, User, Bot, PencilLine, Wrench, Headset } from 'lucide-react';
 import { useState } from 'react';
@@ -21,7 +22,7 @@ function roleStyle(role: SupportMessage['role']): RoleStyle {
       return {
         align: 'self-start',
         bubble: 'bg-paper-soft border border-rule-soft',
-        label: 'Customer',
+        get label() { return uiText('Customer'); },
         icon: User,
         iconClass: 'bg-paper-warm text-foreground/80',
         badgeClass: 'text-muted-foreground',
@@ -30,7 +31,7 @@ function roleStyle(role: SupportMessage['role']): RoleStyle {
       return {
         align: 'self-start',
         bubble: 'bg-butter-50 border border-butter-300/60',
-        label: 'Awaiting approval',
+        get label() { return uiText('Awaiting approval'); },
         icon: PencilLine,
         iconClass: 'bg-butter-200 text-caramel',
         badgeClass: 'text-caramel',
@@ -39,7 +40,7 @@ function roleStyle(role: SupportMessage['role']): RoleStyle {
       return {
         align: 'self-end',
         bubble: 'bg-butter-100 border border-caramel/30',
-        label: 'You',
+        get label() { return uiText('You'); },
         icon: Headset,
         iconClass: 'bg-butter-200 text-caramel',
         badgeClass: 'text-caramel',
@@ -48,7 +49,7 @@ function roleStyle(role: SupportMessage['role']): RoleStyle {
       return {
         align: 'self-start',
         bubble: 'bg-positive/[0.06] border border-positive/30',
-        label: 'Assistant',
+        get label() { return uiText('Assistant'); },
         icon: Bot,
         iconClass: 'bg-positive/15 text-positive',
         badgeClass: 'text-positive',
@@ -57,7 +58,7 @@ function roleStyle(role: SupportMessage['role']): RoleStyle {
       return {
         align: 'self-center',
         bubble: 'bg-transparent',
-        label: 'System',
+        get label() { return uiText('System'); },
         icon: Wrench,
         iconClass: 'text-muted-foreground/50',
         badgeClass: 'text-muted-foreground/70',
@@ -75,6 +76,7 @@ function roleStyle(role: SupportMessage['role']): RoleStyle {
 }
 
 export function ConversationThread({ messages, ticketId }: { messages: SupportMessage[]; ticketId: string }) {
+  useUiLocale();
   return (
     <div className="flex flex-col gap-5 px-6 py-6">
       {messages.map((m) => (
@@ -82,7 +84,7 @@ export function ConversationThread({ messages, ticketId }: { messages: SupportMe
       ))}
       {messages.length === 0 && (
         <div className="text-center text-sm text-muted-foreground py-12">
-          <span className="font-mono text-[11px] uppercase tracking-[0.22em]">No messages yet.</span>
+          <span className="font-mono text-[11px] uppercase tracking-[0.22em]">{uiText("No messages yet.")}</span>
         </div>
       )}
     </div>
@@ -90,6 +92,7 @@ export function ConversationThread({ messages, ticketId }: { messages: SupportMe
 }
 
 function MessageBubble({ m, ticketId }: { m: SupportMessage; ticketId: string }) {
+  useUiLocale();
   const [menu, setMenu] = useState(false);
   const style = roleStyle(m.role);
   const isCenter = m.role === 'system';
@@ -99,14 +102,14 @@ function MessageBubble({ m, ticketId }: { m: SupportMessage; ticketId: string })
     try {
       const res: any = await api.markAsCommitment({ ticket_id: ticketId, message_id: m.id });
       if (res?.duplicate) {
-        toast.info('Already marked as commitment.');
+        toast.info(uiText('Already marked as commitment.'));
       } else if (res?.title) {
-        toast.success(res.title, { title: 'Marked as commitment' });
+        toast.success(res.title, { title: uiText('Marked as commitment') });
       } else {
-        toast.success('Marked as commitment.');
+        toast.success(uiText('Marked as commitment.'));
       }
     } catch (e: any) {
-      toast.error(e?.message || 'Failed to mark as commitment');
+      toast.error(e?.message || uiText('Failed to mark as commitment'));
     }
   }
 
@@ -148,8 +151,7 @@ function MessageBubble({ m, ticketId }: { m: SupportMessage; ticketId: string })
                   className="block w-full px-3.5 py-2 text-left text-xs text-foreground/90 hover:bg-butter-100"
                   onClick={markCommitment}
                 >
-                  Mark as commitment
-                </button>
+                  {uiText("Mark as commitment")}</button>
               </div>
             )}
           </div>

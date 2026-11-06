@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { bb } from '@/lib/butterbase';
@@ -11,6 +12,7 @@ interface Props {
 }
 
 export function ConfirmActionCard({ label, endpoint, body, cost_estimate, onResolved }: Props) {
+  useUiLocale();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   async function run() {
@@ -22,7 +24,7 @@ export function ConfirmActionCard({ label, endpoint, body, cost_estimate, onReso
       if (error) throw error;
       onResolved(true, data);
     } catch (e: any) {
-      setError(e?.message ?? 'failed');
+      setError(e?.message ?? uiText('failed'));
       onResolved(false);
     } finally {
       setBusy(false);
@@ -34,7 +36,7 @@ export function ConfirmActionCard({ label, endpoint, body, cost_estimate, onReso
         <p className="text-[13.5px]">{label}</p>
         {cost_estimate && <span className="text-[11px] font-mono text-muted-foreground">{cost_estimate}</span>}
       </div>
-      <Button size="sm" onClick={run} disabled={busy}>{busy ? 'Running…' : 'Run'}</Button>
+      <Button size="sm" onClick={run} disabled={busy}>{busy ? uiText('Running…') : uiText('Run')}</Button>
       {error && <p className="text-[12px] text-coral font-mono">{error}</p>}
     </div>
   );

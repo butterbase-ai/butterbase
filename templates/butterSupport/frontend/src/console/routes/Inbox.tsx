@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { bb } from '@/console/lib/bb';
@@ -11,14 +12,15 @@ import { toast } from '@/console/components/ui/toast';
 const PATTERN_THRESHOLD = 3;
 
 const FILTERS: { label: string; value: TicketStatus | 'all' }[] = [
-  { label: 'All', value: 'all' },
-  { label: 'Open', value: 'open' },
-  { label: 'Awaiting approval', value: 'awaiting_approval' },
-  { label: 'Escalated', value: 'escalated' },
-  { label: 'Resolved', value: 'resolved' },
+  { get label() { return uiText('All'); }, value: 'all' },
+  { get label() { return uiText('Open'); }, value: 'open' },
+  { get label() { return uiText('Awaiting approval'); }, value: 'awaiting_approval' },
+  { get label() { return uiText('Escalated'); }, value: 'escalated' },
+  { get label() { return uiText('Resolved'); }, value: 'resolved' },
 ];
 
 export function Inbox() {
+  useUiLocale();
   const qc = useQueryClient();
   const [filter, setFilter] = useState<TicketStatus | 'all'>('all');
 
@@ -71,7 +73,7 @@ export function Inbox() {
         .eq('id', id);
       qc.invalidateQueries({ queryKey: ['pattern_signals'] });
     } catch (e: any) {
-      toast.error(e?.message || 'Dismiss failed');
+      toast.error(e?.message || uiText('Dismiss failed'));
     }
   }
 
@@ -103,13 +105,12 @@ export function Inbox() {
       )}
       <div className="page-header">
         <div>
-          <p className="eyebrow mb-3">Inbox</p>
+          <p className="eyebrow mb-3">{uiText("Inbox")}</p>
           <h1 className="page-title">
-            Tickets <em>in flight</em>
+            {uiText("Tickets ")}<em>{uiText("in flight")}</em>
           </h1>
           <p className="mt-3 font-editorial italic text-[15px] text-muted-foreground max-w-md">
-            {tickets.length} tickets · {totalOpen} need attention
-          </p>
+            {tickets.length} {uiText(" tickets · ")}{totalOpen} {uiText(" need attention")}</p>
         </div>
         <div className="flex items-center gap-1.5">
           {FILTERS.map((f) => (
@@ -132,7 +133,7 @@ export function Inbox() {
         {isLoading ? (
           <div className="flex h-full items-center justify-center gap-3 text-sm text-muted-foreground">
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-butter animate-pulse-soft" />
-            <span className="eyebrow !text-[10px]">loading tickets…</span>
+            <span className="eyebrow !text-[10px]">{uiText("loading tickets…")}</span>
           </div>
         ) : tickets.length === 0 ? (
           <div className="flex h-full items-center justify-center">
@@ -140,13 +141,12 @@ export function Inbox() {
               <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-md border border-border bg-card">
                 <InboxIcon className="h-5 w-5 text-butter" strokeWidth={1.75} />
               </div>
-              <p className="eyebrow mb-3">Empty for now</p>
+              <p className="eyebrow mb-3">{uiText("Empty for now")}</p>
               <p className="font-display text-[26px] leading-tight tracking-tight">
-                The inbox is <em className="font-editorial italic text-butter">quiet</em>.
+                {uiText("The inbox is ")}<em className="font-editorial italic text-butter">{uiText("quiet")}</em>.
               </p>
               <p className="mt-3 font-editorial italic text-[14px] text-muted-foreground">
-                Once the widget receives a message, it'll appear here.
-              </p>
+                {uiText("Once the widget receives a message, it'll appear here.")}</p>
             </div>
           </div>
         ) : (

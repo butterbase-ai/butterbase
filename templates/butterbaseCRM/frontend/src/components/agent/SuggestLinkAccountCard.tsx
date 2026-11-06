@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../../i18n";
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { bb } from '@/lib/butterbase';
@@ -5,6 +6,7 @@ import { bb } from '@/lib/butterbase';
 interface Props { provider: 'gmail' | 'google-calendar'; reason: string; onLinked: () => void }
 
 export function SuggestLinkAccountCard({ provider, reason, onLinked }: Props) {
+  useUiLocale();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -17,9 +19,9 @@ export function SuggestLinkAccountCard({ provider, reason, onLinked }: Props) {
       });
       const data = result?.data ?? result;
       const authUrl: string | undefined = data?.authUrl;
-      if (!authUrl) throw new Error('no_auth_url');
+      if (!authUrl) throw new Error(uiText('no_auth_url'));
       const popup = window.open(authUrl, 'integration-oauth', 'width=540,height=720');
-      if (!popup) throw new Error('popup_blocked');
+      if (!popup) throw new Error(uiText('popup_blocked'));
       const onMsg = (e: MessageEvent) => {
         if (e.data === 'integration_connected') {
           window.removeEventListener('message', onMsg);
@@ -29,7 +31,7 @@ export function SuggestLinkAccountCard({ provider, reason, onLinked }: Props) {
       };
       window.addEventListener('message', onMsg);
     } catch (e: any) {
-      setError(e?.message ?? 'failed');
+      setError(e?.message ?? uiText('failed'));
     } finally {
       setBusy(false);
     }
@@ -37,8 +39,8 @@ export function SuggestLinkAccountCard({ provider, reason, onLinked }: Props) {
 
   return (
     <div className="rounded-lg border border-border bg-card p-3 space-y-2">
-      <p className="text-[13.5px]">Link {provider.replace('-', ' ')} — <span className="text-muted-foreground">{reason}</span></p>
-      <Button size="sm" onClick={start} disabled={busy}>{busy ? 'Opening…' : `Link ${provider}`}</Button>
+      <p className="text-[13.5px]">{uiText("Link ")}{provider.replace('-', ' ')} — <span className="text-muted-foreground">{reason}</span></p>
+      <Button size="sm" onClick={start} disabled={busy}>{busy ? uiText('Opening…') : uiMessage`Link ${provider}`}</Button>
       {error && <p className="text-[12px] text-coral font-mono">{error}</p>}
     </div>
   );

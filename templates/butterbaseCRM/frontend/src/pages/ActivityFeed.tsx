@@ -1,4 +1,5 @@
-import { formatDistanceToNowStrict } from 'date-fns';
+import { uiText, useUiLocale } from "../i18n";
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useActivities } from '@/hooks/useActivities';
 import type { Activity } from '@/lib/types';
@@ -61,19 +62,19 @@ function humanizeActivity(activity: Activity): string {
 }
 
 export default function ActivityFeed() {
+  useUiLocale();
   const { data: activities = [], isLoading } = useActivities();
 
   return (
     <div className="flex h-full flex-col">
       <div className="page-header">
         <div>
-          <p className="eyebrow mb-3">Section 05 · Ledger</p>
+          <p className="eyebrow mb-3">{uiText("Section 05 · Ledger")}</p>
           <h1 className="page-title">
-            Activity <em>as it happens</em>
+            {uiText("Activity ")}<em>{uiText("as it happens")}</em>
           </h1>
           <p className="mt-3 font-editorial italic text-[15px] text-muted-foreground max-w-md">
-            An honest, append-only record of every change made in this workspace.
-          </p>
+            {uiText("An honest, append-only record of every change made in this workspace.")}</p>
         </div>
       </div>
 
@@ -86,8 +87,8 @@ export default function ActivityFeed() {
           </div>
         ) : activities.length === 0 ? (
           <div className="rounded-lg border border-dashed p-12 text-center">
-            <h3 className="font-medium">No activity yet</h3>
-            <p className="mt-1 text-sm text-muted-foreground">Activity will appear here as you make changes.</p>
+            <h3 className="font-medium">{uiText("No activity yet")}</h3>
+            <p className="mt-1 text-sm text-muted-foreground">{uiText("Activity will appear here as you make changes.")}</p>
           </div>
         ) : (
           <ol className="relative max-w-3xl pl-6">

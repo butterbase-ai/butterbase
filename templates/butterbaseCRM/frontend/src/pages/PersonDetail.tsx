@@ -1,7 +1,8 @@
+import { uiMessage, uiText, useUiLocale } from "../i18n";
 import { useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { format, formatDistanceToNowStrict } from 'date-fns';
+import { format, formatDistanceToNowStrict } from '@/i18n/date';
 import { toast } from 'sonner';
 import { Trash2, Pencil, X } from 'lucide-react';
 import { useEditMode } from '@/lib/editMode';
@@ -56,6 +57,7 @@ function activitySnippet(a: Activity): string | null {
 }
 
 export default function PersonDetail() {
+  useUiLocale();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [editModePref] = useEditMode();
@@ -136,7 +138,7 @@ export default function PersonDetail() {
       const patch: Partial<Person> = { [field]: value === '' ? null : value } as Partial<Person>;
       await updateMut.mutateAsync({ id: person.id, patch });
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Update failed');
+      toast.error(e instanceof Error ? e.message : uiText('Update failed'));
       throw e;
     }
   }
@@ -147,10 +149,10 @@ export default function PersonDetail() {
     if (!window.confirm(`Delete ${label}? This can't be undone from the UI.`)) return;
     try {
       await deleteMut.mutateAsync(person.id);
-      toast.success(`Deleted ${label}`);
+      toast.success(uiMessage`Deleted ${label}`);
       navigate('/people');
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Delete failed');
+      toast.error(e instanceof Error ? e.message : uiText('Delete failed'));
     }
   }
 
@@ -164,13 +166,13 @@ export default function PersonDetail() {
           (c.domain && c.domain.toLowerCase() === trimmed.toLowerCase()),
         );
     if (trimmed && !match) {
-      toast.error(`No company matches "${trimmed}". Create it first from Companies.`);
-      throw new Error('no_match');
+      toast.error(uiMessage`No company matches "${trimmed}". Create it first from Companies.`);
+      throw new Error(uiText('no_match'));
     }
     try {
       await updateMut.mutateAsync({ id: person.id, patch: { company_id: match?.id ?? null } });
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Update failed');
+      toast.error(e instanceof Error ? e.message : uiText('Update failed'));
       throw e;
     }
   }
@@ -178,7 +180,7 @@ export default function PersonDetail() {
   if (!id) {
     return (
       <div className="p-8">
-        <h1 className="text-2xl font-semibold">Person not found</h1>
+        <h1 className="text-2xl font-semibold">{uiText("Person not found")}</h1>
       </div>
     );
   }
@@ -195,7 +197,7 @@ export default function PersonDetail() {
   if (!person || !person.id) {
     return (
       <div className="p-8">
-        <h1 className="text-2xl font-semibold">Person not found</h1>
+        <h1 className="text-2xl font-semibold">{uiText("Person not found")}</h1>
       </div>
     );
   }
@@ -217,7 +219,7 @@ export default function PersonDetail() {
                   className="gap-1.5"
                 >
                   {toggleEditing ? <X className="h-3.5 w-3.5" /> : <Pencil className="h-3.5 w-3.5" />}
-                  {toggleEditing ? 'Done' : 'Edit'}
+                  {toggleEditing ? uiText('Done') : uiText('Edit')}
                 </Button>
               )}
               <EnrichButton kind="person" entityId={person.id} />
@@ -227,7 +229,7 @@ export default function PersonDetail() {
                 onClick={handleDelete}
                 disabled={deleteMut.isPending}
                 className="text-muted-foreground hover:text-destructive"
-                title="Delete person"
+                title={uiText("Delete person")}
               >
                 <Trash2 className="h-4 w-4" />
               </Button>
@@ -236,14 +238,14 @@ export default function PersonDetail() {
               <div className="text-3xl font-semibold flex items-center gap-1">
                 <InlineEditCell
                   value={person.first_name}
-                  placeholder="First"
+                  placeholder={uiText("First")}
                   disabled={fieldsLocked}
                   onSave={(v) => saveField('first_name', v)}
                   className="text-3xl font-semibold"
                 />
                 <InlineEditCell
                   value={person.last_name}
-                  placeholder="Last"
+                  placeholder={uiText("Last")}
                   disabled={fieldsLocked}
                   onSave={(v) => saveField('last_name', v)}
                   className="text-3xl font-semibold"
@@ -251,37 +253,37 @@ export default function PersonDetail() {
               </div>
             </div>
             <div className="mt-2 grid max-w-2xl grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
-              <FieldRow label="Title">
+              <FieldRow label={uiText("Title", "Job title")}>
                 <InlineEditCell value={person.title} placeholder="—" disabled={fieldsLocked} onSave={(v) => saveField('title', v)} />
               </FieldRow>
-              <FieldRow label="Company">
+              <FieldRow label={uiText("Company")}>
                 <InlineEditCell
                   value={company?.name ?? null}
-                  placeholder={person.company_id ? '—' : 'Type a company name'}
+                  placeholder={person.company_id ? '—' : uiText('Type a company name')}
                   disabled={fieldsLocked}
                   onSave={saveCompany}
                 />
               </FieldRow>
-              <FieldRow label="Email">
+              <FieldRow label={uiText("Email")}>
                 {(() => {
                   const status = person.email_status;
                   if (!person.email && status === 'pending') {
-                    return <span className="text-muted-foreground italic text-xs">pending…</span>;
+                    return <span className="text-muted-foreground italic text-xs">{uiText("pending…")}</span>;
                   }
                   if (!person.email && status === 'failed') {
-                    return <span className="text-muted-foreground italic text-xs" title="Email lookup failed">unavailable</span>;
+                    return <span className="text-muted-foreground italic text-xs" title={uiText("Email lookup failed")}>{uiText("unavailable")}</span>;
                   }
                   return <InlineEditCell value={person.email} placeholder="—" disabled={fieldsLocked} onSave={(v) => saveField('email', v)} />;
                 })()}
               </FieldRow>
-              <FieldRow label="Phone">
+              <FieldRow label={uiText("Phone")}>
                 <InlineEditCell value={person.phone} placeholder="—" disabled={fieldsLocked} onSave={(v) => saveField('phone', v)} />
               </FieldRow>
-              <FieldRow label="LinkedIn" full>
+              <FieldRow label={uiText("LinkedIn")} full>
                 <InlineEditCell value={person.linkedin_url} placeholder="—" type="url" disabled={fieldsLocked} onSave={(v) => saveField('linkedin_url', v)} />
               </FieldRow>
               {person.enrichment_status && (
-                <FieldRow label="Enrichment">
+                <FieldRow label={uiText("Enrichment")}>
                   <span className="text-sm">
                     {person.enrichment_status}
                     {person.enriched_at && (
@@ -296,7 +298,7 @@ export default function PersonDetail() {
             {company && (
               <div className="mt-2 text-xs text-muted-foreground">
                 <Link to={`/companies/${company.id}`} className="text-blue-600 hover:underline">
-                  Open {company.name} →
+                  {uiText("Open ")}{company.name} →
                 </Link>
               </div>
             )}
@@ -307,16 +309,16 @@ export default function PersonDetail() {
       <div className="flex-1 overflow-auto px-6 py-4">
         <Tabs defaultValue="overview" className="w-full">
           <TabsList className="grid w-full grid-cols-4">
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="notes">Notes</TabsTrigger>
-            <TabsTrigger value="meetings">Meetings</TabsTrigger>
-            <TabsTrigger value="attachments">Attachments</TabsTrigger>
+            <TabsTrigger value="overview">{uiText("Overview")}</TabsTrigger>
+            <TabsTrigger value="notes">{uiText("Notes")}</TabsTrigger>
+            <TabsTrigger value="meetings">{uiText("Meetings")}</TabsTrigger>
+            <TabsTrigger value="attachments">{uiText("Attachments")}</TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview" className="mt-4 space-y-4">
             {cvLookup.fields.length > 0 && (
               <Card>
-                <CardHeader><CardTitle>Custom fields</CardTitle></CardHeader>
+                <CardHeader><CardTitle>{uiText("Custom fields")}</CardTitle></CardHeader>
                 <CardContent>
                   <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
                     {cvLookup.fields.map((f) => {
@@ -334,7 +336,7 @@ export default function PersonDetail() {
             )}
             {extraAttrs.length > 0 && (
               <Card>
-                <CardHeader><CardTitle>Other attributes</CardTitle></CardHeader>
+                <CardHeader><CardTitle>{uiText("Other attributes")}</CardTitle></CardHeader>
                 <CardContent>
                   <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
                     {extraAttrs.map(([k, v]) => (
@@ -350,12 +352,12 @@ export default function PersonDetail() {
               </Card>
             )}
             <Card>
-              <CardHeader><CardTitle>Recent activity</CardTitle></CardHeader>
+              <CardHeader><CardTitle>{uiText("Recent activity")}</CardTitle></CardHeader>
               <CardContent>
                 {actLoading ? (
                   <Skeleton className="h-20" />
                 ) : activities.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No activity logged yet.</p>
+                  <p className="text-sm text-muted-foreground">{uiText("No activity logged yet.")}</p>
                 ) : (
                   <ul className="space-y-1.5">
                     {activities.map((a) => {
@@ -382,7 +384,7 @@ export default function PersonDetail() {
 
           <TabsContent value="notes" className="mt-4">
             <Card>
-              <CardHeader><CardTitle>Notes</CardTitle></CardHeader>
+              <CardHeader><CardTitle>{uiText("Notes")}</CardTitle></CardHeader>
               <CardContent>
                 <NotesPanel entityType="person" entityId={id} />
               </CardContent>
@@ -391,10 +393,10 @@ export default function PersonDetail() {
 
           <TabsContent value="meetings" className="mt-4">
             <Card>
-              <CardHeader><CardTitle>Meetings</CardTitle></CardHeader>
+              <CardHeader><CardTitle>{uiText("Meetings")}</CardTitle></CardHeader>
               <CardContent>
                 {meetings.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No meetings yet.</p>
+                  <p className="text-sm text-muted-foreground">{uiText("No meetings yet.")}</p>
                 ) : (
                   <ul className="space-y-1.5">
                     {meetings.map((m) => (
@@ -416,7 +418,7 @@ export default function PersonDetail() {
 
           <TabsContent value="attachments" className="mt-4">
             <Card>
-              <CardHeader><CardTitle>Attachments</CardTitle></CardHeader>
+              <CardHeader><CardTitle>{uiText("Attachments")}</CardTitle></CardHeader>
               <CardContent>
                 <AttachmentsPanel entityType="person" entityId={id} />
               </CardContent>
@@ -429,6 +431,7 @@ export default function PersonDetail() {
 }
 
 function FieldRow({ label, children, full }: { label: string; children: React.ReactNode; full?: boolean }) {
+  useUiLocale();
   return (
     <div className={`flex items-center gap-2 ${full ? 'sm:col-span-2' : ''}`}>
       <span className="w-20 shrink-0 text-xs uppercase tracking-wide text-muted-foreground">{label}</span>

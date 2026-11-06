@@ -1,9 +1,10 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Loader2, Sparkles, Check, X, Mail, Calendar } from 'lucide-react';
-import { format } from 'date-fns';
+import { format } from '@/i18n/date';
 import { bb } from '@/lib/butterbase';
 import { useCurrentWorkspaceId } from '@/lib/workspace';
 
@@ -87,6 +88,7 @@ function useReject(workspaceId: string) {
 }
 
 export default function Inbox() {
+  useUiLocale();
   const ws = useCurrentWorkspaceId();
   const { data: proposals = [], isLoading } = useProposals(ws);
   const scan = useScan(ws);
@@ -100,16 +102,16 @@ export default function Inbox() {
     try {
       const r = await scan.mutateAsync();
       if (r.proposals_inserted === 0) {
-        toast.success('Scan complete', {
-          description: `Looked at ${r.scanned.emails} emails + ${r.scanned.meetings} meetings — nothing deal-shaped.`,
+        toast.success(uiText('Scan complete'), {
+          description: uiMessage`Looked at ${r.scanned.emails} emails + ${r.scanned.meetings} meetings — nothing deal-shaped.`,
         });
       } else {
-        toast.success(`+${r.proposals_inserted} proposal${r.proposals_inserted === 1 ? '' : 's'}`, {
-          description: `Scanned ${r.scanned.emails} emails + ${r.scanned.meetings} meetings.`,
+        toast.success(uiMessage`+${r.proposals_inserted} proposal${r.proposals_inserted === 1 ? '' : 's'}`, {
+          description: uiMessage`Scanned ${r.scanned.emails} emails + ${r.scanned.meetings} meetings.`,
         });
       }
     } catch (e: any) {
-      toast.error(e?.message ?? 'Scan failed');
+      toast.error(e?.message ?? uiText('Scan failed'));
     }
   }
 
@@ -117,13 +119,12 @@ export default function Inbox() {
     <div className="flex h-full flex-col">
       <div className="page-header">
         <div>
-          <p className="eyebrow mb-3">Section 06 · Inbox</p>
+          <p className="eyebrow mb-3">{uiText("Section 06 · Inbox")}</p>
           <h1 className="page-title">
-            Deal <em>proposals</em>
+            {uiText("Deal ")}<em>{uiText("proposals")}</em>
           </h1>
           <p className="mt-3 font-editorial italic text-[15px] text-muted-foreground max-w-md">
-            The AI watches your inbox + calendar and flags conversations that look like opportunities. Approve or skip — nothing lands as a deal without your nod.
-          </p>
+            {uiText("The AI watches your inbox + calendar and flags conversations that look like opportunities. Approve or skip — nothing lands as a deal without your nod.")}</p>
         </div>
         <Button
           onClick={handleScan}
@@ -131,15 +132,14 @@ export default function Inbox() {
           className="gap-2 bg-foreground text-background hover:bg-foreground/85"
         >
           {scan.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-          Scan now
-        </Button>
+          {uiText("Scan now")}</Button>
       </div>
 
       <div className="flex-1 overflow-auto">
         <div className="mx-auto max-w-4xl px-8 py-8 space-y-10">
           <section>
             <div className="flex items-baseline gap-3 mb-4">
-              <p className="eyebrow">Pending · {pending.length}</p>
+              <p className="eyebrow">{uiText("Pending · ")}{pending.length}</p>
               <span className="h-px flex-1 bg-border" />
             </div>
             {isLoading ? (
@@ -150,8 +150,7 @@ export default function Inbox() {
               </div>
             ) : pending.length === 0 ? (
               <p className="font-editorial italic text-muted-foreground">
-                — no pending proposals. Click <span className="font-mono not-italic">Scan now</span> to look at your recent activity. —
-              </p>
+                {uiText("— no pending proposals. Click ")}<span className="font-mono not-italic">{uiText("Scan now")}</span> {uiText(" to look at your recent activity. —")}</p>
             ) : (
               <ul className="space-y-2">
                 {pending.map((p) => (
@@ -162,14 +161,14 @@ export default function Inbox() {
                     busyReject={reject.isPending}
                     onAccept={() =>
                       accept.mutate(p.id, {
-                        onSuccess: () => toast.success('Deal created'),
-                        onError: (e) => toast.error(e instanceof Error ? e.message : 'Accept failed'),
+                        onSuccess: () => toast.success(uiText('Deal created')),
+                        onError: (e) => toast.error(e instanceof Error ? e.message : uiText('Accept failed')),
                       })
                     }
                     onReject={() =>
                       reject.mutate(p.id, {
-                        onSuccess: () => toast.success('Skipped'),
-                        onError: (e) => toast.error(e instanceof Error ? e.message : 'Reject failed'),
+                        onSuccess: () => toast.success(uiText('Skipped')),
+                        onError: (e) => toast.error(e instanceof Error ? e.message : uiText('Reject failed')),
                       })
                     }
                   />
@@ -181,7 +180,7 @@ export default function Inbox() {
           {decided.length > 0 && (
             <section>
               <div className="flex items-baseline gap-3 mb-4">
-                <p className="eyebrow">Recent · {decided.length}</p>
+                <p className="eyebrow">{uiText("Recent · ")}{decided.length}</p>
                 <span className="h-px flex-1 bg-border" />
               </div>
               <ul className="space-y-2">
@@ -212,6 +211,7 @@ function ProposalCard({
   onAccept?: () => void;
   onReject?: () => void;
 }) {
+  useUiLocale();
   const Source = proposal.source_kind === 'email' ? Mail : Calendar;
   return (
     <li className="card-flat px-5 py-4 flex items-start gap-4">
@@ -251,8 +251,7 @@ function ProposalCard({
             className="gap-1.5 border-coral/30 text-coral hover:bg-coral/10"
           >
             <X className="h-3 w-3" />
-            Skip
-          </Button>
+            {uiText("Skip")}</Button>
           <Button
             size="sm"
             onClick={onAccept}
@@ -260,8 +259,7 @@ function ProposalCard({
             className="gap-1.5 bg-foreground text-background hover:bg-foreground/85"
           >
             {busyAccept ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
-            Create deal
-          </Button>
+            {uiText("Create deal")}</Button>
         </div>
       )}
     </li>

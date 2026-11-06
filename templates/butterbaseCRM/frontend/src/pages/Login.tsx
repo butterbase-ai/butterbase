@@ -1,3 +1,4 @@
+import { LanguagePicker, uiText, useUiLocale } from "../i18n";
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
@@ -27,32 +28,32 @@ import {
 
 // ── Schemas ──────────────────────────────────────────────────────────────────
 
-const signinSchema = z.object({
-  email: z.string().email('Enter a valid email'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+const signinSchema = () => z.object({
+  email: z.string().email(uiText('Enter a valid email')),
+  password: z.string().min(8, uiText('Password must be at least 8 characters')),
 });
 
-const signupSchema = z.object({
-  email: z.string().email('Enter a valid email'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  display_name: z.string().min(1, 'Display name is required'),
+const signupSchema = () => z.object({
+  email: z.string().email(uiText('Enter a valid email')),
+  password: z.string().min(8, uiText('Password must be at least 8 characters')),
+  display_name: z.string().min(1, uiText('Display name is required')),
 });
 
-const verifySchema = z.object({
+const verifySchema = () => z.object({
   code: z
     .string()
-    .length(6, 'Code must be exactly 6 digits')
-    .regex(/^\d{6}$/, 'Code must be 6 digits'),
+    .length(6, uiText('Code must be exactly 6 digits'))
+    .regex(/^\d{6}$/, uiText('Code must be 6 digits')),
 });
 
-const magicLinkSchema = z.object({
-  email: z.string().email('Enter a valid email'),
+const magicLinkSchema = () => z.object({
+  email: z.string().email(uiText('Enter a valid email')),
 });
 
-type SigninValues = z.infer<typeof signinSchema>;
-type SignupValues = z.infer<typeof signupSchema>;
-type VerifyValues = z.infer<typeof verifySchema>;
-type MagicLinkValues = z.infer<typeof magicLinkSchema>;
+type SigninValues = z.infer<ReturnType<typeof signinSchema>>;
+type SignupValues = z.infer<ReturnType<typeof signupSchema>>;
+type VerifyValues = z.infer<ReturnType<typeof verifySchema>>;
+type MagicLinkValues = z.infer<ReturnType<typeof magicLinkSchema>>;
 
 type Mode = 'signin' | 'signup' | 'verify' | 'magic' | 'magic-verify';
 
@@ -67,8 +68,9 @@ function SigninForm({
   onMagicLink: () => void;
   onSuccess: () => void;
 }) {
+  useUiLocale();
   const form = useForm<SigninValues>({
-    resolver: zodResolver(signinSchema),
+    resolver: zodResolver(signinSchema()),
     defaultValues: { email: '', password: '' },
   });
 
@@ -89,9 +91,9 @@ function SigninForm({
           name="email"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Email</FormLabel>
+              <FormLabel>{uiText("Email")}</FormLabel>
               <FormControl>
-                <Input type="email" placeholder="you@example.com" autoComplete="email" {...field} />
+                <Input type="email" placeholder={uiText("you@example.com")} autoComplete="email" {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -102,7 +104,7 @@ function SigninForm({
           name="password"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Password</FormLabel>
+              <FormLabel>{uiText("Password")}</FormLabel>
               <FormControl>
                 <Input
                   type="password"
@@ -116,21 +118,19 @@ function SigninForm({
           )}
         />
         <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-          {form.formState.isSubmitting ? 'Signing in…' : 'Sign in'}
+          {form.formState.isSubmitting ? uiText('Signing in…') : uiText('Sign in')}
         </Button>
         <Button type="button" variant="outline" className="w-full" onClick={onMagicLink}>
-          Email me a sign-in code
-        </Button>
+          {uiText("Email me a sign-in code")}</Button>
       </form>
       <p className="mt-4 text-center text-sm text-muted-foreground">
-        Don&apos;t have an account?{' '}
+        {uiText("Don't have an account?")}{' '}
         <button
           type="button"
           onClick={onSwitch}
           className="font-medium text-foreground underline underline-offset-4"
         >
-          Sign up
-        </button>
+          {uiText("Sign up")}</button>
       </p>
     </Form>
   );
@@ -147,8 +147,9 @@ function MagicLinkForm({
   onSignup: () => void;
   onSent: (email: string) => void;
 }) {
+  useUiLocale();
   const form = useForm<MagicLinkValues>({
-    resolver: zodResolver(magicLinkSchema),
+    resolver: zodResolver(magicLinkSchema()),
     defaultValues: { email: '' },
   });
 
@@ -169,16 +170,16 @@ function MagicLinkForm({
           name="email"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Email</FormLabel>
+              <FormLabel>{uiText("Email")}</FormLabel>
               <FormControl>
-                <Input type="email" placeholder="you@example.com" autoComplete="email" {...field} />
+                <Input type="email" placeholder={uiText("you@example.com")} autoComplete="email" {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>
           )}
         />
         <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-          {form.formState.isSubmitting ? 'Sending…' : 'Send sign-in code'}
+          {form.formState.isSubmitting ? uiText('Sending…') : uiText('Send sign-in code')}
         </Button>
       </form>
       <div className="mt-4 space-y-2 text-center text-sm text-muted-foreground">
@@ -188,18 +189,16 @@ function MagicLinkForm({
             onClick={onBack}
             className="font-medium text-foreground underline underline-offset-4"
           >
-            Use password instead
-          </button>
+            {uiText("Use password instead")}</button>
         </p>
         <p>
-          Don&apos;t have an account?{' '}
+          {uiText("Don't have an account?")}{' '}
           <button
             type="button"
             onClick={onSignup}
             className="font-medium text-foreground underline underline-offset-4"
           >
-            Sign up
-          </button>
+            {uiText("Sign up")}</button>
         </p>
       </div>
     </Form>
@@ -215,8 +214,9 @@ function MagicLinkVerifyForm({
   email: string;
   onSuccess: () => void;
 }) {
+  useUiLocale();
   const form = useForm<VerifyValues>({
-    resolver: zodResolver(verifySchema),
+    resolver: zodResolver(verifySchema()),
     defaultValues: { code: '' },
   });
 
@@ -233,14 +233,14 @@ function MagicLinkVerifyForm({
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
         <p className="text-sm text-muted-foreground">
-          We sent a 6-digit code to <span className="font-medium text-foreground">{email}</span>.
+          {uiText("We sent a 6-digit code to ")}<span className="font-medium text-foreground">{email}</span>.
         </p>
         <FormField
           control={form.control}
           name="code"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Sign-in code</FormLabel>
+              <FormLabel>{uiText("Sign-in code")}</FormLabel>
               <FormControl>
                 <Input
                   placeholder="123456"
@@ -255,7 +255,7 @@ function MagicLinkVerifyForm({
           )}
         />
         <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-          {form.formState.isSubmitting ? 'Verifying…' : 'Sign in'}
+          {form.formState.isSubmitting ? uiText('Verifying…') : uiText('Sign in')}
         </Button>
       </form>
     </Form>
@@ -271,8 +271,9 @@ function SignupForm({
   onSwitch: () => void;
   onSuccess: (email: string, password: string) => void;
 }) {
+  useUiLocale();
   const form = useForm<SignupValues>({
-    resolver: zodResolver(signupSchema),
+    resolver: zodResolver(signupSchema()),
     defaultValues: { email: '', password: '', display_name: '' },
   });
 
@@ -297,9 +298,9 @@ function SignupForm({
           name="display_name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Display name</FormLabel>
+              <FormLabel>{uiText("Display name")}</FormLabel>
               <FormControl>
-                <Input placeholder="Your name" autoComplete="name" {...field} />
+                <Input placeholder={uiText("Your name")} autoComplete="name" {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -310,9 +311,9 @@ function SignupForm({
           name="email"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Email</FormLabel>
+              <FormLabel>{uiText("Email")}</FormLabel>
               <FormControl>
-                <Input type="email" placeholder="you@example.com" autoComplete="email" {...field} />
+                <Input type="email" placeholder={uiText("you@example.com")} autoComplete="email" {...field} />
               </FormControl>
               <FormMessage />
             </FormItem>
@@ -323,7 +324,7 @@ function SignupForm({
           name="password"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Password</FormLabel>
+              <FormLabel>{uiText("Password")}</FormLabel>
               <FormControl>
                 <Input
                   type="password"
@@ -337,18 +338,17 @@ function SignupForm({
           )}
         />
         <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-          {form.formState.isSubmitting ? 'Creating account…' : 'Create account'}
+          {form.formState.isSubmitting ? uiText('Creating account…') : uiText('Create account')}
         </Button>
       </form>
       <p className="mt-4 text-center text-sm text-muted-foreground">
-        Already have an account?{' '}
+        {uiText("Already have an account?")}{' '}
         <button
           type="button"
           onClick={onSwitch}
           className="font-medium text-foreground underline underline-offset-4"
         >
-          Sign in
-        </button>
+          {uiText("Sign in")}</button>
       </p>
     </Form>
   );
@@ -365,8 +365,9 @@ function VerifyForm({
   password: string;
   onSuccess: () => void;
 }) {
+  useUiLocale();
   const form = useForm<VerifyValues>({
-    resolver: zodResolver(verifySchema),
+    resolver: zodResolver(verifySchema()),
     defaultValues: { code: '' },
   });
 
@@ -389,14 +390,14 @@ function VerifyForm({
     <Form {...form}>
       <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
         <p className="text-sm text-muted-foreground">
-          We sent a 6-digit code to <span className="font-medium text-foreground">{email}</span>.
+          {uiText("We sent a 6-digit code to ")}<span className="font-medium text-foreground">{email}</span>.
         </p>
         <FormField
           control={form.control}
           name="code"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Verification code</FormLabel>
+              <FormLabel>{uiText("Verification code")}</FormLabel>
               <FormControl>
                 <Input
                   placeholder="123456"
@@ -411,7 +412,7 @@ function VerifyForm({
           )}
         />
         <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-          {form.formState.isSubmitting ? 'Verifying…' : 'Verify'}
+          {form.formState.isSubmitting ? uiText('Verifying…') : uiText('Verify')}
         </Button>
       </form>
     </Form>
@@ -428,6 +429,7 @@ function postAuthDestination(): string {
 }
 
 export default function Login() {
+  useUiLocale();
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const [mode, setMode] = useState<Mode>('magic');
@@ -438,8 +440,8 @@ export default function Login() {
 
   useEffect(() => {
     if (denied) {
-      toast.error('Access denied', {
-        description: "Your email isn't on this app's allowlist. Ask the workspace owner to add you.",
+      toast.error(uiText('Access denied'), {
+        description: uiText("Your email isn't on this app's allowlist. Ask the workspace owner to add you."),
       });
       return;
     }
@@ -476,10 +478,11 @@ export default function Login() {
 
   return (
     <div className="grid min-h-screen place-items-center bg-muted/40 p-4">
+      <div className="fixed bottom-4 right-4 z-50 rounded bg-background p-1"><LanguagePicker /></div>
       <Card className="w-full max-w-md shadow-lg">
         <CardHeader className="space-y-1">
-          <CardTitle className="text-2xl">{titles[mode]}</CardTitle>
-          <CardDescription>{descriptions[mode]}</CardDescription>
+          <CardTitle className="text-2xl">{uiText(titles[mode])}</CardTitle>
+          <CardDescription>{uiText(descriptions[mode])}</CardDescription>
         </CardHeader>
         <CardContent>
           {mode === 'signin' && (

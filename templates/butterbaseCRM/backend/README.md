@@ -1,5 +1,7 @@
 # Backend — Live State Mirror
 
+[English](README.md) | [日本語](README.ja.md)
+
 This folder is a **read-only mirror** of what currently lives on the Butterbase platform for app `app_44zjayftl7b3` (https://butterbase-crm.butterbase.dev). The actual source of truth is the platform; this folder is here so contributors can read, review, and reason about the backend in git without needing dashboard or MCP access.
 
 > Editing files in this folder does **not** change the live app. To change the live app, use the Butterbase MCP tools, the `butterbase` CLI, or the dashboard, then re-run `./sync.sh` to refresh this folder.

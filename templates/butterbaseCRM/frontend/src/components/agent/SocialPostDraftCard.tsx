@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useState } from 'react'
 import { Sparkles, Send, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -19,14 +20,14 @@ function bodyFor(payload: DraftPayload, channel: SocialChannel): string {
 }
 
 export function SocialPostDraftCard({ payload, onDismiss }: { payload: DraftPayload; onDismiss?: () => void }) {
+  useUiLocale();
   const [open, setOpen] = useState(false)
   const channels = payload.channels ?? []
 
   return (
     <div className="rounded-lg border border-violet-200 bg-violet-50/60 p-3 space-y-2.5">
       <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-violet-900">
-        <Sparkles className="h-3.5 w-3.5" /> AI draft — review before posting
-      </div>
+        <Sparkles className="h-3.5 w-3.5" /> {uiText(" AI draft — review before posting")}</div>
       {payload.rationale && <p className="text-[12px] text-violet-800/80 italic">{payload.rationale}</p>}
 
       <div className="space-y-1.5">
@@ -40,10 +41,10 @@ export function SocialPostDraftCard({ payload, onDismiss }: { payload: DraftPayl
               </div>
               {reddit && (
                 <div className="text-[11px] text-gray-600">
-                  <span className="font-medium">{reddit.title || '(no title)'}</span>
+                  <span className="font-medium">{reddit.title || uiText('(no title)')}</span>
                   {' · '}
                   <span className="text-orange-700">r/{reddit.subreddit || '?'}</span>
-                  <span className="text-gray-400"> — verify</span>
+                  <span className="text-gray-400"> {uiText(" — verify")}</span>
                 </div>
               )}
               <p className="text-[12px] text-gray-700 whitespace-pre-wrap line-clamp-4">{bodyFor(payload, ch)}</p>
@@ -54,12 +55,10 @@ export function SocialPostDraftCard({ payload, onDismiss }: { payload: DraftPayl
 
       <div className="flex gap-2 pt-0.5">
         <Button size="sm" className="text-xs" onClick={() => setOpen(true)}>
-          <Send className="h-3 w-3" /> Review &amp; publish
-        </Button>
+          <Send className="h-3 w-3" /> {uiText(" Review & publish")}</Button>
         {onDismiss && (
           <Button size="sm" variant="ghost" className="text-xs text-gray-500" onClick={onDismiss}>
-            <X className="h-3 w-3" /> Dismiss
-          </Button>
+            <X className="h-3 w-3" /> {uiText(" Dismiss")}</Button>
         )}
       </div>
 

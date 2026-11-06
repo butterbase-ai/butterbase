@@ -1,4 +1,4 @@
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { Sparkles, CircleDashed, AlertCircle } from 'lucide-react';
 
 interface Props {

@@ -1,7 +1,9 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useState } from 'react';
 import { Send } from 'lucide-react';
 
 export function MessageComposer({ onSend, disabled }: { onSend: (body: string) => Promise<void>; disabled?: boolean }) {
+  useUiLocale();
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -38,7 +40,7 @@ export function MessageComposer({ onSend, disabled }: { onSend: (body: string) =
               submit();
             }
           }}
-          placeholder="Write a message…"
+          placeholder={uiText("Write a message…")}
           className="flex-1 resize-none bg-transparent py-1 text-sm text-[#2A1C0A] placeholder:text-[#9C8E7A] outline-none"
           disabled={disabled || busy}
         />
@@ -56,7 +58,7 @@ export function MessageComposer({ onSend, disabled }: { onSend: (body: string) =
                 ? '0 4px 12px -2px rgba(245, 200, 66, 0.5), inset 0 1px 0 rgba(255,255,255,0.3)'
                 : 'none',
           }}
-          aria-label="Send"
+          aria-label={uiText("Send")}
         >
           <Send className="h-4 w-4" />
         </button>
