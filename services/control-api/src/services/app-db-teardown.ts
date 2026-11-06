@@ -1,3 +1,5 @@
+import pg from 'pg';
+import { localDataPlaneUrlForRegion } from './local-data-plane.js';
 import * as neonClient from './neon-client.js';
 import { getDataProjectIdForRegion } from './neon-projects.js';
 
@@ -5,6 +7,7 @@ import { getDataProjectIdForRegion } from './neon-projects.js';
  * Shape of the teardown that ran, so callers can log precisely without
  * re-deriving the discriminator.
  *
+ *  - `local`    an explicitly configured local Postgres database was dropped.
  *  - `legacy`   the app's database lives *inside* the region's shared data
  *               project; only that database was dropped.
  *  - `tenant`   the app owns its Neon project outright (project-per-tenant);
@@ -12,10 +15,10 @@ import { getDataProjectIdForRegion } from './neon-projects.js';
  *  - `skipped`  nothing identifiable to delete (no project id / db name).
  */
 export interface AppDbTeardownResult {
-  mode: 'legacy' | 'tenant' | 'skipped';
+  mode: 'local' | 'legacy' | 'tenant' | 'skipped';
   /** Project the teardown acted on. Absent for `skipped`. */
   projectId?: string;
-  /** Database dropped. Only set for `legacy`. */
+  /** Database dropped. Set for `local` and `legacy`. */
   databaseName?: string;
   /** True when Neon answered 404 / "not found" — already gone, treated as success. */
   alreadyGone: boolean;
@@ -70,6 +73,21 @@ function isAlreadyGone(err: unknown): boolean {
  */
 export async function teardownAppDb(args: TeardownAppDbArgs): Promise<AppDbTeardownResult> {
   const { region, neonProjectId, neonDatabaseName } = args;
+
+  // Local moves persist no Neon project id. Compensate locally before the
+  // shared-project fallback can send a request to the Neon control plane.
+  if (process.env.BUTTERBASE_LOCAL === 'true' && !neonProjectId) {
+    const uri = localDataPlaneUrlForRegion(region);
+    if (!neonDatabaseName) return { mode: 'skipped', alreadyGone: false };
+    const admin = new pg.Pool({ connectionString: uri.toString(), max: 1, connectionTimeoutMillis: 5000 });
+    try {
+      const existing = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [neonDatabaseName]);
+      await admin.query(`DROP DATABASE IF EXISTS "${neonDatabaseName.replace(/"/g, '""')}" WITH (FORCE)`);
+      return { mode: 'local', databaseName: neonDatabaseName, alreadyGone: existing.rows.length === 0 };
+    } finally {
+      await admin.end();
+    }
+  }
 
   // A region with no configured shared data project id cannot prove the app is
   // a tenant, so fall back to legacy — the pre-existing behaviour — rather than
