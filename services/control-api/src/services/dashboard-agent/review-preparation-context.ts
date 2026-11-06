@@ -36,13 +36,24 @@ export async function explainReviewPreparations(pool: Pick<pg.Pool, 'query'>, or
         }
       } catch { /* Historical metadata must remain private when visibility cannot be verified. */ }
       let current: ProposalExplanation | null = null;
+      const parsed = row.input_tool_name === 'propose_action' ? ProposalInputSchema.safeParse(row.input_args) : null;
       try {
-        const parsed = row.input_tool_name === 'propose_action' ? ProposalInputSchema.safeParse(row.input_args) : null;
         current = await provider.explain?.(context, parsed?.success ? parsed.data : undefined) ?? null;
       } catch { /* Never expose raw lookup/provider errors or lose the other requests. */ }
       const explanation = current ? { ...current, reason: current.reason ?? saved?.reason ?? null,
         evidence: current.evidence.length ? current.evidence : saved?.evidence ?? [] } : saved;
-      const checked = ProposalExplanationSchema.safeParse(explanation);
+      // The target could not be re-read and no earlier proposal survives: still
+      // show what the owner was asked to decide, and why it is blocked.
+      const fallback = !explanation && parsed?.success ? {
+        title: parsed.data.title ?? 'A request Office could not re-check',
+        summary: parsed.data.summary ?? 'Office could not re-read the target of this request. Nothing will run until a complete proposal is prepared.',
+        effects: ['Nothing has run. A complete proposal is required before this request can proceed.'],
+        fields: [],
+        reason: { text: parsed.data.reason, attribution: 'operator' as const },
+        evidence: [],
+        blocker: { code: 'target_unavailable', summary: 'Office could not re-read the target of this request. It may have changed or been removed.' },
+      } : undefined;
+      const checked = ProposalExplanationSchema.safeParse(explanation ?? fallback);
       return checked.success ? { ...request, explanation: checked.data } : request;
     })));
   }
