@@ -84,12 +84,13 @@ function defaultCorsOptions(
       }
 
       // Always allow the platform dashboard, admin dashboard, public submissions
-      // dashboard, and Office
+      // dashboard, and every configured Office frontend (the preserved demo
+      // plus the customer origin; OFFICE_URL remains the legacy single value).
       if (
         origin === config.dashboardUrl
         || origin === config.adminDashboardUrl
         || origin === config.submissionsDashboardUrl
-        || origin === config.officeUrl
+        || config.officeAllowedOrigins.includes(origin)
         || origin === config.templatesUrl
       ) {
         callback(null, true);

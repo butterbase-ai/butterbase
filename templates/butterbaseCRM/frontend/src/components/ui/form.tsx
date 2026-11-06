@@ -1,5 +1,5 @@
-import { uiText, useUiLocale } from "../../i18n";
 "use client"
+import { uiText, useUiLocale } from "../../i18n";
 
 import * as React from "react"
 import * as LabelPrimitive from "@radix-ui/react-label"

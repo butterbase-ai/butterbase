@@ -496,7 +496,12 @@ async function executionRowCount(approvalId: string): Promise<number> {
 describe('approval replay — a stored foreign org_id is refused under a HUMAN principal', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
-    mockCallMcpTool.mockResolvedValue({ ok: true, result: { id: 'act_1' } } as never);
+    // A successful propose response is an MCP text envelope with an explicit
+    // committed status, rather than merely an action id or transport success.
+    mockCallMcpTool.mockResolvedValue({ ok: true, result: {
+      isError: false,
+      content: [{ type: 'text', text: JSON.stringify({ action_id: 'act_1', status: 'executed', requires_approval: false }) }],
+    } } as never);
     await pool.query(`DELETE FROM dashboard_agent_conversations WHERE organization_id = $1`, [ORG_A]);
   });
 
@@ -585,7 +590,10 @@ describe('approval replay — a stored foreign org_id is refused under a HUMAN p
     const first = await executeOnce(pool, opts);
     const second = await executeOnce(pool, opts);
 
-    expect(first).toEqual({ ok: true, result: { id: 'act_1' } });
+    expect(first).toEqual({ ok: true, result: {
+      isError: false,
+      content: [{ type: 'text', text: '{"action_id":"act_1","status":"executed","requires_approval":false}' }],
+    } });
     expect(second).toEqual(first);
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
     expect(await executionRowCount(approval.id)).toBe(1);
@@ -605,5 +613,40 @@ describe('approval replay — a stored foreign org_id is refused under a HUMAN p
 
     expect(result.ok).toBe(true);
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a same-org propose with only an action id unconfirmed and does not repeat its effect', async () => {
+    const args = { action: 'propose', capability: 'send_email_draft', org_id: ORG_A };
+    const approval = await seedApproval(args);
+    mockCallMcpTool.mockResolvedValue({ ok: true, result: {
+      content: [{ type: 'text', text: '{"action_id":"act_1"}' }],
+    } } as never);
+    const opts = { approvalId: approval.id, name: 'manage_substrate', args, jwt: 'approver-jwt', orgId: ORG_A, principal: 'human' as const };
+
+    expect(await executeOnce(pool, opts)).toMatchObject({ ok: false, code: 'execution_unconfirmed' });
+    expect(await executeOnce(pool, opts)).toMatchObject({ ok: false, code: 'execution_unconfirmed' });
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    expect(await executionRowCount(approval.id)).toBe(1);
+  });
+
+  it.each([
+    { label: 'an unconfirmed payload', response: { ok: true, result: {
+      content: [{ type: 'text', text: '{"action_id":"act_1","status":"executed"}' }],
+    } } },
+    { label: 'a lost transport response', response: { ok: false, error: 'response lost after dispatch' } },
+  ])('does not repeat the native approve leg after $label', async ({ response }) => {
+    const args = { action: 'propose', capability: 'send_email_draft', org_id: ORG_A };
+    const approval = await seedApproval(args);
+    mockCallMcpTool
+      .mockResolvedValueOnce({ ok: true, result: {
+        content: [{ type: 'text', text: '{"action_id":"act_1","requires_approval":true}' }],
+      } } as never)
+      .mockResolvedValue(response as never);
+    const opts = { approvalId: approval.id, name: 'manage_substrate', args, jwt: 'approver-jwt', orgId: ORG_A };
+
+    expect(await executeApprovedOperatorTool(pool, opts)).toMatchObject({ ok: false, code: 'execution_unconfirmed' });
+    expect(await executeApprovedOperatorTool(pool, opts)).toMatchObject({ ok: false, code: 'execution_unconfirmed' });
+    expect(mockCallMcpTool.mock.calls.map(call => (call[1] as { action: string }).action)).toEqual(['propose', 'approve']);
+    expect(await executionRowCount(approval.id)).toBe(1);
   });
 });

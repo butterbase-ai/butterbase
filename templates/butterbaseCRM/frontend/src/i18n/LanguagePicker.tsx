@@ -1,9 +1,7 @@
-import { useEffect, useSyncExternalStore } from 'react';
-import { getUiLocale, setUiLocale, subscribeUiLocale } from './core';
-export { uiText, uiMessage, getUiLocale, setUiLocale } from './core';
-export function useUiLocale() {
-  return useSyncExternalStore(subscribeUiLocale, getUiLocale, () => 'en' as const);
-}
+import { useEffect } from 'react';
+import { setUiLocale } from './core';
+import { useUiLocale } from './useUiLocale';
+
 export function LanguagePicker() {
   const locale = useUiLocale();
   return <label className="inline-flex shrink-0 items-center gap-1 text-xs">

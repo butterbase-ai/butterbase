@@ -36,7 +36,7 @@ export async function runReverseMoveSlowPath(
       [args.forward.id],
     ).catch((e: any) => {
       // Table may not exist on this region's runtime DB — skip silently.
-      if (!String(e.message).includes('does not exist')) throw e;
+      if (e.code !== '42P01' && !String(e.message).includes('does not exist')) throw e;
     });
   }
 

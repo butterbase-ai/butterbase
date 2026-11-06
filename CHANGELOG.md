@@ -4,9 +4,37 @@
 
 ### Breaking changes
 
+- **Deployment**: Workers for Platforms (`wfp`) is now the default hosting backend. A deployment that still relies on Cloudflare Pages must set `DEPLOYMENT_DEFAULT_BACKEND=pages`; the `apps.deployment_backend` column default is now `wfp` (runtime migration 060). Existing app rows keep their recorded backend.
+
 - **CLI**: `bb keys generate --scope` now takes `account|app` (was an arbitrary string array). Use `--extra-scope <token>` for additional allowlisted scope tokens (`ai:gateway`, `substrate`). Migration: `bb keys generate foo --scope ai:gateway` → `bb keys generate foo --scope account --extra-scope ai:gateway`.
 
+- **Upgrade order**: self-hosters must run `npm run migrate:runtime` (runtime migration 056) **before** upgrading control-api, because the new image selects `apps.paused_by`.
+
 ### Added
+
+- **Office tool details**: opt-in REST `activity_version=2` adds server-issued invocation UUID references and authorized lazy GETs for bounded, sanitized Input/Result previews. Default/version 1 payloads and strict stored events remain unchanged. Final approval resolutions are distinct from pending receipts; old calls are not backfilled. Apply additive control migration **150** before the API, then upgrade customer Office and docs. SDK/CLI/MCP options are unchanged. See [the detail contract](services/docs/src/content/docs/api-reference/office-api.md#input-and-result-previews-activity-version-2).
+
+- **Office Ask activity**: optional REST `activity_version=1` provides bounded tool observations and safe result summaries, including history and durable replay. Website history records authoritative turn outcomes and exact final-answer identity; older outcomes remain unknown. Apply additive control-plane migration **146** before upgrading control-api. Existing client requests retain their default payloads. See [the activity contract](services/docs/src/content/docs/api-reference/office-api.md#optional-tool-activity).
+
+- **Office clients**: standalone organization-scoped `OfficeClient`, 22 `butterbase office` commands and the optional cloud `manage_office` MCP tool. Includes idempotent Ask with durable public events, exact-turn observation/replay, source-aware decisions, native Substrate business memory, and browser confirmation for enable/pause/resume/approve. Requires a compatible hosted Office backend and the matching shared contract release; no app end-user credential support is implied.
+
+- **Prepared video storage (optional)**: retained private output objects, bounded transfers and durable cleanup, storage limits, authenticated byte-range playback and zero customer charge on failed delivery. Deploy optional move-table compatibility first, apply runtime migration061 in every region, then deploy policy-aware readers with output admission disabled before enabling the new contract. Existing provider-backed jobs keep their original behavior.
+
+- **AI images**: model-specific generation and reference-edit contracts for GPT Image 2.5 Flare/Sunburst, Grok Imagine Image 2.0/Quality, and FLUX 3 Image/Klein, including local option/limit validation. Discover configured availability with `manage_ai` action `list_models`.
+- **MCP videos**: `manage_ai` action `submit_video` forwards explicit `reference_declarations` and `prepare_references` to the existing fictional-character preparation flow. Older MCP clients can use REST.
+- **AI model listings**: image/video availability requires an enabled, configured generation adapter. Unimplemented discovered models remain internal to catalog discovery.
+- **AI video pricing**: recognize cents-based output/continuation and image-input SKUs, plus H3 image allowances and H3 Max resolution tiers. Provider-reported actual cost remains authoritative; unknown quotes retain estimated-cost behavior.
+
+- **Idle pause**: real app requests record home-region activity with an hourly Redis throttle. The optional idle reaper warns owners, cancels pending notices when real traffic returns, and pauses abandoned free projects with a global circuit breaker. It is disabled unless `BUTTERBASE_IDLE_PAUSE_DAYS` is configured; supports dry-run rollout. Migration 056 remains required before deploying the activity hook.
+
+- **Ops**: `scripts/sync-paused-frontends.ts` -- run once after the dispatch worker deploy so apps paused before it show the paused page (rewrites their existing KV routes with `paused`). Idempotent; `--dry-run` lists the apps without writing.
+- **Idle pause**: Upgrading a free organization to a paid plan resumes the projects that were paused for inactivity. Projects you or Butterbase support paused stay paused.
+
+- **Assistant API (generic)**: organization-scoped requests can name the organization with the `X-Organization-Id` header (membership-checked); stored assistant conversations record a server-owned `origin` and organization. Organization-locked managed keys are bound to exactly one organization and cannot administer organizations. Approval rows can carry a recorded immutable operation for replay verification.
+
+- **CORS**: `OFFICE_ALLOWED_ORIGINS` accepts a comma-separated list of Office frontend origins; the legacy single `OFFICE_URL` remains supported. Malformed entries fail startup rather than being silently ignored.
+
+- **AI video (optional)**: explicit fictional-character declarations, durable preparation stages, bounded eligible retry, provider cleanup, source retention, and deletion/move fences. Disabled unless the deployment enables eligible apps and models.
 
 - **Durable Objects (security)**: `ctx.env` on the DO side now scrubs
   `BUTTERBASE_INTERNAL_FN_KEY` (in addition to `DO_INVOKER_URL` /
@@ -66,9 +94,18 @@
 - **control-API / dashboard-API**: `POST /api-keys` body accepts `key_scope`, `target_app_id`, `additional_scopes`.
 - **MCP**: `manage_auth_config:generate_service_key` accepts `key_scope` and `additional_scopes`; requires `app_id` when `key_scope === 'app'`.
 - **Dashboard**: "Generate API key" dialog: scope radio (account / this app) + app picker + advanced scopes disclosure + scope summary on success.
+- **MCP**: `manage_app` action `resume`. `GET /v1/:app_id/config` and the pause endpoint now return `paused_by`; `APP_PAUSED` 503s include `details.paused_by` and explain automatic idle pauses without attributing them to the owner. Resuming an automatic idle pause on a free plan returns 402 `APP_RESUME_REQUIRES_UPGRADE`, and an owner pause over it keeps the idle label.
+
+### Changed
+
+- **Paused apps show a paused page; visit counts are human-only.** A paused app's frontend now shows a neutral "This project is paused." page (HTTP 503, not indexed) instead of the site; Durable Object paths keep working. Frontend visit counts now include only human page loads: crawlers, link previews, HTTP libraries, prefetches and asset requests are no longer counted.
+- **Pause now covers every app-scoped API.** A paused app returns 503 `APP_PAUSED` on every app-scoped API (data, auth, KV, functions, agents, RAG, people, the durable objects and edge SSR management APIs, storage, realtime) for everyone except the app's owners and org members using a dashboard session or API key on non-public routes. Realtime sockets are closed, websocket triggers and auth hooks don't run, the function runtime refuses the app's functions, and queued RAG ingestion waits. Template listing and cloning are unaffected. Visitors to a paused app's site see the paused page (see below); Durable Object paths keep serving. This is what the kill-switch always claimed; previously only some routes honoured it.
 
 ### Fixed
 
+- **Substrate**: entity removal is now recoverable and auditable. `retire_entity` soft-deletes an entity (`deleted_at`); entity reads hide retired rows unless `include_deleted=true`. Hard removals — `delete_entity`, `merge_entities`, and out-of-band SQL — are recorded in `entity_removals` with the ledger `action_id`, readable via `GET /v1/me/substrate/removals` and MCP `manage_substrate` action `list_removals`. Canonical-key upserts are serialized with an advisory lock, and `update_entity`/`patch_entity` accept canonical-key updates so a malformed key can be repaired. Ledger reads hide no-op rows (`result.changed: false`) unless `include_noops=true`; `status=approved` means a human approved the action (`approved_at`), not a resting state. Propose rejects dangling `source_artifact_id`/`related_decision_id`/`supersedes` ids with 400 `VALIDATION_INVALID_REFERENCE`, naming the field; MCP validation errors now include `field` for unknown top-level arguments.
+- **KV / integrations / operator**: `manage_kv` `get` and `mget` accept `raw: true` to read stored JSON text (writes reject it), `mget` returns keyed results, and `ctx.kv.mget` raises `KvError` naming the key on decode errors. `manage_integrations` action `execute_action` accepts `tool_slug` as an alias for `tool_name`; `execute_read` is Office-only. The operator loop reports sandbox failures as `{ ok: false, code, verification: 'unavailable', remediation }` (provider 401s classify as `sandbox_auth_failed`), and `proposal_incomplete` names the offending field.
+- **Move app**: moving an app to another region now copies the whole app record. Previously a move reset the pause state, organization, frontend backend, anon key and access/AI/JWT settings.
 - `AUTH_IMPERSONATION_FORBIDDEN` is now reachable from public surfaces: users can mint the app-scoped service keys needed to call functions with `auth: required` via `X-Butterbase-As-User`, instead of needing to re-run `journey-deploy`.
 
 ---

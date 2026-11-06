@@ -1,16 +1,18 @@
 import type pg from 'pg';
+import { MOVE_APP_OPTIONAL_TABLES } from './runtime-tables.js';
 import { NotFoundError, ConflictError } from '../api-errors.js';
 import { getMigration, createMigration, markCompleted } from './migration-store.js';
 import { runReverseMoveSlowPath } from './reverse-move-slow-path.js';
 import { dumpKvFromRegion as defaultDumpKvFromRegion } from './step-dump-kv.js';
 import { restoreKvIntoRegion as defaultRestoreKvIntoRegion } from './step-restore-kv.js';
 import { clearKvScope as defaultClearKvScope } from '../kv/kv-scope.js';
+import { cutoverAppState } from './cutover-app-state.js';
 
 export interface ReverseMoveCtx {
   controlPool: pg.Pool;
   runtimePoolFor: (region: string) => pg.Pool;
-  writeSubdomainMapping: (subdomain: string, appId: string, region: string) => Promise<void>;
-  writeDomainMapping: (hostname: string, appId: string, region: string) => Promise<void>;
+  writeSubdomainMapping: (subdomain: string, appId: string, region: string, paused?: boolean) => Promise<void>;
+  writeDomainMapping: (hostname: string, appId: string, region: string, paused?: boolean) => Promise<void>;
   listCustomDomains: (region: string, appId: string) => Promise<Array<{ hostname: string }>>;
   invalidateCacheAllRegions: (appId: string) => Promise<void>;
   updateOrgAppIndexRegion: (controlPool: pg.Pool, appId: string, region: string) => Promise<void>;
@@ -53,7 +55,8 @@ export async function runReverseMove(
   });
 
   await ctx.runtimePoolFor(forward.dest_region).query(
-    `UPDATE apps SET provisioning_status = 'migrating' WHERE id = $1`, [forward.app_id],
+    `UPDATE apps SET provisioning_status = 'migrating' WHERE id = $1`,
+    [forward.app_id],
   );
   await ctx.invalidateCacheAllRegions(forward.app_id);
 
@@ -97,15 +100,17 @@ export async function runReverseMove(
     throw err;
   }
 
-  await ctx.updateOrgAppIndexRegion(ctx.controlPool, forward.app_id, forward.source_region);
-  const subRes = await ctx.runtimePoolFor(forward.source_region).query<{ subdomain: string }>(
-    `SELECT subdomain FROM apps WHERE id = $1`, [forward.app_id],
+  await cutoverAppState(ctx, forward.app_id, forward.dest_region, forward.source_region);
+  await ctx.invalidateCacheAllRegions(forward.app_id);
+  const subRes = await ctx.runtimePoolFor(forward.source_region).query<{ subdomain: string; paused: boolean }>(
+    `SELECT subdomain, paused FROM apps WHERE id = $1`, [forward.app_id],
   );
   const sub = subRes.rows[0]?.subdomain;
-  if (sub) await ctx.writeSubdomainMapping(sub, forward.app_id, forward.source_region);
+  const paused = subRes.rows[0]?.paused === true;
+  if (sub) await ctx.writeSubdomainMapping(sub, forward.app_id, forward.source_region, paused);
   const doms = await ctx.listCustomDomains(forward.source_region, forward.app_id);
   for (const d of doms) {
-    await ctx.writeDomainMapping(d.hostname, forward.app_id, forward.source_region);
+    await ctx.writeDomainMapping(d.hostname, forward.app_id, forward.source_region, paused);
   }
   await ctx.invalidateCacheAllRegions(forward.app_id);
 
@@ -116,15 +121,14 @@ export async function runReverseMove(
     'app_edge_ssr_deployments','app_durable_objects','app_realtime_config',
     'app_integration_configs','storage_objects','app_db_connections',
     'app_orders','app_plans','app_products','app_subscriptions',
+    ...MOVE_APP_OPTIONAL_TABLES,
   ];
   for (const t of tables) {
-    await sourcePool.query(`UPDATE "${t}" SET archived_after_move = NULL WHERE archived_after_move = $1`, [forward.id]);
+    await sourcePool.query(`UPDATE "${t}" SET archived_after_move = NULL WHERE archived_after_move = $1`, [forward.id]).catch((error: any) => {
+      if (MOVE_APP_OPTIONAL_TABLES.has(t) && error.code === '42P01') return;
+      throw error;
+    });
   }
-
-  await sourcePool.query(
-    `UPDATE apps SET provisioning_status = 'ready', region = $1 WHERE id = $2`,
-    [forward.source_region, forward.app_id],
-  );
 
   await markCompleted(ctx.controlPool, revId);
 

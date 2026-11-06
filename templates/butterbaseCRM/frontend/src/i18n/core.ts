@@ -35,6 +35,6 @@ export function uiText(source: string, translationKey = source): string {
   return locale === 'ja' && Object.prototype.hasOwnProperty.call(japaneseMessages, key) ? japaneseMessages[key] : source;
 }
 export function uiMessage(strings: TemplateStringsArray, ...values: unknown[]): string {
-  const key = strings.reduce((result, part, index) => result + (index ? '\$' + '{' + (index - 1) + '}' : '') + part, '');
+  const key = strings.reduce((result, part, index) => result + (index ? '$' + '{' + (index - 1) + '}' : '') + part, '');
   return uiText(key).replace(/\$\{(\d+)\}/g, (_, index: string) => String(values[Number(index)]));
 }

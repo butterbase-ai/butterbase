@@ -31,13 +31,13 @@ vi.mock('../config.js', async (orig) => {
  * The control DB always answers with the caller's PERSONAL org, so a test that
  * sees the personal org proves the active org was ignored.
  */
-async function buildApp(organizationId: string | null) {
+async function buildApp(organizationId: string | null, organizationLocked = false) {
   const app = Fastify({ logger: false });
   app.decorate('controlDb', {
     query: async () => ({ rows: [{ personal_organization_id: 'org-personal' }] }),
   } as any);
   app.addHook('onRequest', async (req) => {
-    (req as any).auth = { appId: null, userId: 'u', authMethod: 'jwt', scopes: ['*'], organizationId };
+    (req as any).auth = { appId: null, userId: 'u', authMethod: organizationLocked ? 'api_key' : 'jwt', scopes: ['*'], organizationId, organizationLocked };
   });
   await app.register(gatewayRoutes);
   return app;
@@ -74,4 +74,14 @@ describe('gateway org attribution', () => {
     expect((routeResponses as any).mock.calls[0][0].organizationId).toBe('org-personal');
     await app.close();
   });
+});
+
+it('keeps the managed key bound organization through the real gateway route', async () => {
+  const { routeResponses } = await import('../services/ai-router/responses.js');
+  const org = '11111111-1111-4111-8111-111111111111';
+  const app = await buildApp(org, true);
+  const response = await app.inject({ method: 'POST', url: '/v1/responses', payload: { model: 'openai/gpt-4o', input: 'hi' } });
+  expect(response.statusCode).toBe(200);
+  expect((routeResponses as any).mock.calls.at(-1)[0].organizationId).toBe(org);
+  await app.close();
 });

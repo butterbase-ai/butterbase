@@ -1,0 +1,555 @@
+/**
+ * Task 9 — an Office-origin foreground turn is governed by the Office
+ * contract, and it bills its organization.
+ *
+ * Two properties are pinned here, and both are about where the truth lives.
+ *
+ * PROVENANCE. "Is this an Office conversation?" is read from the STORED
+ * conversation row — never from a request body, a header, or a flag a caller
+ * might forget to pass. That is the difference between a control and an
+ * affordance: a route that forgot a flag would silently downgrade a customer
+ * Office to the ordinary dashboard, and nobody would notice until a
+ * deployment ran without its owner's approval.
+ *
+ * BILLING. An Office question is paid for by the Office's organization, not by
+ * the personal organization the JWT happens to fall back to. The gateway
+ * decides that from `x-organization-id`, so an Office turn must send it — and
+ * an ordinary dashboard conversation must NOT, because the dashboard
+ * assistant is its own product surface and its billing must not move.
+ *
+ * The classifier itself is covered exhaustively in office-tool-policy.test.ts;
+ * these tests cover the WIRING into the loop.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterAll, type MockedFunction } from 'vitest';
+import type pg from 'pg';
+
+vi.mock('../store.js', () => ({
+  appendMessage: vi.fn(),
+  listMessages: vi.fn(),
+  getRecentToolArgs: vi.fn(),
+  upsertSnapshotLabel: vi.fn(),
+  getConversation: vi.fn(),
+  updateConversationTitle: vi.fn(),
+}));
+
+vi.mock('../mcp-client.js', () => ({
+  callMcpTool: vi.fn(),
+}));
+
+vi.mock('../approvals-store.js', () => ({
+  createApproval: vi.fn(),
+  checkTrust: vi.fn(),
+}));
+
+vi.mock('../tool-catalog.js', async () => {
+  const actual = await vi.importActual<typeof import('../tool-catalog.js')>('../tool-catalog.js');
+  return {
+    ...actual,
+    getToolCatalog: vi.fn().mockReturnValue([
+      actual.getToolCatalog().find((tool) => tool.name === actual.PROPOSE_ACTION_TOOL)!,
+      {
+        name: 'manage_app',
+        description: 'Manage app lifecycle',
+        parameters: { type: 'object', properties: { action: { type: 'string' } }, required: ['action'] },
+      },
+      {
+        name: 'write_file',
+        description: 'write file',
+        parameters: { type: 'object', additionalProperties: true, required: ['app_id', 'path', 'content'] },
+      },
+      {
+        name: 'deploy_frontend',
+        description: 'deploy',
+        parameters: { type: 'object', additionalProperties: true, required: ['app_id'] },
+      },
+    ]),
+    isFileOpTool: (name: string) => name === 'write_file',
+    isDeployTool: (name: string) => name === 'deploy_frontend',
+    isDeployFunctionTool: () => false,
+    // Deliberately 'safe' for manage_app update_env: the ordinary human
+    // sensitivity gate would NOT pause on it, so a pause can only come from the
+    // Office floor. That is what makes these tests discriminate.
+    sensitivityFor: () => 'safe',
+  };
+});
+
+import * as storeModule from '../store.js';
+import * as mcpClientModule from '../mcp-client.js';
+import * as approvalsStoreModule from '../approvals-store.js';
+import { runAgentTurn, streamChatCompletion, type LoopEvent } from '../loop.js';
+import { PreparedProposalSchema, setApprovalProposalProvider } from '../approval-proposal.js';
+import { persistPreparedApproval } from '../proposal-store.js';
+vi.mock('../proposal-store.js', () => ({
+  persistPreparedApproval: vi.fn(),
+  findParkedProposalIntent: vi.fn(async () => null),
+}));
+import {
+  setOperatorAccessPolicy,
+  type OperatorAccessInput,
+} from '../operator-access-policy.js';
+
+const mockAppendMessage = storeModule.appendMessage as MockedFunction<typeof storeModule.appendMessage>;
+const mockListMessages = storeModule.listMessages as MockedFunction<typeof storeModule.listMessages>;
+const mockGetRecentToolArgs = storeModule.getRecentToolArgs as MockedFunction<typeof storeModule.getRecentToolArgs>;
+const mockUpsertSnapshotLabel = storeModule.upsertSnapshotLabel as MockedFunction<typeof storeModule.upsertSnapshotLabel>;
+const mockGetConversation = storeModule.getConversation as MockedFunction<typeof storeModule.getConversation>;
+const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcpClientModule.callMcpTool>;
+const mockCreateApproval = approvalsStoreModule.createApproval as MockedFunction<typeof approvalsStoreModule.createApproval>;
+
+const ORG = '11111111-1111-4111-8111-111111111111';
+const OTHER_ORG = '22222222-2222-4222-8222-222222222222';
+
+const stubPool = {} as pg.Pool;
+const stubMessage = {
+  id: 'msg-stub',
+  conversationId: 'conv-1',
+  role: 'user' as const,
+  content: '',
+  toolCallId: null,
+  toolName: null,
+  toolArgs: null,
+  toolResult: null,
+  modelUsed: null,
+  createdAt: new Date(),
+};
+
+const baseInput = {
+  conversationId: 'conv-1',
+  userId: 'user-1',
+  jwt: 'test-jwt',
+  userMessage: 'Do the thing',
+  model: 'claude-3-5-sonnet',
+  pool: stubPool,
+};
+
+/** The stored row the loop reads to decide provenance. */
+function conversation(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 'conv-1',
+    userId: 'user-1',
+    title: 'Asked in Office',
+    model: 'claude-3-5-sonnet',
+    organizationId: ORG,
+    origin: 'office' as const,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    lastMessageAt: null,
+    pinnedAt: null,
+    ...overrides,
+  } as any;
+}
+
+function makeSseStream(deltas: object[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const lines =
+    deltas.map((d) => `data: ${JSON.stringify(d)}\n\n`).join('') + 'data: [DONE]\n\n';
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(lines));
+      controller.close();
+    },
+  });
+}
+
+function gatewayResponse(deltas: object[]) {
+  return { ok: true, body: makeSseStream(deltas) } as unknown as Response;
+}
+
+/** One assistant turn that calls a tool with the given args, then stops. */
+function toolCallPass(name: string, args: Record<string, unknown>) {
+  return gatewayResponse([
+    {
+      choices: [
+        {
+          delta: { tool_calls: [{ index: 0, id: 'call-1', function: { name, arguments: '' } }] },
+          finish_reason: null,
+        },
+      ],
+    },
+    {
+      choices: [
+        { delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify(args) } }] }, finish_reason: null },
+      ],
+    },
+    { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+  ]);
+}
+
+async function collect(gen: AsyncGenerator<LoopEvent>): Promise<LoopEvent[]> {
+  const events: LoopEvent[] = [];
+  for await (const e of gen) events.push(e);
+  return events;
+}
+
+/** Header lookup that does not depend on the casing a caller chose. */
+function header(init: any, name: string): unknown {
+  const headers = (init?.headers ?? {}) as Record<string, unknown>;
+  const wanted = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === wanted) return v;
+  }
+  return undefined;
+}
+
+const POLICY_CALLS: OperatorAccessInput[] = [];
+
+function installPreparationProvider() {
+  const proposal = PreparedProposalSchema.parse({
+    version: 1, source: 'explicit', preparedAt: '2026-10-30T00:00:00.000Z',
+    intentFingerprint: 'a'.repeat(64), operationFingerprint: 'b'.repeat(64),
+    reason: { text: 'Configure the app for its new integration.', attribution: 'operator' },
+    evidence: [],
+    preview: {
+      title: 'Update app environment?', summary: 'Configure the integration.',
+      target: { label: 'App', reference: 'app-1' }, effects: ['Updates KEY.'], fields: [],
+    },
+    preconditions: [{ kind: 'app', referenceId: 'app-1', fingerprint: 'c'.repeat(64) }],
+  });
+  const prepare = vi.fn(async () => ({ status: 'ready' as const, proposal }));
+  setApprovalProposalProvider({ enabled: () => true, prepare, revalidate: async () => ({ status: 'valid' }) });
+  vi.mocked(persistPreparedApproval).mockResolvedValue({ kind: 'created', approval: { id: 'approval-1' } as any });
+  return { prepare, proposal };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  setApprovalProposalProvider(null);
+  POLICY_CALLS.length = 0;
+  mockAppendMessage.mockResolvedValue(stubMessage);
+  mockListMessages.mockResolvedValue([]);
+  mockGetRecentToolArgs.mockResolvedValue([]);
+  mockUpsertSnapshotLabel.mockResolvedValue(undefined);
+  mockGetConversation.mockResolvedValue(null);
+  mockCreateApproval.mockResolvedValue({
+    id: 'approval-1',
+    conversationId: 'conv-1',
+    turnMessageId: 'msg-append-1',
+    toolName: 'manage_app',
+    toolArgs: {},
+    sensitivity: 'destructive',
+    status: 'pending',
+    trustScope: null,
+    denyReason: null,
+    createdAt: '',
+    resolvedAt: null,
+    resolvedBy: null,
+    traceId: null,
+    resumedAt: null,
+    approvedOperation: null,
+  } as any);
+  setOperatorAccessPolicy({
+    async evaluate(input) {
+      POLICY_CALLS.push(input);
+      return { allowed: true, reason: null, approvalMode: 'consequential' };
+    },
+  });
+});
+
+afterAll(() => {
+  setOperatorAccessPolicy(null);
+  setApprovalProposalProvider(null);
+});
+
+describe('an Office-origin conversation is governed by the Office floor', () => {
+  it('refuses a fenced execution before transcript writes or model work', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    global.fetch = vi.fn();
+    const events = await collect(runAgentTurn({ ...baseInput, executionGuard: async () => false }));
+    expect(events).toEqual([{ type: 'blocked', reason: 'execution_interrupted' }]);
+    expect(mockAppendMessage).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('pairs tool history but never dispatches a batch after its execution fence expires', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    let allowed = true;
+    global.fetch = vi.fn(async () => {
+      allowed = false;
+      return toolCallPass('manage_app', { action: 'list' });
+    });
+    const events = await collect(runAgentTurn({ ...baseInput, executionGuard: async () => allowed }));
+    expect(events).toContainEqual({ type: 'blocked', reason: 'execution_interrupted' });
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    expect(mockAppendMessage.mock.calls.some(call => call[2].role === 'tool' &&
+      (call[2].toolResult as any)?.reason === 'execution_interrupted')).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts no further model request or auto-title after the fence expires during a tool', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    let allowed = true;
+    global.fetch = vi.fn().mockResolvedValue(toolCallPass('manage_app', { action: 'list' }));
+    mockCallMcpTool.mockImplementation(async () => { allowed = false; return { ok: true, result: { apps: [] } }; });
+    const events = await collect(runAgentTurn({ ...baseInput, executionGuard: async () => allowed }));
+    expect(events).toContainEqual({ type: 'blocked', reason: 'execution_interrupted' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['lease', 'abort', 'access'] as const)('refuses later tools in the same batch after %s changes during the first tool', async change => {
+    mockGetConversation.mockResolvedValue(conversation());
+    let lease = true;
+    let access = true;
+    const controller = new AbortController();
+    global.fetch = vi.fn().mockResolvedValue(gatewayResponse([
+      { choices: [{ delta: { tool_calls: [0, 1, 2].map(index => ({ index, id: `call-${index + 1}`,
+        function: { name: 'manage_app', arguments: JSON.stringify({ action: 'list' }) } })) }, finish_reason: 'tool_calls' }] },
+    ]));
+    mockCallMcpTool.mockImplementation(async () => {
+      if (change === 'lease') lease = false;
+      if (change === 'abort') controller.abort();
+      if (change === 'access') access = false;
+      return { ok: true, result: { apps: [] } };
+    });
+    const events = await collect(runAgentTurn({ ...baseInput, executionGuard: async () => lease,
+      signal: controller.signal, accessGuard: async () => ({ allowed: access, reason: access ? null : 'paused_by_owner', approvalMode: 'consequential' }) }));
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const reason = change === 'access' ? 'paused_by_owner' : 'execution_interrupted';
+    expect(events).toContainEqual({ type: 'blocked', reason });
+    const paired = mockAppendMessage.mock.calls.filter(call => call[2].role === 'tool').map(call => call[2]);
+    expect(paired.map(message => message.toolCallId)).toEqual(['call-1', 'call-2', 'call-3']);
+    for (const message of paired.slice(1)) expect(message.toolResult).toEqual({ error: 'office_access_blocked', reason });
+  });
+
+  it('spends no automatic title request when Office access changes after the answer', async () => {
+    mockGetConversation.mockResolvedValue(conversation({ title: 'New conversation' }));
+    let allowed = true;
+    setOperatorAccessPolicy({ evaluate: async () => ({ allowed, reason: allowed ? null : 'paused_by_owner', approvalMode: 'consequential' }) });
+    global.fetch = vi.fn(async () => {
+      allowed = false;
+      return gatewayResponse([{ choices: [{ delta: { content: 'Answer' }, finish_reason: 'stop' }] }]);
+    });
+    const events = await collect(runAgentTurn({ ...baseInput, executionGuard: async () => true }));
+    expect(events).toContainEqual({ type: 'done' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails a live change closed when required Office preparation is unavailable', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    const args = { action: 'update_env', app_id: 'app-1', env: { KEY: 'v' } };
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(toolCallPass('manage_app', args))
+      .mockResolvedValueOnce(gatewayResponse([{ choices: [{ delta: { content: 'Preparation unavailable.' }, finish_reason: 'stop' }] }]));
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'tool_result', id: 'call-1', result: expect.objectContaining({ code: 'proposal_unavailable' }),
+    }));
+    expect(events.some((event) => event.type === 'approval_required' || event.type === 'error')).toBe(false);
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(persistPreparedApproval).not.toHaveBeenCalled();
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+    // Refusal still answers the model's tool call, so the next turn can recover.
+    expect(mockAppendMessage).toHaveBeenCalledWith(stubPool, 'conv-1', expect.objectContaining({
+      role: 'tool', toolCallId: 'call-1', toolName: 'manage_app', toolArgs: args,
+      toolResult: expect.objectContaining({ code: 'proposal_unavailable' }),
+    }));
+  });
+
+  it('requires an explicit reason before preparing a direct live change', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    const { prepare } = installPreparationProvider();
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(toolCallPass('manage_app', { action: 'update_env', app_id: 'app-1', env: { KEY: 'v' } }))
+      .mockResolvedValueOnce(gatewayResponse([{ choices: [{ delta: { content: 'Please supply a reason.' }, finish_reason: 'stop' }] }]));
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'tool_result', result: expect.objectContaining({ code: 'proposal_incomplete', missing: ['reason'] }),
+    }));
+    expect(prepare).not.toHaveBeenCalled();
+    expect(persistPreparedApproval).not.toHaveBeenCalled();
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+  });
+
+  it('pauses an explicitly prepared live change and records its exact immutable operation', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    const { prepare, proposal } = installPreparationProvider();
+    const args = { action: 'update_env', app_id: 'app-1', env: { KEY: 'v' } };
+    global.fetch = vi.fn().mockResolvedValueOnce(toolCallPass('propose_action', {
+      operation: { tool: 'manage_app', arguments: args }, reason: proposal.reason.text,
+    }));
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    expect(events).toContainEqual({
+      type: 'approval_required', approval_id: 'approval-1', tool_name: 'manage_app', args, sensitivity: 'destructive',
+    });
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({
+      organizationId: ORG, actorUserId: 'user-1', origin: 'office', conversationId: 'conv-1',
+      operation: expect.objectContaining({ version: 1, toolName: 'manage_app', args }),
+    }), { operation: { tool: 'manage_app', arguments: args }, reason: proposal.reason.text, evidence_refs: [] });
+    expect(persistPreparedApproval).toHaveBeenCalledWith(stubPool, expect.objectContaining({
+      organizationId: ORG, operation: expect.objectContaining({ version: 1, toolName: 'manage_app', args }),
+      proposal, message: expect.objectContaining({ toolName: 'propose_action', callId: 'call-1' }),
+    }));
+    // The Office floor still wins over the deliberately safe human classifier.
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(mockCallMcpTool).not.toHaveBeenCalled();
+  });
+
+  it('lets preparation run without a human', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(toolCallPass('manage_app', { action: 'list' }))
+      .mockResolvedValueOnce(
+        gatewayResponse([{ choices: [{ delta: { content: 'Done.' }, finish_reason: 'stop' }] }]),
+      );
+    mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: { apps: [] } });
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    expect(events.some((e) => e.type === 'approval_required')).toBe(false);
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('threads the conversation organization into tool calls', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(toolCallPass('manage_app', { action: 'list' }))
+      .mockResolvedValueOnce(
+        gatewayResponse([{ choices: [{ delta: { content: 'Done.' }, finish_reason: 'stop' }] }]),
+      );
+    mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: { apps: [] } });
+
+    await collect(runAgentTurn(baseInput));
+
+    // Fourth argument: the tool transport must target the Office's org, the
+    // same way the gateway does. A member's JWT may carry a different
+    // personal-org fallback.
+    expect(mockCallMcpTool.mock.calls[0].slice(0, 4)).toEqual([
+      'manage_app',
+      { action: 'list' },
+      'test-jwt',
+      ORG,
+    ]);
+  });
+
+  it('blocks the turn before any model spend when the organization loses access', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    setOperatorAccessPolicy({
+      async evaluate(input) {
+        POLICY_CALLS.push(input);
+        return { allowed: false, reason: 'paid_plan_required', approvalMode: 'consequential' };
+      },
+    });
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    expect(events).toContainEqual({ type: 'blocked', reason: 'paid_plan_required' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    // The user's message is still persisted — the block is about spend, and
+    // losing it would lose the question the customer already asked.
+    expect(mockAppendMessage).toHaveBeenNthCalledWith(
+      1, stubPool, 'conv-1', expect.objectContaining({ role: 'user', content: 'Do the thing' }),
+    );
+  });
+
+  it('fails the turn closed when the stored provenance cannot be read', async () => {
+    // A conversation row is the ONLY evidence that this is an Office turn. If
+    // that read fails, proceeding as an ordinary dashboard turn would drop the
+    // Office floor, the organization-scoped tools and the organization's
+    // billing — a fail-open downgrade. The turn must stop instead.
+    mockGetConversation.mockRejectedValueOnce(new Error('database unavailable'));
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock;
+
+    await expect(collect(runAgentTurn(baseInput))).rejects.toThrow('database unavailable');
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(POLICY_CALLS).toEqual([]);
+  });
+});
+
+describe('an ordinary dashboard conversation is unchanged', () => {
+  it('does not consult the Office access policy, gate with the Office floor, or send an org header', async () => {
+    mockGetConversation.mockResolvedValue(null); // no stored Office provenance
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(toolCallPass('manage_app', { action: 'update_env', app_id: 'app-1' }))
+      .mockResolvedValueOnce(
+        gatewayResponse([{ choices: [{ delta: { content: 'Done.' }, finish_reason: 'stop' }] }]),
+      );
+    mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: { ok: true } });
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    // The same call that is gated for Office runs here — no office floor, and
+    // no ordinary sensitivity gate either (the mock's sensitivityFor is safe).
+    expect(events.some((e) => e.type === 'approval_required')).toBe(false);
+    expect(mockCreateApproval).not.toHaveBeenCalled();
+    expect(POLICY_CALLS).toEqual([]);
+
+    const init = (global.fetch as any).mock.calls[0][1];
+    expect(header(init, 'x-organization-id')).toBeUndefined();
+    // And the tool transport carries no organization — this is the pre-Task-9
+    // dashboard behaviour, unchanged.
+    expect(mockCallMcpTool.mock.calls[0][3]).toBeUndefined();
+  });
+
+  it('does not apply the Office floor when the stored row says dashboard', async () => {
+    mockGetConversation.mockResolvedValue(conversation({ origin: 'dashboard', organizationId: null }));
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce(toolCallPass('manage_app', { action: 'update_env', app_id: 'app-1' }))
+      .mockResolvedValueOnce(
+        gatewayResponse([{ choices: [{ delta: { content: 'Done.' }, finish_reason: 'stop' }] }]),
+      );
+    mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: { ok: true } });
+
+    const events = await collect(runAgentTurn(baseInput));
+
+    expect(events.some((e) => e.type === 'approval_required')).toBe(false);
+    expect(POLICY_CALLS).toEqual([]);
+  });
+});
+
+describe('gateway request attribution', () => {
+  it('sends the Office organization as x-organization-id', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      gatewayResponse([{ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] }]),
+    );
+
+    for await (const _chunk of streamChatCompletion({
+      model: 'm', messages: [], tools: [], jwt: 'j', organizationId: ORG,
+    })) { /* drain */ }
+
+    const init = (global.fetch as any).mock.calls[0][1];
+    expect(header(init, 'x-organization-id')).toBe(ORG);
+  });
+
+  it('omits the header when no organization is bound', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      gatewayResponse([{ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] }]),
+    );
+
+    for await (const _chunk of streamChatCompletion({
+      model: 'm', messages: [], tools: [], jwt: 'j',
+    })) { /* drain */ }
+
+    const init = (global.fetch as any).mock.calls[0][1];
+    expect(header(init, 'x-organization-id')).toBeUndefined();
+  });
+
+  it('never bills a different organization than the stored one', async () => {
+    mockGetConversation.mockResolvedValue(conversation());
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      gatewayResponse([{ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] }]),
+    );
+
+    await collect(runAgentTurn({ ...baseInput, organizationId: OTHER_ORG }));
+
+    const init = (global.fetch as any).mock.calls[0][1];
+    expect(header(init, 'x-organization-id')).toBe(ORG);
+  });
+});

@@ -37,6 +37,18 @@ vi.mock('../store.js', () => ({
 vi.mock('../mcp-client.js', () => ({ callMcpTool: vi.fn() }));
 vi.mock('../approvals-store.js', () => ({ createApproval: vi.fn(), checkTrust: vi.fn() }));
 
+/**
+ * The operator's managed-key containment guard validates a `bb_sk_…` token
+ * against the control database. This file uses a real-looking service key on
+ * purpose (the credential must never reach the sandbox) over a stub pool, so
+ * the guard's lookup throws and every operator tool call is denied before
+ * `build_app` dispatches. The guard is covered by locked-key-access's own
+ * tests; this file is about the build path.
+ */
+vi.mock('../../locked-key-access.js', () => ({
+  assertOperatorKeyArguments: vi.fn(async () => {}),
+}));
+
 import * as storeModule from '../store.js';
 import * as mcpClientModule from '../mcp-client.js';
 import * as approvalsStoreModule from '../approvals-store.js';
@@ -285,6 +297,29 @@ describe('build_app — dispatch', () => {
     expect(req.cache).toEqual({
       getUrl: expect.stringContaining('sig=cg'),
       putUrl: expect.stringContaining('sig=cp'),
+    });
+  });
+
+  it('reports a sandbox auth failure as verification unavailable', async () => {
+    oneToolCallThenStop(OPERATOR_BUILD_TOOL, { app_id: APP });
+    const { cache, buildHydratorFactory } = withTree();
+    const buildExecutor = vi.fn(async () => {
+      throw Object.assign(new Error('Unauthorized'), {
+        code: 'sandbox_auth_failed',
+        remediation: 'Sandbox verification is unavailable; do not assume the code ran.',
+      });
+    }) as unknown as BuildExecutor;
+
+    const events = await collect(runAgentTurn(
+      operatorInput({ buildExecutor }),
+      { cache, buildHydratorFactory },
+    ));
+
+    expect(resultOf(events)!.error).toContain('Unauthorized');
+    expect(resultOf(events)!.result).toMatchObject({
+      ok: false,
+      code: 'sandbox_auth_failed',
+      verification: 'unavailable',
     });
   });
 

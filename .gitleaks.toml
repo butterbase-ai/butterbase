@@ -8,6 +8,9 @@ useDefault = true
 [allowlist]
 description = "Known-safe matches: fake test keys and documentation placeholders"
 regexes = [
+  # Exact nonfunctional fixtures used to assert that secret values are not logged.
+  '''^bb_sk_never_logged_xyz789$''',
+  '''^sk_test_SUPERSECRET$''',
   # Repeated-hex test fixture used as AUTH_ENCRYPTION_KEY across tests + compose
   '''0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef''',
   '''0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab''',

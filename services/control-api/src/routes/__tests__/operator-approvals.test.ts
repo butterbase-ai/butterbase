@@ -13,9 +13,18 @@ vi.mock('../../services/dashboard-agent/approvals-store.js', async (importOrigin
   resolveApproval: vi.fn(),
 }));
 vi.mock('../../services/dashboard-agent/tool-bridge.js', () => ({ executeOnce: vi.fn() }));
+// These unit cases stub all persistence and have no database connection.
+// Session-lock serialization is exercised by the real-database race suite.
+vi.mock('../../services/dashboard-agent/approval-resolution-lock.js', () => ({
+  withApprovalResolutionLock: async (pool: unknown, approval: unknown, work: (pool: unknown, approval: unknown) => Promise<unknown>) => work(pool, approval),
+}));
 // resolveOperatorApproval delegates its persistence to resume.ts, which reads
-// and writes messages. Stub only those three; the rest of the store is left
+// and writes messages. Stub only those four; the rest of the store is left
 // real so the route module's other imports still resolve.
+//
+// `replaceToolResultForCall` is the fourth because resume.ts now writes the
+// answer by OVERWRITING a placeholder row when one exists (2026-08-08). Left
+// real, it takes the stub pool and throws before the assertions run.
 vi.mock('../../services/dashboard-agent/store.js', async () => ({
   ...(await vi.importActual<typeof import('../../services/dashboard-agent/store.js')>(
     '../../services/dashboard-agent/store.js',
@@ -23,6 +32,7 @@ vi.mock('../../services/dashboard-agent/store.js', async () => ({
   getMessageByPendingApprovalId: vi.fn(),
   clearPendingApproval: vi.fn(),
   appendMessage: vi.fn(),
+  replaceToolResultForCall: vi.fn(async () => false),
 }));
 
 import { Pool } from 'pg';
@@ -33,6 +43,7 @@ import * as storeModule from '../../services/dashboard-agent/store.js';
 import { resolveOperatorApproval, resolveCallerOrgId, dashboardAgentRoutes } from '../dashboard-agent.js';
 
 const mockGet = approvalsModule.getApprovalForOrg as MockedFunction<typeof approvalsModule.getApprovalForOrg>;
+const mockList = approvalsModule.listPendingByOrg as MockedFunction<typeof approvalsModule.listPendingByOrg>;
 const mockResolve = approvalsModule.resolveApproval as MockedFunction<typeof approvalsModule.resolveApproval>;
 const mockExecute = bridgeModule.executeOnce as MockedFunction<typeof bridgeModule.executeOnce>;
 const mockPaused = storeModule.getMessageByPendingApprovalId as MockedFunction<typeof storeModule.getMessageByPendingApprovalId>;
@@ -45,6 +56,7 @@ const approval = {
   toolName: 'manage_substrate', toolArgs: { action: 'propose' },
   sensitivity: 'destructive' as const, status: 'pending' as const,
   trustScope: null, denyReason: null, createdAt: '', resolvedAt: null,
+  references: [],
 };
 
 const pausedRow = { id: 'msg-1', toolCallId: 'call_1' } as any;
@@ -269,16 +281,22 @@ describe('resolveCallerOrgId', () => {
 describe('operator route membership wiring', () => {
   let app: FastifyInstance;
   const query = vi.fn();
+  let authenticated = true;
 
   beforeEach(async () => {
     process.env.DASHBOARD_ASSISTANT_ENABLED = '1';
+    authenticated = true;
     query.mockReset();
     query.mockResolvedValue({ rows: [], rowCount: 0 });
 
     app = Fastify({ logger: false });
     app.decorateRequest('auth', null as any);
     app.addHook('onRequest', async (request) => {
-      (request as any).auth = { userId: 'some-user', authMethod: 'jwt', scopes: ['*'] };
+      // The production auth plugin always decorates `auth`; anonymous is a
+      // null userId, not a missing object.
+      (request as any).auth = authenticated
+        ? { userId: 'some-user', authMethod: 'jwt', scopes: ['*'] }
+        : { userId: null, authMethod: 'anonymous', scopes: [] };
     });
     app.decorate('controlDb', { query } as any);
     await app.register(dashboardAgentRoutes);
@@ -318,5 +336,159 @@ describe('operator route membership wiring', () => {
     const res = await app.inject({ method: 'GET', url: '/operator/approvals' });
     expect(res.statusCode).toBe(400);
     expect(approvalsModule.listPendingByOrg).not.toHaveBeenCalled();
+  });
+
+  // ── GET /operator/approvals/:id ──────────────────────────────────────────
+  //
+  // The smoke's verify-approved phase must be able to observe a RESOLVED
+  // approval. The list route is pending-only, so it can never do that.
+
+  const memberQuery = () =>
+    query.mockResolvedValue({ rows: [{ organization_id: ORG_A }], rowCount: 1 });
+
+  it('returns the safe shape for a resolved approval', async () => {
+    memberQuery();
+    mockGet.mockResolvedValue({
+      ...approval,
+      status: 'approved',
+      resolvedAt: '2026-10-27T10:00:00.000Z',
+      source: 'office',
+      toolArgs: { action: 'propose', payload: { token: 'private-credential', nested: { api_key: 'private-credential', name: 'Visible field' } } },
+      approvedOperation: { version: 1, toolName: 'manage_substrate', args: { token: 'private-operation' } },
+      proposalDetails: null,
+    } as any);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-1',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      approval: {
+        id: 'appr-1',
+        conversationId: 'conv-1',
+        turnMessageId: 'msg-1',
+        toolName: 'manage_substrate',
+        toolArgs: { action: 'propose', payload: { token: '[redacted]', nested: { api_key: '[redacted]', name: 'Visible field' } } },
+        sensitivity: 'destructive',
+        status: 'approved',
+        trustScope: null,
+        denyReason: null,
+        createdAt: '',
+        resolvedAt: '2026-10-27T10:00:00.000Z',
+        resolved_at: '2026-10-27T10:00:00.000Z',
+        source: 'office',
+        tool_name: 'manage_substrate',
+        created_at: '',
+        references: [],
+        review: { reviewStatus: 'legacy', proposal: null, executionOutcome: null, permittedActions: { approve: false, decline: false, requestReview: false } },
+      },
+    });
+    // Older argument displays are sanitized; executable metadata stays private.
+    expect(res.body).not.toContain('tool_args');
+    expect(res.body).not.toContain('approved_operation');
+    expect(res.json().approval).not.toHaveProperty('approvedOperation');
+    expect(res.json().approval).not.toHaveProperty('proposalDetails');
+    expect(res.json().approval).not.toHaveProperty('transcript');
+    expect(res.body).not.toContain('private-credential');
+    expect(res.body).not.toContain('private-operation');
+    expect(mockGet).toHaveBeenCalledWith(expect.anything(), 'appr-1', ORG_A);
+  });
+
+  it('omits unverified legacy references without opening the transcript', async () => {
+    memberQuery();
+    mockGet.mockResolvedValue({
+      ...approval,
+      references: [{ kind: 'record', id: 'ent_1', label: 'Marcus Webb' }],
+      source: 'office',
+    } as any);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-1',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().approval.references).toEqual([]);
+    expect(res.json().approval.review).toMatchObject({ reviewStatus: 'legacy', proposal: null, permittedActions: { approve: false } });
+    expect(res.body).not.toContain('Marcus Webb');
+    expect(res.body).not.toContain('tool_args');
+    expect(res.body).not.toContain('approved_operation');
+  });
+
+  it('omits unverified legacy references in the pending list', async () => {
+    query.mockResolvedValue({ rows: [{ organization_id: ORG_A }], rowCount: 1 });
+    mockList.mockResolvedValue([
+      {
+        ...approval,
+        source: 'operator',
+        references: [{ kind: 'file', label: 'Invoice #1042' }],
+      } as any,
+    ]);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().approvals[0].references).toEqual([]);
+    expect(res.json().approvals[0].review).toMatchObject({ reviewStatus: 'legacy', proposal: null, permittedActions: { approve: false } });
+    expect(res.body).not.toContain('Invoice #1042');
+  });
+
+  it('also returns a pending approval, so the phase can distinguish waiting from resolved', async () => {
+    memberQuery();
+    mockGet.mockResolvedValue({ ...approval, source: 'operator' } as any);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-1',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().approval).toMatchObject({ status: 'pending', resolved_at: null, source: 'operator' });
+  });
+
+  it('404s an approval that is missing or belongs to another organization', async () => {
+    memberQuery();
+    mockGet.mockResolvedValue(null);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-foreign',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'approval not found' });
+  });
+
+  it('403s a non-member before any approval lookup', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-1',
+      headers: { 'x-organization-id': ORG_B },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  it('401s an unauthenticated request', async () => {
+    authenticated = false;
+    const res = await app.inject({
+      method: 'GET',
+      url: '/operator/approvals/appr-1',
+      headers: { 'x-organization-id': ORG_A },
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(mockGet).not.toHaveBeenCalled();
   });
 });

@@ -28,16 +28,69 @@ export function stripJsonbNulls(value: unknown): unknown {
   return value;
 }
 
+export type ConversationOrigin = 'dashboard' | 'office';
+
+/** Cloud client provenance is assigned atomically at creation and immutable
+ * through legacy routes. to_jsonb keeps OSS databases without private columns
+ * valid. A permanent ownership boundary closes both writer admission races. */
+export async function isOfficeClientConversation(pool: pg.Pool, id: string): Promise<boolean> {
+  const { rows } = await pool.query<{ owned: boolean }>(`SELECT origin='office' AND
+    (to_jsonb(conversation)->>'office_client_request_key') IS NOT NULL AS owned
+    FROM dashboard_agent_conversations AS conversation WHERE id=$1`, [id]);
+  return rows[0]?.owned === true;
+}
+
 export type Conversation = {
   id: string;
   userId: string;
   title: string;
   model: string;
+  /**
+   * Immutable provenance (Task 9). Set once, by the server, at creation:
+   *
+   *  - `'office'` — a customer Office conversation. It is bound to
+   *    `organizationId` for life, is reachable only from that organization,
+   *    is governed by the Office consequential floor, and bills that
+   *    organization at the gateway.
+   *  - `'dashboard'` — the ordinary dashboard assistant, its own product
+   *    surface. `organizationId` is null and nothing about its behavior
+   *    changed.
+   *
+   * No route accepts a change to either field after creation; a PATCH or a
+   * message body carrying one is ignored. See `office-conversations.test.ts`.
+   */
+  origin: ConversationOrigin;
+  organizationId: string | null;
   createdAt: Date;
   updatedAt: Date;
   lastMessageAt: Date | null;
   pinnedAt: Date | null;
 };
+
+/** Selected, in order, wherever a conversation row is read. */
+const CONVERSATION_COLS = `id, user_id, title, model, origin, organization_id,
+  created_at, updated_at, last_message_at, pinned_at`;
+
+/**
+ * Fail-safe provenance normalisation. Only the literal `'office'` means
+ * Office; anything else (including a value written by a newer version or by
+ * hand) degrades to the ordinary dashboard rather than granting Office
+ * billing or authority. The server only ever writes the two literals.
+ */
+function toConversation(row: any): Conversation {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    title: row.title,
+    model: row.model,
+    origin: row.origin === 'office' ? 'office' : 'dashboard',
+    organizationId: row.organization_id ?? null,
+    createdAt: new Date(row.created_at),
+    updatedAt: new Date(row.updated_at),
+    lastMessageAt: row.last_message_at ? new Date(row.last_message_at) : null,
+    pinnedAt: row.pinned_at ? new Date(row.pinned_at) : null,
+  };
+}
 
 export type Message = {
   id: string;
@@ -56,32 +109,31 @@ export type Message = {
 };
 
 /**
- * Create a new conversation for a user
+ * Create a new conversation for a user.
+ *
+ * `options` is backward compatible: omitted, the row is an ordinary dashboard
+ * conversation with no organization — exactly what this function did before
+ * Task 9. Only the server decides the values; callers pass the origin they
+ * have ALREADY authorised (routes/dashboard-agent.ts checks membership and
+ * eligibility before asking for an office row).
  */
 export async function createConversation(
-  pool: pg.Pool,
+  pool: pg.Pool | pg.PoolClient,
   userId: string,
   title: string,
-  model: string
+  model: string,
+  options?: { origin?: ConversationOrigin; organizationId?: string | null },
 ): Promise<Conversation> {
+  const origin: ConversationOrigin = options?.origin === 'office' ? 'office' : 'dashboard';
+  const organizationId = origin === 'office' ? (options?.organizationId ?? null) : null;
   const result = await pool.query(
-    `INSERT INTO dashboard_agent_conversations (user_id, title, model)
-     VALUES ($1, $2, $3)
-     RETURNING id, user_id, title, model, created_at, updated_at, last_message_at, pinned_at`,
-    [userId, title, model]
+    `INSERT INTO dashboard_agent_conversations (user_id, title, model, origin, organization_id)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING ${CONVERSATION_COLS}`,
+    [userId, title, model, origin, organizationId]
   );
 
-  const row = result.rows[0];
-  return {
-    id: row.id,
-    userId: row.user_id,
-    title: row.title,
-    model: row.model,
-    createdAt: new Date(row.created_at),
-    updatedAt: new Date(row.updated_at),
-    lastMessageAt: row.last_message_at ? new Date(row.last_message_at) : null,
-    pinnedAt: row.pinned_at ? new Date(row.pinned_at) : null,
-  };
+  return toConversation(result.rows[0]);
 }
 
 /**
@@ -92,35 +144,26 @@ export async function listConversations(
   userId: string
 ): Promise<Conversation[]> {
   const result = await pool.query(
-    `SELECT id, user_id, title, model, created_at, updated_at, last_message_at, pinned_at
+    `SELECT ${CONVERSATION_COLS}
      FROM dashboard_agent_conversations
      WHERE user_id = $1
      ORDER BY pinned_at DESC NULLS LAST, last_message_at DESC NULLS LAST, created_at DESC`,
     [userId]
   );
 
-  return result.rows.map(row => ({
-    id: row.id,
-    userId: row.user_id,
-    title: row.title,
-    model: row.model,
-    createdAt: new Date(row.created_at),
-    updatedAt: new Date(row.updated_at),
-    lastMessageAt: row.last_message_at ? new Date(row.last_message_at) : null,
-    pinnedAt: row.pinned_at ? new Date(row.pinned_at) : null,
-  }));
+  return result.rows.map(toConversation);
 }
 
 /**
  * Get a conversation by ID, scoped to a user (returns null if user doesn't own it)
  */
 export async function getConversation(
-  pool: pg.Pool,
+  pool: pg.Pool | pg.PoolClient,
   id: string,
   userId: string
 ): Promise<Conversation | null> {
   const result = await pool.query(
-    `SELECT id, user_id, title, model, created_at, updated_at, last_message_at, pinned_at
+    `SELECT ${CONVERSATION_COLS}
      FROM dashboard_agent_conversations
      WHERE id = $1 AND user_id = $2`,
     [id, userId]
@@ -130,17 +173,7 @@ export async function getConversation(
     return null;
   }
 
-  const row = result.rows[0];
-  return {
-    id: row.id,
-    userId: row.user_id,
-    title: row.title,
-    model: row.model,
-    createdAt: new Date(row.created_at),
-    updatedAt: new Date(row.updated_at),
-    lastMessageAt: row.last_message_at ? new Date(row.last_message_at) : null,
-    pinnedAt: row.pinned_at ? new Date(row.pinned_at) : null,
-  };
+  return toConversation(result.rows[0]);
 }
 
 /**
@@ -157,21 +190,11 @@ export async function updateConversationModel(
     `UPDATE dashboard_agent_conversations
         SET model = $3, updated_at = NOW()
       WHERE id = $1 AND user_id = $2
-      RETURNING id, user_id, title, model, created_at, updated_at, last_message_at, pinned_at`,
+      RETURNING ${CONVERSATION_COLS}`,
     [id, userId, model]
   );
   if (result.rows.length === 0) return null;
-  const row = result.rows[0];
-  return {
-    id: row.id,
-    userId: row.user_id,
-    title: row.title,
-    model: row.model,
-    createdAt: new Date(row.created_at),
-    updatedAt: new Date(row.updated_at),
-    lastMessageAt: row.last_message_at ? new Date(row.last_message_at) : null,
-    pinnedAt: row.pinned_at ? new Date(row.pinned_at) : null,
-  };
+  return toConversation(result.rows[0]);
 }
 
 /**
@@ -195,21 +218,11 @@ export async function updateConversationTitle(
       WHERE id = $1 AND user_id = $2
         AND title = 'New conversation'
         AND title_generated_at IS NULL
-      RETURNING id, user_id, title, model, created_at, updated_at, last_message_at, pinned_at`,
+      RETURNING ${CONVERSATION_COLS}`,
     [id, userId, title]
   );
   if (result.rows.length === 0) return null;
-  const row = result.rows[0];
-  return {
-    id: row.id,
-    userId: row.user_id,
-    title: row.title,
-    model: row.model,
-    createdAt: new Date(row.created_at),
-    updatedAt: new Date(row.updated_at),
-    lastMessageAt: row.last_message_at ? new Date(row.last_message_at) : null,
-    pinnedAt: row.pinned_at ? new Date(row.pinned_at) : null,
-  };
+  return toConversation(result.rows[0]);
 }
 
 /**
@@ -229,21 +242,11 @@ export async function renameConversation(
     `UPDATE dashboard_agent_conversations
         SET title = $3, updated_at = NOW()
       WHERE id = $1 AND user_id = $2
-      RETURNING id, user_id, title, model, created_at, updated_at, last_message_at, pinned_at`,
+      RETURNING ${CONVERSATION_COLS}`,
     [id, userId, title]
   );
   if (result.rows.length === 0) return null;
-  const row = result.rows[0];
-  return {
-    id: row.id,
-    userId: row.user_id,
-    title: row.title,
-    model: row.model,
-    createdAt: new Date(row.created_at),
-    updatedAt: new Date(row.updated_at),
-    lastMessageAt: row.last_message_at ? new Date(row.last_message_at) : null,
-    pinnedAt: row.pinned_at ? new Date(row.pinned_at) : null,
-  };
+  return toConversation(result.rows[0]);
 }
 
 /**
@@ -260,21 +263,11 @@ export async function pinConversation(
     `UPDATE dashboard_agent_conversations
         SET pinned_at = CASE WHEN $3 THEN NOW() ELSE NULL END, updated_at = NOW()
       WHERE id = $1 AND user_id = $2
-      RETURNING id, user_id, title, model, created_at, updated_at, last_message_at, pinned_at`,
+      RETURNING ${CONVERSATION_COLS}`,
     [id, userId, pinned]
   );
   if (result.rows.length === 0) return null;
-  const row = result.rows[0];
-  return {
-    id: row.id,
-    userId: row.user_id,
-    title: row.title,
-    model: row.model,
-    createdAt: new Date(row.created_at),
-    updatedAt: new Date(row.updated_at),
-    lastMessageAt: row.last_message_at ? new Date(row.last_message_at) : null,
-    pinnedAt: row.pinned_at ? new Date(row.pinned_at) : null,
-  };
+  return toConversation(result.rows[0]);
 }
 
 /**
@@ -294,20 +287,26 @@ export async function duplicateConversation(
     await client.query('BEGIN');
 
     const sourceResult = await client.query(
-      `SELECT title, model FROM dashboard_agent_conversations WHERE id = $1 AND user_id = $2`,
+      `SELECT title, model, origin, organization_id
+         FROM dashboard_agent_conversations WHERE id = $1 AND user_id = $2`,
       [id, userId]
     );
     if (sourceResult.rows.length === 0) {
       await client.query('ROLLBACK');
       throw new Error('conversation not found');
     }
-    const { title, model } = sourceResult.rows[0];
+    const { title, model, origin, organization_id } = sourceResult.rows[0];
 
+    // Provenance is copied, not reset (Task 9): a duplicated Office
+    // conversation stays an Office conversation, in the SAME organization.
+    // Dropping it here would create an ordinary dashboard conversation
+    // carrying an Office customer's transcript, with dashboard billing and no
+    // Office floor — the exact downgrade the column exists to prevent.
     const newConvResult = await client.query(
-      `INSERT INTO dashboard_agent_conversations (user_id, title, model)
-       VALUES ($1, $2, $3)
-       RETURNING id, user_id, title, model, created_at, updated_at, last_message_at, pinned_at`,
-      [userId, `${title} (copy)`, model]
+      `INSERT INTO dashboard_agent_conversations (user_id, title, model, origin, organization_id)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING ${CONVERSATION_COLS}`,
+      [userId, `${title} (copy)`, model, origin, organization_id]
     );
     const newConv = newConvResult.rows[0];
 
@@ -339,14 +338,8 @@ export async function duplicateConversation(
     await client.query('COMMIT');
 
     return {
-      id: newConv.id,
-      userId: newConv.user_id,
-      title: newConv.title,
-      model: newConv.model,
-      createdAt: new Date(newConv.created_at),
-      updatedAt: new Date(newConv.updated_at),
+      ...toConversation(newConv),
       lastMessageAt: lastCreatedAt ? new Date(lastCreatedAt) : null,
-      pinnedAt: newConv.pinned_at ? new Date(newConv.pinned_at) : null,
     };
   } catch (err) {
     try {
@@ -943,4 +936,50 @@ export async function listMessages(
     ratingReason: row.rating_reason ?? null,
     createdAt: new Date(row.created_at),
   }));
+}
+
+/**
+ * Fetch one stored tool result by its row id, scoped to the conversation.
+ *
+ * The only caller is the in-process `read_tool_result` tool. `$2` is the
+ * turn's conversation id, never a model argument, so a model-supplied id can
+ * select a row only inside the conversation it is already reading.
+ */
+export async function getToolResultMessage(
+  pool: pg.Pool,
+  conversationId: string,
+  messageId: string,
+): Promise<{ id: string; toolResult: unknown } | null> {
+  const result = await pool.query(
+    `SELECT id, tool_result
+       FROM dashboard_agent_messages
+      WHERE id = $1 AND conversation_id = $2 AND role = 'tool'`,
+    [messageId, conversationId],
+  );
+  const row = result.rows[0];
+  return row ? { id: row.id, toolResult: row.tool_result ?? null } : null;
+}
+
+/**
+ * Resolve `tool_call_id -> message row id` for the current conversation.
+ *
+ * Mid-turn compaction stubs old tool results to their stored row; a tool
+ * result appended during this turn may not have its id in hand. One scoped
+ * query fills those gaps, so no dispatch route has to remember to record it.
+ */
+export async function getToolMessageIds(
+  pool: pg.Pool,
+  conversationId: string,
+  toolCallIds: string[],
+): Promise<Map<string, string>> {
+  const ids = new Map<string, string>();
+  if (toolCallIds.length === 0) return ids;
+  const result = await pool.query(
+    `SELECT tool_call_id, id
+       FROM dashboard_agent_messages
+      WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = ANY($2::text[])`,
+    [conversationId, toolCallIds],
+  );
+  for (const row of result.rows) ids.set(row.tool_call_id, row.id);
+  return ids;
 }

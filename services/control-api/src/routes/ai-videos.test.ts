@@ -365,3 +365,23 @@ describe('videoSubmitSchema', () => {
     }
   });
 });
+
+describe('explicit reference preparation declarations', () => {
+  const base = { model: 'test/video', prompt: 'test', input_images: ['https://example.com/a.png'] };
+  const declaration = { path: '/input_images/0', kind: 'ai_generated_fictional_character' };
+  it('accepts normalized alias slots and explicit fictional declaration', () => {
+    const body = videoSubmitSchema.parse({ model:base.model,prompt:base.prompt,image:base.input_images[0],reference_declarations:[declaration] });
+    expect(body.input_images).toEqual(base.input_images); expect(body.reference_declarations).toEqual([declaration]);
+  });
+  it.each([
+    { prepare_references:'upfront' },
+    { reference_declarations:[{...declaration,path:'/input_images/8'}] },
+    { reference_declarations:[declaration,declaration] },
+    { reference_declarations:[{...declaration,kind:'real_person'}] },
+    { reference_declarations:[declaration],provider:{input_images:['https://other.example/a.png']} },
+    { reference_declarations:[declaration],frame_images:[{type:'image_url',image_url:{url:'https://other.example/a.png'},frame_type:'first_frame'}] },
+    { reference_declarations:[{...declaration,path:'/prompt'}] },
+  ])('rejects invalid declarations or conflicting override: %j', extra => {
+    expect(videoSubmitSchema.safeParse({...base,...extra}).success).toBe(false);
+  });
+});

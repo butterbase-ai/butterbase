@@ -1,3 +1,6 @@
+import { OfficeTurnEvidence, observeOfficeTurn } from './office-turn-evidence.js';
+import { createOfficeActivityDetailRecorder, type OfficeActivityDetailRecorder } from './office-activity-details-recorder.js';
+import { withOfficeActivityCallId } from './office-activity.js';
 /**
  * Agent loop for the Butterbase Dashboard Assistant.
  *
@@ -16,9 +19,26 @@
  */
 
 import pg from 'pg';
+import { validateProposalToolArguments as validateRegisteredToolArguments } from './proposal-validation.js';
+import { PROPOSE_ACTION_TOOL } from './tool-catalog.js';
+import { getApprovalProposalProvider, ProposalInputSchema, proposalIntentFingerprint, type ProposalInput } from './approval-proposal.js';
+import type { ReviewPreparationClaim } from './review-preparation-store.js';
+import { validateProposalOperation, LocalOperationSchemas } from './proposal-validation.js';
+import { persistPreparedApproval, findParkedProposalIntent } from './proposal-store.js';
+import { SUBSTRATE_ESCALATION_TOOL } from './approvals-store.js';
+import { assertOperatorKeyArguments } from '../locked-key-access.js';
 import { createHash, randomUUID } from 'crypto';
-import { appendMessage, listMessages, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
-import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { appendMessage, listMessages, getToolResultMessage, getToolMessageIds, upsertSnapshotLabel, getConversation, updateConversationTitle, type Message } from './store.js';
+import { getToolCatalog, isFileOpTool, isDeployTool, isDeployFunctionTool, isOperatorScratchpadTool, isRunSandboxCodeTool, isBuildAppTool, isListPendingDecisionsTool, isReadToolResultTool, OPERATOR_SANDBOX_CODE_TOOL, OPERATOR_BUILD_TOOL, SKILL_CREATOR_TOOL, RUN_SKILL_SCRIPT_TOOL, sensitivityFor, type ToolSpec } from './tool-catalog.js';
+import { parseReadToolResultArgs, readToolResultText } from './read-tool-result.js';
+import {
+  toGatewayMessages,
+  toolResultContentForModel,
+  toolResultModelMaxChars,
+  type GatewayMessage,
+} from './gateway-message.js';
+export { toolResultContentForModel };
+import type { ActiveSkillContext, IntegrationReader, SkillCreatorExecutor, SkillScriptExecutor } from './skill-types.js';
 import { createBuildHydrator, type BuildHydration } from './build-hydration.js';
 import { callMcpTool } from './mcp-client.js';
 import {
@@ -28,14 +48,24 @@ import {
   listPendingGatedCalls,
   type PendingGatedCallRow,
 } from './approvals-store.js';
+import { referencesForApproval } from './approval-references.js';
 import { findDuplicatePendingCall, humanizeWait } from './operator-duplicate-guard.js';
 import { logOperatorCheckpoint } from './operator-turn.js';
 import { readSubstrateEscalation } from './substrate-approval-bridge.js';
 import { isOperatorUserId, operatorOrgIdFromUserId } from './operator-store.js';
-import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS } from './operator-policy.js';
+import { officeMemoryErrorPayload, resolveOfficeMemoryContext, type OfficeMemoryToolAdapter } from './office-memory-types.js';
+import { formatOfficeTaskNotes } from './operator-scratchpad-store.js';
+import { getOperatorScratchpad, readOfficeTaskNotes } from './operator-scratchpad-store.js';
+import { READ_OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
+import { operatorPolicyForOrg, isOperatorToolAllowed, OPERATOR_LOCAL_TOOLS, resolveOfficeVerdict, type OperatorPolicy } from './operator-policy.js';
+import { classifyOfficeTool } from './office-tool-policy.js';
+import { captureApprovalOperation, deploymentArtifact } from './approval-operation.js';
+import { getSharedDeployTreeStore, type DeployTreeStore } from './deploy-tree-store.js';
 import { readOperatorYoloMode } from './operator-yolo.js';
+import { evaluateOperatorAccess } from './operator-access-policy.js';
 import { setOperatorScratchpad } from './operator-scratchpad-store.js';
-import { trimOperatorHistory } from './operator-history.js';
+import { trimOperatorHistory, OPERATOR_HISTORY_MAX_CHARS, OPERATOR_HISTORY_MAX_MESSAGES } from './operator-history.js';
+import { compactReplay, compactInFlight, envPositiveInt } from './context-compaction.js';
 import { getSystemPrompt } from './prompt.js';
 import { getRecentAppIds, fetchAppSchemasCached, buildSchemaPromptBlock } from './schema-context.js';
 import { WorkingTreeCache } from './working-tree.js';
@@ -72,7 +102,9 @@ export type LoopEvent =
   | { type: 'deployment_progress'; deployment_id: string; status: string; url?: string; log_tail?: string; error?: string }
   | { type: 'function_deployment_progress'; function_name: string; status: 'queued' | 'uploading' | 'live' | 'failed'; url?: string; error?: string }
   | { type: 'approval_required'; approval_id: string; tool_name: string; args: unknown; sensitivity: 'confirm' | 'destructive' }
-  | { type: 'title_updated'; title: string };
+  | { type: 'title_updated'; title: string }
+  /** The organization lost access mid-turn; no further model/tool work runs. */
+  | { type: 'blocked'; reason: string };
 
 /** Thrown by streamChatCompletion when the gateway returns a 402 credits error. */
 export class InsufficientCreditsStreamError extends Error {
@@ -152,6 +184,14 @@ export type BuildExecutor = (req: BuildExecutorRequest) => Promise<BuildExecutor
 
 export type LoopDeps = {
   cache: WorkingTreeCache;
+  /**
+   * Shared store for the exact source a deploy approval proposes. Fly routes
+   * requests across API machines, and `cache` is process-local: without this,
+   * a resolve landing on another instance has no files to deploy. Optional so
+   * existing callers/tests that never propose deployments behave unchanged;
+   * production always supplies `getSharedDeployTreeStore()`.
+   */
+  treeStore?: DeployTreeStore;
   mcp: Mcp;
   repoSync: RepoSync;
   recordUsage: (pool: pg.Pool, row: UsageRow) => Promise<void>;
@@ -200,6 +240,17 @@ let _sharedCache: WorkingTreeCache | undefined;
 export function getSharedWorkingTreeCache(): WorkingTreeCache {
   if (!_sharedCache) _sharedCache = new WorkingTreeCache();
   return _sharedCache;
+}
+
+/**
+ * `args.app_id` when the call names one — the working-tree key for artifact
+ * capture at approval time. A non-string or empty value is absent; there is
+ * nothing to look up and nothing to verify.
+ */
+function appIdFromArgs(args: unknown): string | null {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+  const appId = (args as { app_id?: unknown }).app_id;
+  return typeof appId === 'string' && appId.length > 0 ? appId : null;
 }
 
 /**
@@ -262,6 +313,36 @@ function defaultMcp(): Mcp {
   };
 }
 
+/**
+ * The MCP transport for an Office-origin turn (Task 9).
+ *
+ * `callMcpTool` already accepts an active organization and forwards it as
+ * `x-organization-id`; the generic `Mcp` seam here is three-argument, so an
+ * ordinary dashboard turn has never carried one. That is correct for the
+ * dashboard — its tools use the caller's JWT and their personal-org fallback.
+ * It is NOT correct for a customer Office: a member who belongs to two
+ * organizations would otherwise read and write through whichever org their
+ * token happens to resolve to, while the question was asked of the Office's
+ * organization and is billed to it.
+ *
+ * This wrapper closes that gap for exactly one case: a conversation whose
+ * STORED row says `office` and names its organization. It reaches
+ * `callMcpTool` directly rather than `deps.mcp`, because the three-argument
+ * interface is the thing that cannot carry the org. It preserves
+ * `defaultMcp`'s contract exactly — throw on failure, parse the MCP envelope
+ * — so callers cannot tell which transport they got except by where the
+ * request went.
+ */
+function createOrganizationScopedMcp(organizationId: string): Mcp {
+  return {
+    async call(name: string, args: unknown, jwt: string) {
+      const r = await callMcpTool(name, args, jwt, organizationId);
+      if (!r.ok) throw new Error(r.error ?? 'mcp call failed');
+      return parseMcpToolResult(name, r.result);
+    },
+  };
+}
+
 let _defaultDeps: LoopDeps | undefined;
 function getDefaultDeps(): LoopDeps {
   if (!_defaultDeps) {
@@ -270,6 +351,7 @@ function getDefaultDeps(): LoopDeps {
     const repoSync = createRepoSync({ cache, mcp });
     _defaultDeps = {
       cache,
+      treeStore: getSharedDeployTreeStore(),
       mcp,
       repoSync,
       recordUsage: recordUsageDefault,
@@ -305,17 +387,6 @@ type StreamChunk =
   | { type: 'tool_call'; id: string; name: string; args: unknown }
   | { type: 'usage'; prompt_tokens: number; completion_tokens: number };
 
-interface GatewayMessage {
-  role: string;
-  content?: string | null;
-  tool_calls?: Array<{
-    id: string;
-    type: 'function';
-    function: { name: string; arguments: string };
-  }>;
-  tool_call_id?: string;
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -347,38 +418,6 @@ function hashToolArgs(args: unknown): string {
 }
 
 /**
- * Convert persisted store messages to the gateway's OpenAI-compatible format.
- */
-function toGatewayMessages(messages: Message[]): GatewayMessage[] {
-  return messages.map((msg): GatewayMessage => {
-    if (msg.role === 'tool') {
-      return {
-        role: 'tool',
-        tool_call_id: msg.toolCallId ?? '',
-        content: JSON.stringify(msg.toolResult ?? {}),
-      };
-    }
-    if (msg.role === 'assistant' && msg.toolCallId) {
-      return {
-        role: 'assistant',
-        content: msg.content || null,
-        tool_calls: [
-          {
-            id: msg.toolCallId,
-            type: 'function',
-            function: {
-              name: msg.toolName ?? '',
-              arguments: JSON.stringify(msg.toolArgs ?? {}),
-            },
-          },
-        ],
-      };
-    }
-    return { role: msg.role, content: msg.content };
-  });
-}
-
-/**
  * Stream chat completions from the AI gateway.
  * Yields token, tool_call, and (optionally) usage chunks.
  */
@@ -387,14 +426,27 @@ export async function* streamChatCompletion(opts: {
   messages: GatewayMessage[];
   tools: ToolSpec[];
   jwt: string;
+  /**
+   * The organization this completion is billed to (Task 9). Forwarded as
+   * `x-organization-id`; the gateway attributes usage to it instead of the
+   * personal organization its JWT fallback would otherwise pick.
+   *
+   * Absent for every ordinary dashboard turn, which keeps that surface's
+   * billing exactly where it was. The loop supplies it only for a stored
+   * Office conversation.
+   */
+  organizationId?: string | null;
+  signal?: AbortSignal;
 }): AsyncGenerator<StreamChunk> {
   const url = `${process.env.AI_GATEWAY_URL ?? 'http://localhost:3000'}/v1/chat/completions`;
 
   const res = await fetch(url, {
+    signal: opts.signal,
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${opts.jwt}`,
+      ...(opts.organizationId ? { 'X-Organization-Id': opts.organizationId } : {}),
     },
     body: JSON.stringify({
       model: opts.model,
@@ -572,6 +624,35 @@ export async function* streamChatCompletion(opts: {
   }
 }
 
+/**
+ * A stable code and a field path may cross into the model-visible tool result.
+ * The rejected value, the parser message and any exception cause never do.
+ */
+function proposalInvalidPayload(error: unknown): { code: 'proposal_invalid'; reason?: string; field?: string } {
+  const code = (error as { code?: unknown })?.code;
+  const field = (error as { field?: unknown })?.field;
+  return {
+    code: 'proposal_invalid',
+    ...(typeof code === 'string' && /^[a-z_]{1,60}$/.test(code) ? { reason: code } : {}),
+    ...(typeof field === 'string' && /^[A-Za-z0-9_.\[\]]{1,80}$/.test(field) ? { field } : {}),
+  };
+}
+
+/** A sandbox infrastructure failure must read as "verification did not
+ *  happen", not as a compile error or a generic tool failure. */
+function sandboxFailurePayload(err: unknown): {
+  error: string;
+  result?: { ok: false; code: string; verification: 'unavailable'; remediation: string };
+} {
+  const code = (err as { code?: unknown })?.code;
+  const remediation = (err as { remediation?: unknown })?.remediation;
+  const message = err instanceof Error ? err.message : String(err);
+  if ((code === 'sandbox_auth_failed' || code === 'sandbox_unavailable') && typeof remediation === 'string') {
+    return { error: message, result: { ok: false, code, verification: 'unavailable', remediation } };
+  }
+  return { error: message };
+}
+
 // ---------------------------------------------------------------------------
 // Main export: runAgentTurn
 // ---------------------------------------------------------------------------
@@ -619,18 +700,49 @@ export function scopeAppListToOrg(result: unknown, orgId: string): unknown {
   }
 }
 
+/**
+ * A skill entrypoint is a relative path inside the package's `scripts/`
+ * directory. The sandbox executor re-checks this; the loop checks it first so
+ * an obviously bad argument costs no sandbox round trip.
+ */
+function isSkillEntrypoint(path: string): boolean {
+  if (!path || path.startsWith('/') || path.includes('\\')) return false;
+  const parts = path.split('/');
+  if (parts.some((part) => part === '' || part === '.' || part === '..')) return false;
+  return path.startsWith('scripts/');
+}
+
 export async function* runAgentTurn(
+  input: Parameters<typeof runAgentTurnInternal>[0], depsOverride?: Partial<LoopDeps>,
+): AsyncGenerator<LoopEvent> {
+  const evidence = input.recordOfficeActivity || input.officeActivityResumeApprovalId
+    ? new OfficeTurnEvidence(input.pool, input.conversationId, input.officeActivityResumeApprovalId) : undefined;
+  const details = createOfficeActivityDetailRecorder({ pool: input.pool, conversationId: input.conversationId, resumeApprovalId: input.officeActivityResumeApprovalId });
+  yield* observeOfficeTurn(runAgentTurnInternal(input, depsOverride, evidence, details), evidence, details);
+}
+
+async function* runAgentTurnInternal(
   input: {
     conversationId: string;
     userId: string;
     jwt: string;
     userMessage: string;
+    /** Server opt-in for website turn evidence; never model supplied. */
+    recordOfficeActivity?: boolean;
+    officeActivityResumeApprovalId?: string;
+    /** Server supplied; never read from a chat request body. */
+    officeMemoryContext?: string;
+    officeMemoryTools?: OfficeMemoryToolAdapter;
     model: string;
     pool: pg.Pool;
     // Active org (from the dashboard's `x-organization-id` header). When set,
     // the agent's app-discovery tooling (manage_app list) is scoped to it so
     // the model only sees apps in the org the user is currently working in.
     organizationId?: string | null;
+    /** Optional durable execution lease/deadline. A false answer is sticky for this turn. */
+    executionGuard?: () => Promise<boolean>;
+    /** Execution cancellation only; client observers must use a separate signal. */
+    signal?: AbortSignal;
     /**
      * Executes model-authored code in an isolated sandbox for this turn.
      * Supplied by `SandboxRunner` (cron-scheduler), absent for `LocalRunner`
@@ -653,6 +765,38 @@ export async function* runAgentTurn(
      * model (see the `tools` construction below).
      */
     buildExecutor?: BuildExecutor;
+    /**
+     * Office skill creation. Supplied by the Office overlay ONLY for an owner's
+     * Office Ask turn; absent everywhere else. `skill_creator` is offered to
+     * the model only when this is present, and the creator itself cannot
+     * approve its own draft.
+     */
+    skillCreator?: SkillCreatorExecutor;
+    /**
+     * Runs the pinned skill entrypoint. Supplied only while a skill run or a
+     * draft test is active, together with `activeSkill`. Absent means
+     * `run_skill_script` is absent from the catalog — there is no general shell
+     * fallback.
+     */
+    skillScript?: SkillScriptExecutor;
+    /** The version pinned by the run; also names the entrypoint package. */
+    activeSkill?: ActiveSkillContext;
+    /**
+     * Organization-scoped integration reads (`manage_integrations`
+     * `execute_read`). Supplied by the Office overlay; absent in OSS mode, where
+     * the action returns `integration_reader_unavailable` rather than falling
+     * through to the app-scoped MCP tool.
+     */
+    integrationReader?: IntegrationReader;
+    /**
+     * A draft test: reads are allowed, consequential tools return
+     * `read_only_test`, and NO approval row is created. Set only by the skill
+     * test runner; a real run leaves it unset so the normal policy applies.
+     */
+    readOnly?: boolean;
+    /** Server-claimed frozen review request; never supplied by the model. */
+    reviewPreparation?: ReviewPreparationClaim;
+    onReviewPreparationBlocked?: (code: string) => void;
     /**
      * Distributed trace id for this turn (see operator-turn.ts). Supplied by
      * `runOperatorTurn`; absent for the human assistant, which has no trace.
@@ -678,12 +822,41 @@ export async function* runAgentTurn(
      * user-instructed.
      */
     triggerContext?: Record<string, unknown>;
+    /**
+     * Optional organization-access recheck, consulted before every model
+     * request and before dispatching a batch of tools. Supplied by the
+     * operator turn; absent for human conversations, which are governed by
+     * their request authentication instead.
+     *
+     * `approvalMode` comes from the registered `OperatorAccessPolicy`. A
+     * cloud Office policy answers 'consequential' for operator/Office origins
+     * (and 'standard' for the ordinary dashboard), which activates the Office
+     * floor in `office-tool-policy.ts`: consequential tools need a human even
+     * when `yolo_mode` is on, and preparation stays autonomous without it.
+     * Absent means 'standard' — a self-hosted deployment with no cloud policy
+     * keeps its existing yolo behaviour exactly.
+     */
+    accessGuard?: () => Promise<{
+      allowed: boolean;
+      reason: string | null;
+      approvalMode?: 'standard' | 'consequential';
+    }>;
   },
   depsOverride?: Partial<LoopDeps>,
+  evidence?: OfficeTurnEvidence,
+  details?: OfficeActivityDetailRecorder,
 ): AsyncGenerator<LoopEvent> {
+  let executionStopped = false;
+  const executionAllowed = async (): Promise<boolean> => {
+    if (executionStopped || input.signal?.aborted) return false;
+    try { if (input.executionGuard && !await input.executionGuard()) executionStopped = true; }
+    catch { executionStopped = true; }
+    return !executionStopped;
+  };
+  if (!await executionAllowed()) { yield { type: 'blocked', reason: 'execution_interrupted' }; return; }
   const base = getDefaultDeps();
   const deps: LoopDeps = { ...base, ...(depsOverride ?? {}) };
-  const { cache, recordUsage, loadTemplate } = deps;
+  const { cache, treeStore, recordUsage, loadTemplate } = deps;
   const snapshotTitleGatewayFactory = deps.snapshotTitleGatewayFactory ?? createGatewayChat;
   const upsertSnapshotLabelFn = deps.upsertSnapshotLabel ?? upsertSnapshotLabel;
   const getConversationFn = deps.getConversation ?? getConversation;
@@ -710,6 +883,84 @@ export async function* runAgentTurn(
    * guard is not consulted at all.
    */
   const operatorOrgId = operatorOrgIdFromUserId(input.userId);
+
+  /**
+   * ── Office provenance, read from the STORED conversation (Task 9) ────────
+   *
+   * Whether this turn is a customer Office's question — and which organization
+   * pays for it — is a property of the conversation row, not of anything a
+   * caller passes. That is deliberate. A flag or a request field would make
+   * "am I in an Office?" something a route could forget to set (failing open
+   * to the ordinary dashboard, with its cheaper billing and no consequential
+   * floor) or something a client could try to choose. Reading the row means
+   * the answer is whatever the server wrote at creation, for every caller:
+   * Ask, regenerate, an approval resume, a retry.
+   *
+   * A read failure FAILS THE TURN. It is tempting to degrade to the ordinary
+   * dashboard here, but the stored row is the only evidence of Office
+   * provenance: doing so would drop the Office consequential floor, send tools
+   * without the Office organization, and bill the personal organization — a
+   * fail-open downgrade of a customer's contract. A failed read is not
+   * evidence that the conversation is a dashboard one.
+   *
+   * Operator turns skip the read: their identity is the org sentinel and their
+   * conversation is never Office-origin.
+   */
+  let officeOrganizationId: string | null = null;
+  if (!isOperator) {
+    try {
+      const stored = await getConversationFn(input.pool, input.conversationId, input.userId);
+      if (stored?.origin === 'office' && stored.organizationId) {
+        officeOrganizationId = stored.organizationId;
+      }
+    } catch (error) {
+      throw error;
+    }
+  }
+  const isOfficeTurn = officeOrganizationId !== null;
+  const memoryScopeOrg = operatorOrgId ?? officeOrganizationId;
+  const officeMemory = memoryScopeOrg ? await resolveOfficeMemoryContext({ organizationId: memoryScopeOrg,
+    userId: input.userId, model: input.model, autonomous: isOperator, readOnly: input.readOnly === true,
+    ...(!isOperator && !input.activeSkill ? { customizationMessage: input.userMessage } : {}) }) : null;
+  const officeMemoryText = memoryScopeOrg ? input.officeMemoryContext ?? officeMemory?.text : undefined;
+  const officeMemoryTools = memoryScopeOrg ? input.officeMemoryTools ?? officeMemory?.tools : undefined;
+
+  /**
+   * The guard for a foreground Office turn. It answers the same question the
+   * operator guard does — may this organization keep working right now? — and
+   * returns the same `approvalMode`, so the loop's existing two uses of it
+   * (before every model request, before every tool batch) apply unchanged.
+   *
+   * An explicitly supplied `input.accessGuard` wins: the operator path owns
+   * its own recheck and this is not a second, competing policy.
+   */
+  const accessGuard = input.accessGuard ?? (isOfficeTurn
+    ? async () => evaluateOperatorAccess({
+        organizationId: officeOrganizationId as string,
+        phase: 'run',
+        origin: 'office',
+        actorUserId: input.userId,
+        model: input.model,
+      })
+    : undefined);
+  const cleanupAllowed = async (): Promise<boolean> => {
+    if (!await executionAllowed()) return false;
+    // The opted-in durable turn also rechecks work admission before cleanup can
+    // flush a repo or spend on an automatic title. Existing callers are unchanged.
+    if (input.executionGuard && accessGuard) {
+      try { return (await accessGuard()).allowed; } catch { return false; }
+    }
+    return true;
+  };
+
+  if (isOfficeTurn) {
+    console.log('[dashboard-agent] office turn', {
+      conversationId: input.conversationId,
+      organizationId: officeOrganizationId,
+    });
+  }
+
+  const officeMcp = isOfficeTurn ? createOrganizationScopedMcp(officeOrganizationId as string) : null;
 
   /**
    * The loop makes MCP calls the MODEL did not ask for. They go through
@@ -739,6 +990,7 @@ export async function* runAgentTurn(
   const turnMcp: Mcp = isOperator
     ? {
         async call(name: string, args: unknown, jwt: string) {
+          await assertOperatorKeyArguments(input.pool, jwt, operatorOrgId, args);
           // Loop-internal tools have no MCP counterpart; an internal caller
           // asking for one by name is a bug, not a permitted call.
           if (OPERATOR_LOCAL_TOOLS.has(name) || operatorPolicyForOrg(name, args, operatorOrgId) !== 'allow') {
@@ -747,7 +999,12 @@ export async function* runAgentTurn(
           return deps.mcp.call(name, args, jwt);
         },
       }
-    : deps.mcp;
+    /**
+     * An Office turn's tool transport carries the Office's organization (see
+     * `createOrganizationScopedMcp`). Everything else keeps the three-argument
+     * dashboard transport it has always used.
+     */
+    : (officeMcp ?? deps.mcp);
 
   /**
    * An operator turn gets a DIFFERENT `RepoSync` implementation: `repo-http.ts`,
@@ -781,7 +1038,14 @@ export async function* runAgentTurn(
   const repoSync: RepoSync =
     isOperator && !depsOverride?.repoSync
       ? createHttpRepoSync({ cache })
-      : deps.repoSync;
+      /**
+       * Office turns hydrate and flush through the org-scoped MCP for the same
+       * reason their tool calls do: a member's personal-org fallback must not
+       * decide where this Office's source is read from or written to.
+       */
+      : officeMcp && !depsOverride?.repoSync
+        ? createRepoSync({ cache, mcp: officeMcp })
+        : deps.repoSync;
 
   /**
    * The org's substrate `yolo_mode` — read LAZILY, at most once per turn, and
@@ -813,8 +1077,31 @@ export async function* runAgentTurn(
     return yoloModeCache;
   };
 
+  /**
+   * Whether this turn is governed by the customer Office contract rather than
+   * the general unattended-operator one. Set from the access policy's
+   * `approvalMode` on every guard evaluation (before each model request and
+   * before each tool batch), never from anything the model supplies.
+   *
+   * True for an operator turn whose registered policy answers
+   * 'consequential', and for a FOREGROUND turn whose stored conversation is
+   * Office-origin (Task 9 — the guard above is built from the row). False for
+   * a self-hosted deployment with no cloud policy ('standard'), for ordinary
+   * dashboard conversations, and for any turn whose conversation cannot be
+   * read. When true:
+   *
+   *   - consequential tools need a human even with `yolo_mode` on;
+   *   - Office preparation (`write_file`, `read_file`, …) is autonomous
+   *     without it;
+   *   - an operator `deny` still wins, unchanged.
+   *
+   * See `resolveOfficeVerdict` for the full precedence.
+   */
+  let officeConsequential = false;
+
   // 1. Persist the user turn
-  await appendMessage(input.pool, input.conversationId, {
+  if (!await executionAllowed()) { yield { type: 'blocked', reason: 'execution_interrupted' }; return; }
+  const userMessage = await appendMessage(input.pool, input.conversationId, {
     role: 'user',
     content: input.userMessage,
     toolCallId: null,
@@ -822,6 +1109,10 @@ export async function* runAgentTurn(
     toolArgs: null,
     toolResult: null,
   });
+
+  await evidence?.start(userMessage.id);
+  // Trusted conversation provenance, never a model-selected capture scope.
+  if (isOfficeTurn || isOperator) await details?.start(userMessage.id);
 
   // AFFORDANCE (not the control): hide tools the operator may not call, so the
   // model doesn't waste turns and tokens on refusals. The control is
@@ -851,12 +1142,29 @@ export async function* runAgentTurn(
   // thing that decides whether a turn with no sandbox can reach it. There is
   // no host-side build, and a build that ran in THIS process would execute the
   // customer's `postinstall` scripts on the control plane.
-  const baseTools = isOperator
+  // SAFETY-CRITICAL on the same terms as `codeExecutor`/`buildExecutor`: an
+  // Office skill tool has no MCP counterpart and no host fallback, so a missing
+  // seam must hide it from the model AND from `allowedToolNames` (built from
+  // this list), never merely refuse it at dispatch. Applied to BOTH branches:
+  // `skill_creator` rides an owner's HUMAN Office Ask turn, not an operator
+  // turn, so the non-operator branch needs the identical filter.
+  const proposalProvider = getApprovalProposalProvider();
+  const proposalOrganizationId = operatorOrgId ?? officeOrganizationId;
+  const structuredProposals = !!proposalOrganizationId && !!proposalProvider?.enabled(proposalOrganizationId);
+  const seamAvailable = (t: ToolSpec): boolean =>
+    (t.officeOnly !== true || isOperator || isOfficeTurn) &&
+    (t.name !== PROPOSE_ACTION_TOOL || ((isOperator || isOfficeTurn) && structuredProposals)) &&
+    (t.name !== SKILL_CREATOR_TOOL || typeof input.skillCreator === 'function') &&
+    (t.name !== RUN_SKILL_SCRIPT_TOOL
+      || (typeof input.skillScript === 'function' && input.activeSkill !== undefined));
+
+  const baseTools = (isOperator
     ? getToolCatalog()
         .filter((t) => isOperatorToolAllowed(t.name))
         .filter((t) => t.name !== OPERATOR_SANDBOX_CODE_TOOL || typeof input.codeExecutor === 'function')
         .filter((t) => t.name !== OPERATOR_BUILD_TOOL || typeof input.buildExecutor === 'function')
-    : getToolCatalog().filter((t) => t.operatorOnly !== true);
+    : getToolCatalog().filter((t) => t.operatorOnly !== true)
+  ).filter(seamAvailable);
 
   /**
    * Replace the hand-written argument schemas with the ones the MCP server
@@ -902,6 +1210,8 @@ export async function* runAgentTurn(
   // hash of the last args seen for that tool and how many consecutive times
   // in a row that same hash has been retried.
   const retryState = new Map<string, { lastArgsHash: string; retries: number }>();
+  const proposalRefusals = new Map<string, number>();
+  let proposalRetryBlocked = false;
 
   // SSE queue: file-ops / deployer emit callbacks push events that need to be
   // interleaved with the loop's own yields. We drain the queue after each
@@ -1066,30 +1376,65 @@ export async function* runAgentTurn(
   }
 
   /**
-   * I2: bound what an OPERATOR turn replays.
+   * Bound what an OPERATOR turn replays, and compact before the bound.
    *
    * One operator conversation per org, reused forever, woken ~144x/day —
-   * replaying the whole transcript is a scheduled context-window failure. The
-   * scratchpad and the wake header now carry the continuity, so a suffix is
-   * enough. `trimOperatorHistory` picks a PAIRING-VALID cut (see its header):
-   * it can never emit an assistant `tool_calls` whose result was trimmed away,
-   * nor an orphan `role:'tool'` row — the wedge that bricks an org's operator
+   * replaying the whole transcript is a scheduled context-window failure.
+   *
+   * ORDER MATTERS. Compaction runs on the UNTRIMMED history first, so the
+   * stored summary captures what the 32k trim would otherwise discard. The
+   * trim below is a cost guard on the compacted tail, not the primary
+   * continuity mechanism. `trimOperatorHistory` still owns the cut: it can
+   * never emit an assistant `tool_calls` whose result was trimmed away, nor an
+   * orphan `role:'tool'` row — the wedge that bricks an org's operator
    * permanently.
    *
    * Nothing is deleted; `history` above is still the full stored record, and
    * `turnNumber` is deliberately computed from it so the snapshot-title
    * fallback does not reset when the replay window slides.
    *
-   * FOR A HUMAN CONVERSATION THIS IS THE SAME ARRAY BY IDENTITY. The assistant
-   * replays exactly what it replayed before — `toGatewayMessages(history)`,
-   * every row, same order. Do not "simplify" this into an unconditional call.
+   * For a human conversation `compactReplay` returns the same array by identity
+   * when the history is under budget, and `replay.messages` is that array —
+   * the assistant replays exactly what it replayed before. Do not "simplify"
+   * this into an unconditional trim.
    */
-  const replayHistory = isOperator ? trimOperatorHistory(history) : history;
+  const operatorBudget = envPositiveInt('DASHBOARD_AGENT_OPERATOR_CONTEXT_BUDGET_CHARS', 150_000);
+  const operatorTail = envPositiveInt('DASHBOARD_AGENT_OPERATOR_COMPACT_TAIL_CHARS', OPERATOR_HISTORY_MAX_CHARS);
+  const replay = await compactReplay({
+    pool: input.pool,
+    conversationId: input.conversationId,
+    messages: history, // untrimmed: the summary must see what the trim would drop
+    gateway: createGatewayChat(
+      input.jwt,
+      officeOrganizationId ?? null,
+      process.env.DASHBOARD_AGENT_COMPACT_MODEL || undefined,
+    ),
+    budgetChars: isOperator ? operatorBudget : undefined,
+    tailChars: isOperator ? operatorTail : undefined,
+  });
+  const replayHistory = isOperator
+    ? trimOperatorHistory(replay.messages, {
+        maxChars: OPERATOR_HISTORY_MAX_CHARS,
+        maxMessages: OPERATOR_HISTORY_MAX_MESSAGES,
+      })
+    : replay.messages;
+  const summaryBlock = replay.summary ? `\n\n# Conversation summary so far\n${replay.summary}` : '';
+  const systemContentBase = schemaPromptBlock + getSystemPrompt({ organizationIntegrations: typeof input.integrationReader === 'function' }) + (officeMemoryText ? `\n\n${officeMemoryText}` : '');
 
   const messages: GatewayMessage[] = [
-    { role: 'system', content: schemaPromptBlock + getSystemPrompt() },
+    { role: 'system', content: systemContentBase + summaryBlock },
     ...toGatewayMessages(replayHistory),
   ];
+
+  // Mid-turn compaction state. The row-id map is filled from the initial
+  // replay; compactInFlight resolves any current-turn ids with one query.
+  const midTurnFixedChars = JSON.stringify(tools).length;
+  const midTurnIds = new Map<string, string>();
+  for (const message of replayHistory) {
+    if (message.role === 'tool' && message.toolCallId) midTurnIds.set(message.toolCallId, message.id);
+  }
+  const replayMessages: Message[] = [...replayHistory];
+  const turnStartIndex = Math.max(0, replayHistory.length - 1);
 
   // Yield and drain any queued SSE events (file_change / active_app_change /
   // deployment_progress) — flushed after every fileOps/deployer invocation.
@@ -1117,16 +1462,65 @@ export async function* runAgentTurn(
    * re-reading per call would buy nothing.
    */
   let pendingGatedCalls: PendingGatedCallRow[] | null = null;
+  let midTurnRebuilt = false;
   try {
     outer: for (let step = 0; step < TOOL_CALL_LIMIT; step++) {
       let assistantText = '';
       const pendingToolCalls: Array<{ id: string; name: string; args: unknown }> = [];
 
+      // Recheck before EVERY model request. A downgrade or owner removal that
+      // lands between iterations stops the next spend here rather than after it.
+      if (!await executionAllowed()) {
+        yield { type: 'blocked', reason: 'execution_interrupted' };
+        terminated = true;
+        break outer;
+      }
+      if (accessGuard) {
+        const access = await accessGuard();
+        if (!access.allowed) {
+          yield { type: 'blocked', reason: access.reason ?? 'service_unavailable' };
+          terminated = true;
+          break outer;
+        }
+        officeConsequential = access.approvalMode === 'consequential';
+      }
+
+      // Checked before EVERY model request, not only at turn start: one turn
+      // can add many 64k results after the first request.
+      const mid = await compactInFlight({
+        messages,
+        replayMessages,
+        turnStartIndex,
+        idByCallId: midTurnIds,
+        fixedChars: midTurnFixedChars,
+        ceilingChars: envPositiveInt('DASHBOARD_AGENT_MIDTURN_CEILING_CHARS', 850_000),
+        keepLastToolResults: envPositiveInt('DASHBOARD_AGENT_MIDTURN_KEEP_TOOL_RESULTS', 4),
+        gateway: createGatewayChat(input.jwt, officeOrganizationId ?? null, process.env.DASHBOARD_AGENT_COMPACT_MODEL || undefined),
+        conversationId: input.conversationId,
+        pool: input.pool,
+        systemContentBase,
+        allowForcedSummary: !midTurnRebuilt,
+      });
+      if (mid.blocked) {
+        yield { type: 'blocked', reason: 'context_limit' };
+        terminated = true;
+        break outer;
+      }
+      if (mid.rebuilt) {
+        messages.splice(0, messages.length, ...mid.messages);
+        midTurnRebuilt = true;
+      }
+
       const stream = streamChatCompletion({
+        signal: input.signal,
         model: input.model,
         messages,
         tools,
         jwt: input.jwt,
+        // Billing attribution for an Office turn; absent (undefined) for every
+        // ordinary dashboard turn, which the gateway then bills exactly as
+        // before.
+        organizationId: officeOrganizationId,
       });
 
       try {
@@ -1177,7 +1571,7 @@ export async function* runAgentTurn(
       // No tool call — assistant is done
       if (pendingToolCalls.length === 0) {
         lastAssistantText = assistantText;
-        await appendMessage(input.pool, input.conversationId, {
+        const finalMessage = await appendMessage(input.pool, input.conversationId, {
           role: 'assistant',
           content: assistantText,
           toolCallId: null,
@@ -1186,6 +1580,7 @@ export async function* runAgentTurn(
           toolResult: null,
           modelUsed: input.model,
         });
+        evidence?.answer(finalMessage.id);
         yield { type: 'assistant_message', content: assistantText };
         yield { type: 'done' };
         terminated = true;
@@ -1194,8 +1589,144 @@ export async function* runAgentTurn(
 
       const allowedToolNames = new Set(tools.map((t) => t.name));
       const toolCallResults: Array<{ id: string; result?: unknown; error?: string }> = [];
+      // Recheck once before any tool in this batch is dispatched. The assistant
+      // tool-call row is already persisted, so a denial is written back as a
+      // tool RESULT for every call — history stays paired and the model never
+      // sees a hanging call.
+      let accessBlockedReason: string | null = null;
+      if (!await executionAllowed()) accessBlockedReason = 'execution_interrupted';
+      if (accessGuard && !accessBlockedReason) {
+        const access = await accessGuard();
+        if (!access.allowed) accessBlockedReason = access.reason ?? 'service_unavailable';
+        else officeConsequential = access.approvalMode === 'consequential';
+      }
       for (let i = 0; i < pendingToolCalls.length; i++) {
-        const tc = pendingToolCalls[i];
+        const originalCall = pendingToolCalls[i];
+        let tc = originalCall;
+        let proposalInput: ProposalInput | null = null;
+        let proposalError: string | null = null;
+        let proposalInvalid: ReturnType<typeof proposalInvalidPayload> | null = null;
+        let proposalIncompleteField: string | undefined;
+        const replyProposal = async (payload: unknown) => {
+          await appendMessage(input.pool, input.conversationId, { role: 'assistant', content: i === 0 ? assistantText : '', toolCallId: originalCall.id, toolName: originalCall.name, toolArgs: originalCall.args, toolResult: null, modelUsed: input.model });
+          await appendMessage(input.pool, input.conversationId, { role: 'tool', content: '', toolCallId: originalCall.id, toolName: originalCall.name, toolArgs: originalCall.args, toolResult: payload });
+          const receipt = payload as { code?: unknown } | null;
+          if (typeof receipt?.code === 'string') {
+            // Outer explanations/references are preparation aids, not a new
+            // executable intent. Cosmetic changes must not evade the budget.
+            const raw = originalCall.args as { operation?: unknown } | null;
+            const key = proposalInput ? proposalIntentFingerprint(tc.name, tc.args)
+              : hashToolArgs({ tool: originalCall.name, arguments: originalCall.name === PROPOSE_ACTION_TOOL ? raw?.operation ?? null : originalCall.args });
+            const count = (proposalRefusals.get(key) ?? 0) + 1;
+            proposalRefusals.set(key, count);
+            if (count >= TOOL_RETRY_LIMIT) proposalRetryBlocked = true;
+          }
+        };
+        if (proposalRetryBlocked) {
+          const payload = { code: 'proposal_retry_limit_reached' };
+          await replyProposal(payload);
+          toolCallResults.push({ id: originalCall.id, result: payload });
+          yield { type: 'tool_call', ...originalCall };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
+          continue;
+        }
+        if (originalCall.name === PROPOSE_ACTION_TOOL) {
+          const parsed = ProposalInputSchema.safeParse(originalCall.args);
+          if (!structuredProposals || !allowedToolNames.has(PROPOSE_ACTION_TOOL)) proposalError = 'proposal_unavailable';
+          else if (!parsed.success) {
+            proposalError = 'proposal_incomplete';
+            const issue = parsed.error.issues[0];
+            const path = issue?.code === 'unrecognized_keys' ? [issue.keys[0] ?? ''] : (issue?.path ?? []);
+            const value = path.join('.');
+            proposalIncompleteField = /^[A-Za-z0-9_.\[\]]{1,80}$/.test(value) ? value : undefined;
+          } else {
+            proposalInput = parsed.data;
+            try {
+              const validated = await validateProposalOperation(proposalInput.operation.tool, proposalInput.operation.arguments, {
+                effectiveToolNames: allowedToolNames,
+                availableExecutors: new Set(Object.keys(LocalOperationSchemas).filter(name => allowedToolNames.has(name))),
+                validateRegistered: validateRegisteredToolArguments,
+              });
+              const args = proposalProvider?.validateArguments ? await proposalProvider.validateArguments(validated.toolName, validated.args) : validated.args;
+              tc = { ...originalCall, name: validated.toolName, args };
+              proposalInput = { ...proposalInput, operation: { tool: tc.name, arguments: args } };
+              if (input.reviewPreparation && proposalIntentFingerprint(tc.name, args, input.reviewPreparation.operation.artifact) !== input.reviewPreparation.intentFingerprint) proposalError = 'proposal_preparation_mismatch';
+            } catch (error) {
+              proposalError = 'proposal_invalid';
+              proposalInvalid = proposalInvalidPayload(error);
+            }
+          }
+          if (proposalError) {
+            const payload = {
+              code: proposalError,
+              message: 'Supply a complete, available operation with a reason and typed references.',
+              ...(proposalError === 'proposal_incomplete' && proposalIncompleteField ? { field: proposalIncompleteField } : {}),
+              ...(proposalError === 'proposal_invalid' && proposalInvalid ? proposalInvalid : {}),
+            };
+            await replyProposal(payload);
+            toolCallResults.push({ id: originalCall.id, result: payload });
+            yield { type: 'tool_call', ...originalCall };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
+            continue;
+          }
+        }
+
+        if (officeMemoryTools) {
+          try {
+            const mapped = officeMemoryTools(tc.name, tc.args);
+            tc = { ...tc, name: mapped.name, args: mapped.args };
+            if (proposalInput) {
+              proposalInput = { ...proposalInput, operation: { ...proposalInput.operation, tool: tc.name, arguments: tc.args as Record<string, unknown> } };
+              if (input.reviewPreparation && proposalIntentFingerprint(tc.name, tc.args, input.reviewPreparation.operation.artifact) !== input.reviewPreparation.intentFingerprint) {
+                throw new Error('proposal_preparation_mismatch');
+              }
+            }
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'agent_memory_request_invalid';
+            const payload = officeMemoryErrorPayload(code);
+            await replyProposal(payload);
+            toolCallResults.push({ id: originalCall.id, result: payload });
+            yield { type: 'tool_call', ...originalCall };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
+            continue;
+          }
+        }
+        if (structuredProposals && !proposalInput && tc.name === 'manage_substrate' && (tc.args as any)?.action === 'propose') {
+          try {
+            const validated = await validateRegisteredToolArguments(tc.name, tc.args);
+            tc = { ...tc, args: proposalProvider?.validateArguments ? await proposalProvider.validateArguments(tc.name, validated.args) : validated.args };
+          } catch (error) {
+            const payload = proposalInvalidPayload(error);
+            await replyProposal(payload);
+            toolCallResults.push({ id: originalCall.id, result: payload });
+            yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
+            continue;
+          }
+        }
+
+        // A previous tool may outlive the durable lease or its owner's access.
+        // Keep refusals sticky and pair every remaining call with a result.
+        if (!accessBlockedReason && !await executionAllowed()) accessBlockedReason = 'execution_interrupted';
+        if (i > 0 && input.executionGuard && accessGuard && !accessBlockedReason) {
+          const access = await accessGuard();
+          if (!access.allowed) accessBlockedReason = access.reason ?? 'service_unavailable';
+          else officeConsequential = access.approvalMode === 'consequential';
+        }
+
+        if (accessBlockedReason) {
+          const payload = { error: 'office_access_blocked', reason: accessBlockedReason };
+          toolCallResults.push({ id: tc.id, result: payload });
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, result: payload }, originalCall.id, originalCall);
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload,
+          });
+          continue;
+        }
 
         /**
          * THE CONTROL. For operator turns the policy table decides, per
@@ -1216,9 +1747,32 @@ export async function* runAgentTurn(
          * stored credential being org-bound — an external property, not a
          * control.
          */
-        let operatorVerdict = isOperator
+        let operatorVerdict: OperatorPolicy | null = isOperator
           ? operatorPolicyForOrg(tc.name, tc.args, operatorOrgId)
           : null;
+        if (isOperator) {
+          try {
+            await assertOperatorKeyArguments(input.pool, input.jwt, operatorOrgId, tc.args);
+          } catch {
+            operatorVerdict = 'deny';
+          }
+        }
+
+        /**
+         * THE OFFICE FLOOR (Task 8). In a customer Office turn the Office
+         * classifier is authoritative for reads/preparation/consequences, and
+         * an operator 'deny' (cross-org, self-approval) still wins. Yolo is
+         * never consulted here — the whole point is that a customer Office
+         * does not inherit the substrate shortcut for consequential work.
+         *
+         * `officeConsequential` is derived from the server-side access policy
+         * on this turn, never from a model argument; it is false for every
+         * self-hosted deployment with no cloud policy, which is why their
+         * behaviour is unchanged.
+         */
+        if (officeConsequential) {
+          operatorVerdict = resolveOfficeVerdict(operatorVerdict, classifyOfficeTool(tc.name, tc.args));
+        }
 
         /**
          * `yolo_mode`, applied only where it can matter. A 'deny' never reaches
@@ -1236,11 +1790,82 @@ export async function* runAgentTurn(
          * request. It falls through to the catalog guard below either way.
          */
         if (
+          !officeConsequential &&
           operatorVerdict === 'approval' &&
           allowedToolNames.has(tc.name) &&
           (await resolveYoloMode())
         ) {
           operatorVerdict = operatorPolicyForOrg(tc.name, tc.args, operatorOrgId, { yoloMode: true });
+        }
+
+        if (officeConsequential && !proposalProvider && operatorVerdict === 'approval' && input.readOnly !== true) {
+          const payload = { code: 'proposal_unavailable', message: 'Required Office preparation is unavailable. No owner approval was created.' };
+          await replyProposal(payload);
+          toolCallResults.push({ id: originalCall.id, result: payload });
+          yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
+          continue;
+        }
+
+        // Structured gates use the same effective policy computed above. The
+        // wrapper grants no permission and cannot dispatch an automatic write.
+        if (structuredProposals && (proposalInput || operatorVerdict === 'approval')) {
+          let payload: Record<string, unknown> | null = null;
+          let parkedActionId: string | null = null;
+          if (accessBlockedReason || operatorVerdict === 'deny') payload = { code: 'proposal_invalid' };
+          else if (input.readOnly === true) payload = { code: 'read_only_test' };
+          else if (!proposalInput) payload = { code: 'proposal_incomplete', missing: ['reason'], message: 'Call propose_action with this exact operation nested under operation and an explicit reason, e.g. {"operation":{"tool":"<tool name>","arguments":{<same arguments>}},"reason":"<why>"}.' };
+          else {
+            try {
+              if (tc.name === 'manage_substrate' && (tc.args as any)?.action === 'propose') {
+                parkedActionId = await findParkedProposalIntent(input.pool, proposalOrganizationId!, input.conversationId, proposalIntentFingerprint(tc.name, tc.args));
+              }
+              if (operatorVerdict !== 'approval' && !parkedActionId) payload = { code: 'proposal_not_required', message: 'Use the original automatic tool directly.' };
+              else {
+                const appId = appIdFromArgs(tc.args);
+                const isDeployment = isDeployTool(tc.name) || isDeployFunctionTool(tc.name);
+                const proposedTree = isDeployment && appId ? cache.get(input.conversationId, appId) : undefined;
+                const artifact = isDeployment ? deploymentArtifact(tc.name, tc.args, proposedTree) : undefined;
+                if (isDeployment && (!treeStore || !proposedTree || !artifact)) payload = { code: 'deploy_tree_unavailable' };
+                else {
+                  const operation = parkedActionId
+                    ? captureApprovalOperation({ toolName: SUBSTRATE_ESCALATION_TOOL, args: { action: 'approve', action_id: parkedActionId } })
+                    : captureApprovalOperation({ toolName: tc.name, args: tc.args, artifact });
+                  const files = proposedTree ? Array.from(proposedTree.values()).map(f => ({ path: f.path, content: f.content, sha256: f.sha256 })) : undefined;
+                  const functionName = (tc.args as any)?.function_name;
+                  const artifactSource = isDeployFunctionTool(tc.name) ? files?.find(f => ['index.ts', 'index.js', 'index.mjs'].some(entry => f.path === `functions/${functionName}/${entry}`))?.content : undefined;
+                  if (isOperator && pendingGatedCalls === null) pendingGatedCalls = await listPendingGatedCalls(input.pool, input.conversationId);
+                  const specificDuplicate = isOperator && !input.reviewPreparation ? findDuplicatePendingCall(pendingGatedCalls ?? [], tc.name, tc.args) : null;
+                  const prepared = specificDuplicate
+                    ? { status: 'blocked' as const, code: 'already_pending', approval_id: specificDuplicate.approvalId }
+                    : await proposalProvider!.prepare({ organizationId: proposalOrganizationId!, actorUserId: isOperator ? undefined : input.userId, origin: isOperator ? 'operator' : 'office', conversationId: input.conversationId, operation, validateRegisteredToolArguments, artifactFiles: files, artifactSource }, proposalInput);
+                  if (prepared.status !== 'ready') {
+                    payload = prepared;
+                    if (input.reviewPreparation && prepared.status === 'blocked') input.onReviewPreparationBlocked?.(prepared.code);
+                  }
+                  else {
+                    const approvalId = randomUUID();
+                    if (proposedTree && !await treeStore!.save(approvalId, proposedTree)) payload = { code: 'deploy_tree_unavailable' };
+                    else {
+                      const saved = await persistPreparedApproval(input.pool, { id: approvalId, organizationId: proposalOrganizationId!, conversationId: input.conversationId, operation, proposal: { ...prepared.proposal, source: parkedActionId ? 'substrate_escalation' : 'explicit' }, traceId: input.traceId, reviewPreparation: input.reviewPreparation, message: { id: randomUUID(), callId: originalCall.id, toolName: originalCall.name, args: originalCall.args, content: i === 0 ? assistantText : '', model: input.model } });
+                      if (saved.kind === 'duplicate') payload = { code: 'already_pending', approval_id: saved.approvalId };
+                      else {
+                        yield withOfficeActivityCallId({ type: 'approval_required', approval_id: saved.approval.id, tool_name: tc.name, args: tc.args, sensitivity: 'destructive' }, originalCall.id, originalCall);
+                        terminated = true;
+                        break outer;
+                      }
+                    }
+                  }
+                }
+              }
+            } catch { payload = { code: 'proposal_review_unavailable', message: 'Preparation failed safely. No approval was created.' }; }
+          }
+          if (payload) {
+            await replyProposal(payload);
+            toolCallResults.push({ id: originalCall.id, result: payload });
+            yield { type: 'tool_call', ...originalCall };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: originalCall.id, result: payload }, originalCall.id, originalCall);
+            continue;
+          }
         }
 
         /**
@@ -1324,7 +1949,7 @@ export async function* runAgentTurn(
             yield { type: 'tool_call', ...tc };
             const resultPayload = { error: errorMsg };
             toolCallResults.push({ id: tc.id, ...resultPayload });
-            yield { type: 'tool_result', id: tc.id, ...resultPayload };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
             await appendMessage(input.pool, input.conversationId, {
               role: 'tool',
               content: '',
@@ -1369,8 +1994,159 @@ export async function* runAgentTurn(
         // returns it to the model as an ordinary tool error, which is what it
         // was before the tiers changed.
         if (operatorVerdict === 'approval' && allowedToolNames.has(tc.name)) {
+          /**
+           * A draft test is READ-ONLY. A consequential call never reaches
+           * `createApproval` — the test's promise is that it changes nothing
+           * and leaves the owner no decision. The refusal is an ordinary tool
+           * result so the model reads it and continues the test.
+           */
+          if (input.readOnly === true) {
+            const messageId = randomUUID();
+            const blocked = { blocked: true, code: 'read_only_test', tool: tc.name };
+            await appendMessage(
+              input.pool,
+              input.conversationId,
+              {
+                role: 'assistant',
+                content: i === 0 ? assistantText : '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: null,
+                modelUsed: input.model,
+              },
+              messageId,
+            );
+            yield { type: 'tool_call', ...tc };
+            toolCallResults.push({ id: tc.id, result: blocked });
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, result: blocked }, originalCall.id, originalCall);
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'tool',
+              content: '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: blocked,
+            });
+            continue;
+          }
           const messageId = randomUUID();
+          const appId = appIdFromArgs(tc.args);
+          const deployTool = isDeployTool(tc.name) || isDeployFunctionTool(tc.name);
+          const deployStore = deployTool ? treeStore : undefined;
+          /**
+           * The EXACT source being proposed. `cache` is process-local and Fly
+           * routes requests across machines, so a digest alone is not enough:
+           * the resolve may land where this tree has never existed. The store
+           * persists the files under the approval id so any instance can
+           * rehydrate them. `deploymentArtifact` is also the readiness proof:
+           * a frontend deploy needs a non-empty tree, and a function deploy
+           * needs its entry file, before it is reasonable to ask a human.
+           */
+          const proposedTree =
+            deployTool && appId ? cache.get(input.conversationId, appId) : undefined;
+          const artifact = deployTool
+            ? deploymentArtifact(tc.name, tc.args, proposedTree)
+            : undefined;
+
+          if (deployStore && (!proposedTree || !artifact)) {
+            const errorMsg =
+              'deploy_tree_unavailable: prepare and write the files in this turn before proposing a deployment. ' +
+              'Nothing was created; re-propose once the working tree is ready.';
+            await appendMessage(
+              input.pool,
+              input.conversationId,
+              {
+                role: 'assistant',
+                content: i === 0 ? assistantText : '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: null,
+                modelUsed: input.model,
+              },
+              messageId,
+            );
+            yield { type: 'tool_call', ...tc };
+            const resultPayload = { error: errorMsg };
+            toolCallResults.push({ id: tc.id, ...resultPayload });
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'tool',
+              content: '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: resultPayload,
+            });
+            continue;
+          }
+
+          /**
+           * The server-owned record of WHAT is being approved (Task 8).
+           *
+           * Downstream tools still receive only `tc.args`. This object lives
+           * in `dashboard_agent_approvals.approved_operation` and is what the
+           * replay verifies against: the exact tool, the exact args, the
+           * target app, and — for a deployment — a digest of the source that
+           * was proposed. A later working-tree change cannot ride in under
+           * this approval; it is refused with `approval_operation_changed`
+           * and must be re-proposed.
+           */
+          const approvedOperation = captureApprovalOperation({
+            toolName: tc.name,
+            args: tc.args,
+            artifact,
+          });
+
+          /**
+           * Persist the tree BEFORE the approval row exists. If it cannot be
+           * stored, no approval is created at all: an approval nobody can
+           * execute is worse than an ordinary tool error the model can read
+           * and adapt to. The id is generated here so the snapshot and the row
+           * are addressed by the same value even if the insert is retried.
+           */
+          const approvalId = deployStore && proposedTree ? randomUUID() : undefined;
+          if (deployStore && approvalId && proposedTree) {
+            const saved = await deployStore.save(approvalId, proposedTree);
+            if (!saved) {
+              const errorMsg =
+                'deploy_tree_unavailable: the deployment source could not be stored safely. ' +
+                'Nothing was created; retry this turn.';
+              await appendMessage(
+                input.pool,
+                input.conversationId,
+                {
+                  role: 'assistant',
+                  content: i === 0 ? assistantText : '',
+                  toolCallId: tc.id,
+                  toolName: tc.name,
+                  toolArgs: tc.args,
+                  toolResult: null,
+                  modelUsed: input.model,
+                },
+                messageId,
+              );
+              yield { type: 'tool_call', ...tc };
+              const resultPayload = { error: errorMsg };
+              toolCallResults.push({ id: tc.id, ...resultPayload });
+              yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
+              await appendMessage(input.pool, input.conversationId, {
+                role: 'tool',
+                content: '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: resultPayload,
+              });
+              continue;
+            }
+          }
+
           const approval = await createApproval(input.pool, {
+            // Only deploy approvals pre-allocate an id (for the snapshot key);
+            // every other approval keeps the database default.
+            ...(approvalId ? { id: approvalId } : {}),
             conversationId: input.conversationId,
             turnMessageId: messageId,
             toolName: tc.name,
@@ -1380,6 +2156,13 @@ export async function* runAgentTurn(
             // expects, and there is no weaker meaning available.
             sensitivity: 'destructive',
             traceId: input.traceId ?? null,
+            approvedOperation,
+            references: referencesForApproval({
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolCalls: pendingToolCalls,
+              toolResults: toolCallResults,
+            }),
           });
           // `gated`: the operator turn stops here, right now, and does not
           // resume until a human resolves `approval.id` — reported via
@@ -1410,19 +2193,51 @@ export async function* runAgentTurn(
             },
             messageId,
           );
-          yield {
+          yield withOfficeActivityCallId({
             type: 'approval_required',
             approval_id: approval.id,
             tool_name: tc.name,
             args: tc.args,
             sensitivity: 'destructive',
-          };
+          }, tc.id);
           terminated = true;
           break outer;
         }
         if (sensitivity !== 'safe') {
           const trusted = await checkTrust(input.pool, input.conversationId, tc.name);
           if (!trusted) {
+            // Defence in depth for a read-only test that somehow reaches the
+            // human sensitivity path: same refusal, still no approval row.
+            if (input.readOnly === true) {
+              const messageId = randomUUID();
+              const blocked = { blocked: true, code: 'read_only_test', tool: tc.name };
+              await appendMessage(
+                input.pool,
+                input.conversationId,
+                {
+                  role: 'assistant',
+                  content: i === 0 ? assistantText : '',
+                  toolCallId: tc.id,
+                  toolName: tc.name,
+                  toolArgs: tc.args,
+                  toolResult: null,
+                  modelUsed: input.model,
+                },
+                messageId,
+              );
+              yield { type: 'tool_call', ...tc };
+              toolCallResults.push({ id: tc.id, result: blocked });
+              yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, result: blocked }, originalCall.id, originalCall);
+              await appendMessage(input.pool, input.conversationId, {
+                role: 'tool',
+                content: '',
+                toolCallId: tc.id,
+                toolName: tc.name,
+                toolArgs: tc.args,
+                toolResult: blocked,
+              });
+              continue;
+            }
             const messageId = randomUUID();
             const approval = await createApproval(input.pool, {
               conversationId: input.conversationId,
@@ -1446,13 +2261,13 @@ export async function* runAgentTurn(
               },
               messageId,
             );
-            yield {
+            yield withOfficeActivityCallId({
               type: 'approval_required',
               approval_id: approval.id,
               tool_name: tc.name,
               args: tc.args,
               sensitivity,
-            };
+            }, tc.id);
             terminated = true;
             break outer;
           }
@@ -1529,7 +2344,7 @@ export async function* runAgentTurn(
           const errorMsg = `Tool "${tc.name}" is not permitted for the autonomous operator.`;
           const resultPayload = { error: errorMsg };
           toolCallResults.push({ id: tc.id, ...resultPayload });
-          yield { type: 'tool_result', id: tc.id, ...resultPayload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -1546,7 +2361,7 @@ export async function* runAgentTurn(
           const errorMsg = `Tool "${tc.name}" is not available in this agent's catalog.`;
           const resultPayload = { error: errorMsg };
           toolCallResults.push({ id: tc.id, ...resultPayload });
-          yield { type: 'tool_result', id: tc.id, ...resultPayload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -1585,6 +2400,23 @@ export async function* runAgentTurn(
          * failure and can shorten its own summary; silent truncation would
          * drop whichever part did not fit with no signal.
          */
+        if (tc.name === READ_OPERATOR_SCRATCHPAD_TOOL) {
+          toolCallsCount++;
+          let result: unknown;
+          if (!memoryScopeOrg || Object.keys((tc.args ?? {}) as object).length) result = { code: 'working_notes_scope_invalid' };
+          else {
+            try {
+              const saved = await getOperatorScratchpad(input.pool, memoryScopeOrg);
+              const current = saved ? readOfficeTaskNotes(saved.content) : null;
+              result = { content: current ?? saved?.content ?? '', format: current === null ? 'legacy' : 'task_notes_v2', updated_at: saved?.updatedAt ?? null };
+            } catch { result = { code: 'working_notes_unavailable' }; }
+          }
+          toolCallResults.push({ id: tc.id, result });
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, result }, originalCall.id, originalCall);
+          await appendMessage(input.pool, input.conversationId, { role: 'tool', content: '', toolCallId: tc.id,
+            toolName: tc.name, toolArgs: tc.args, toolResult: result });
+          continue;
+        }
         if (isOperatorScratchpadTool(tc.name)) {
           toolCallsCount++;
           const spArgs = (tc.args ?? {}) as { content?: unknown };
@@ -1595,7 +2427,7 @@ export async function* runAgentTurn(
             payload = { error: `Tool "${tc.name}" requires a string "content" argument.` };
           } else {
             try {
-              const saved = await setOperatorScratchpad(input.pool, operatorOrgId, spArgs.content);
+              const saved = await setOperatorScratchpad(input.pool, operatorOrgId, officeMemoryTools ? formatOfficeTaskNotes(spArgs.content) : spArgs.content);
               payload = {
                 result: { ok: true, characters: saved.content.length, updated_at: saved.updatedAt },
               };
@@ -1604,7 +2436,7 @@ export async function* runAgentTurn(
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -1672,7 +2504,44 @@ export async function* runAgentTurn(
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        /**
+         * ---- Route: read_tool_result (in-process) -------------------------
+         *
+         * The handle that makes a 64k-truncated result recoverable. The row is
+         * resolved with the turn's conversation id, never a model argument, so
+         * an id from another conversation is indistinguishable from a missing
+         * one. Read-only; it cannot write, approve, or dispatch anything.
+         */
+        if (isReadToolResultTool(tc.name)) {
+          toolCallsCount++;
+          const parsed = parseReadToolResultArgs(tc.args);
+          let payload: { result?: unknown; error?: string };
+          if (!parsed.ok) {
+            payload = { error: parsed.error };
+          } else {
+            try {
+              const row = await getToolResultMessage(input.pool, input.conversationId, parsed.value.messageId);
+              payload = row
+                ? { result: readToolResultText(row.toolResult, parsed.value) }
+                : { error: 'tool_result_not_found' };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -1784,11 +2653,11 @@ export async function* runAgentTurn(
               // ERRORS, not build reports: telling the model "your build
               // failed" when the source never reached the sandbox would send
               // it looking for a bug in code that never compiled.
-              payload = { error: err instanceof Error ? err.message : String(err) };
+              payload = sandboxFailurePayload(err);
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -1839,11 +2708,11 @@ export async function* runAgentTurn(
               const r = await input.codeExecutor(rcArgs.code);
               payload = { result: r };
             } catch (err) {
-              payload = { error: err instanceof Error ? err.message : String(err) };
+              payload = sandboxFailurePayload(err);
             }
           }
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -1874,7 +2743,7 @@ export async function* runAgentTurn(
             : { error: r.error };
           if (r.ok && tc.name === 'write_file') fileWritesCount++;
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -1893,7 +2762,7 @@ export async function* runAgentTurn(
           if (!args.app_id) {
             const err = 'app_id is required';
             toolCallResults.push({ id: tc.id, error: err });
-            yield { type: 'tool_result', id: tc.id, error: err };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, error: err }, originalCall.id, originalCall);
             await appendMessage(input.pool, input.conversationId, {
               role: 'tool',
               content: '',
@@ -1920,7 +2789,7 @@ export async function* runAgentTurn(
             : { error: r.error };
           if (r.ok) deploymentsCount++;
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -1946,7 +2815,7 @@ export async function* runAgentTurn(
           if (!args.app_id || !args.function_name) {
             const err = 'app_id and function_name are required';
             toolCallResults.push({ id: tc.id, error: err });
-            yield { type: 'tool_result', id: tc.id, error: err };
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, error: err }, originalCall.id, originalCall);
             await appendMessage(input.pool, input.conversationId, {
               role: 'tool',
               content: '',
@@ -1976,7 +2845,7 @@ export async function* runAgentTurn(
             ? { result: { url: r.url, deployment_id: r.deploymentId } }
             : { error: r.error };
           toolCallResults.push({ id: tc.id, ...payload });
-          yield { type: 'tool_result', id: tc.id, ...payload };
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
           await appendMessage(input.pool, input.conversationId, {
             role: 'tool',
             content: '',
@@ -1986,6 +2855,219 @@ export async function* runAgentTurn(
             toolResult: payload.error ? { error: payload.error } : (payload.result ?? {}),
           });
           continue;
+        }
+
+        // ---- Route: Office skill creator (in-process) --------------------
+        //
+        // No MCP tool by this name exists. The executor is supplied ONLY by the
+        // Office overlay for an owner's Office Ask turn, and the catalog filter
+        // above already hides the name when it is absent; the explicit check
+        // here is defence in depth. The creator drafts and enqueues a test; it
+        // never runs the skill and cannot approve it.
+        if (tc.name === SKILL_CREATOR_TOOL) {
+          toolCallsCount++;
+          const creatorArgs = (tc.args ?? {}) as {
+            request?: unknown;
+            target_skill_id?: unknown;
+            draft_version_id?: unknown;
+            timezone?: unknown;
+          };
+          let payload: { result?: unknown; error?: string };
+          const request = typeof creatorArgs.request === 'string' ? creatorArgs.request.trim() : '';
+          if (typeof input.skillCreator !== 'function' || !input.organizationId) {
+            payload = { error: `Tool "${tc.name}" is not available in this turn.` };
+          } else if (!request) {
+            payload = { error: `Tool "${tc.name}" requires a non-empty string "request" argument.` };
+          } else {
+            try {
+              const created = await input.skillCreator({
+                args: {
+                  request,
+                  ...(typeof creatorArgs.target_skill_id === 'string'
+                    ? { target_skill_id: creatorArgs.target_skill_id } : {}),
+                  ...(typeof creatorArgs.draft_version_id === 'string'
+                    ? { draft_version_id: creatorArgs.draft_version_id } : {}),
+                  ...(typeof creatorArgs.timezone === 'string' ? { timezone: creatorArgs.timezone } : {}),
+                },
+                organizationId: input.organizationId,
+                userId: input.userId,
+                jwt: input.jwt,
+                model: input.model,
+              });
+              payload = { result: { content: [{ type: 'text', text: JSON.stringify(created) }] } };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        // ---- Route: skill script execution (in-process) ------------------
+        //
+        // The executor materialises the PINNED version archive and runs its
+        // entrypoint. It is not a shell: the entrypoint must stay under the
+        // package's `scripts/`, and there is no host fallback when the seam is
+        // absent (the catalog filter above already removed the name).
+        if (tc.name === RUN_SKILL_SCRIPT_TOOL) {
+          toolCallsCount++;
+          const scriptArgs = (tc.args ?? {}) as { entrypoint?: unknown; input?: unknown };
+          let payload: { result?: unknown; error?: string };
+          const requestedEntrypoint = typeof scriptArgs.entrypoint === 'string'
+            ? scriptArgs.entrypoint.trim() : '';
+          const entrypoint = requestedEntrypoint || input.activeSkill?.entrypoint || '';
+          if (typeof input.skillScript !== 'function' || !input.activeSkill) {
+            payload = { error: `Tool "${tc.name}" is not available outside a skill run.` };
+          } else if (!isSkillEntrypoint(entrypoint)) {
+            payload = { error: 'invalid_entrypoint: the entrypoint must stay inside scripts/.' };
+          } else {
+            try {
+              const result = await input.skillScript({
+                skill: input.activeSkill,
+                args: {
+                  ...(requestedEntrypoint ? { entrypoint } : {}),
+                  ...(scriptArgs.input !== undefined ? { input: scriptArgs.input } : {}),
+                },
+              });
+              payload = {
+                result: {
+                  content: [{
+                    type: 'text',
+                    text: JSON.stringify({
+                      stdout: result.stdout,
+                      stderr: result.stderr,
+                      exit_code: result.exitCode,
+                    }),
+                  }],
+                },
+              };
+            } catch (err) {
+              payload = { error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+          toolCallResults.push({ id: tc.id, ...payload });
+          yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
+          await appendMessage(input.pool, input.conversationId, {
+            role: 'tool',
+            content: '',
+            toolCallId: tc.id,
+            toolName: tc.name,
+            toolArgs: tc.args,
+            toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+          });
+          continue;
+        }
+
+        // ---- Route: organization-scoped integration read (in-process) ----
+        //
+        // `execute_read` and — when an org reader is injected — `list_connected`
+        // and `list_tools` are the Office organization-scoped paths: they use
+        // the ORGANIZATION's connection and accept no `app_id`, and they can
+        // never send or change anything. Every other action falls through to
+        // the normal (app-scoped, approval-gated) MCP path. Without an injected
+        // reader `execute_read` is refused rather than degrading to a different
+        // integration identity; the list actions keep their existing
+        // app-scoped behavior.
+        if (tc.name === 'manage_integrations') {
+          const integrationArgs = (tc.args ?? {}) as {
+            action?: unknown;
+            tool_slug?: unknown;
+            tool_name?: unknown;
+            toolkit?: unknown;
+            params?: unknown;
+          };
+          const action = typeof integrationArgs.action === 'string'
+            ? integrationArgs.action.trim().toLowerCase()
+            : '';
+          const orgScoped = action === 'execute_read'
+            || (typeof input.integrationReader === 'function'
+              && (action === 'list_connected' || action === 'list_tools'));
+          if (orgScoped) {
+            toolCallsCount++;
+            let payload: { result?: unknown; error?: string };
+            const reader = input.integrationReader;
+            const toolSlug = typeof integrationArgs.tool_slug === 'string'
+              ? integrationArgs.tool_slug.trim()
+              : typeof integrationArgs.tool_name === 'string'
+                ? integrationArgs.tool_name.trim()
+                : '';
+            const toolkit = typeof integrationArgs.toolkit === 'string'
+              ? integrationArgs.toolkit.trim() : '';
+            if (typeof reader !== 'function') {
+              payload = { error: 'integration_reader_unavailable' };
+            } else if (!input.organizationId) {
+              payload = { error: 'organization_required' };
+            } else if (action === 'execute_read') {
+              if (!toolSlug) {
+                payload = { error: 'tool_slug is required' };
+              } else {
+                try {
+                  const params = integrationArgs.params
+                    && typeof integrationArgs.params === 'object'
+                    && !Array.isArray(integrationArgs.params)
+                    ? integrationArgs.params as Record<string, unknown>
+                    : undefined;
+                  const result = await reader({
+                    action: 'execute_read',
+                    organizationId: input.organizationId,
+                    toolSlug,
+                    ...(params ? { params } : {}),
+                    readOnly: input.readOnly === true,
+                  });
+                  payload = { result: result.content };
+                } catch (err) {
+                  payload = { error: err instanceof Error ? err.message : String(err) };
+                }
+              }
+            } else if (action === 'list_tools') {
+              if (!toolkit) {
+                payload = { error: 'toolkit is required' };
+              } else {
+                try {
+                  const result = await reader({
+                    action: 'list_tools',
+                    organizationId: input.organizationId,
+                    toolkit,
+                    readOnly: true,
+                  });
+                  payload = { result: result.content };
+                } catch (err) {
+                  payload = { error: err instanceof Error ? err.message : String(err) };
+                }
+              }
+            } else {
+              try {
+                const result = await reader({
+                  action: 'list_connected',
+                  organizationId: input.organizationId,
+                  readOnly: true,
+                });
+                payload = { result: result.content };
+              } catch (err) {
+                payload = { error: err instanceof Error ? err.message : String(err) };
+              }
+            }
+            toolCallResults.push({ id: tc.id, ...payload });
+            yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...payload }, originalCall.id, originalCall);
+            await appendMessage(input.pool, input.conversationId, {
+              role: 'tool',
+              content: '',
+              toolCallId: tc.id,
+              toolName: tc.name,
+              toolArgs: tc.args,
+              toolResult: payload.error !== undefined ? { error: payload.error } : payload.result,
+            });
+            continue;
+          }
         }
 
         // ---- Default: MCP tool -------------------------------------------
@@ -2001,8 +3083,18 @@ export async function* runAgentTurn(
             toolName: tc.name,
           });
         }
+        /**
+         * The active org for this tool call.
+         *
+         * Ordinary dashboard turns keep using the request's `organizationId`
+         * header, exactly as before. An Office turn uses the organization
+         * bound to its STORED conversation — the same value the gateway is
+         * billed and the guard evaluated. They are equal whenever the route's
+         * binding check passed, and when they are not, the stored one wins.
+         */
+        const toolOrganizationId = officeOrganizationId ?? input.organizationId;
         const call = await callMcpTool(
-          tc.name, tc.args, input.jwt, input.organizationId, input.traceId, input.triggerContext,
+          tc.name, tc.args, input.jwt, toolOrganizationId, input.traceId, input.triggerContext,
         );
         // Scope app discovery to the active org. The shared `/apps` endpoint
         // deliberately fans out across every org the user belongs to; here —
@@ -2014,9 +3106,9 @@ export async function* runAgentTurn(
           call.ok &&
           tc.name === 'manage_app' &&
           (tc.args as { action?: string } | null)?.action === 'list' &&
-          input.organizationId
+          toolOrganizationId
         ) {
-          call.result = scopeAppListToOrg(call.result, input.organizationId);
+          call.result = scopeAppListToOrg(call.result, toolOrganizationId);
         }
 
         /**
@@ -2062,9 +3154,12 @@ export async function* runAgentTurn(
          * propose as an ordinary tool result: today's behaviour, never a
          * half-paused turn.
          */
-        if (isOperator && call.ok) {
+        if ((isOperator || (isOfficeTurn && structuredProposals)) && call.ok) {
           const escalatedActionId = readSubstrateEscalation(tc.name, tc.args, call.result);
-          if (escalatedActionId) {
+          if (escalatedActionId && structuredProposals) {
+            call.result = { code: 'proposal_incomplete', message: 'Substrate parked this operation. Call propose_action with the same operation, an explicit reason and optional references. Do not propose it again.', parkedProposal: { actionId: escalatedActionId, intentFingerprint: proposalIntentFingerprint(tc.name, tc.args) } };
+          }
+          if (escalatedActionId && !structuredProposals) {
             const approval = await createSubstrateEscalationApproval(input.pool, {
               conversationId: input.conversationId,
               pausedMessageId: assistantRow.id,
@@ -2081,13 +3176,13 @@ export async function* runAgentTurn(
                   escalated: true,
                 });
               }
-              yield {
+              yield withOfficeActivityCallId({
                 type: 'approval_required',
                 approval_id: approval.id,
                 tool_name: tc.name,
                 args: tc.args,
                 sensitivity: 'destructive',
-              };
+              }, tc.id);
               terminated = true;
               break outer;
             }
@@ -2096,7 +3191,7 @@ export async function* runAgentTurn(
 
         const resultPayload = call.ok ? { result: call.result } : { error: call.error };
         toolCallResults.push({ id: tc.id, ...resultPayload });
-        yield { type: 'tool_result', id: tc.id, ...resultPayload };
+        yield withOfficeActivityCallId({ type: 'tool_result', id: tc.id, ...resultPayload }, originalCall.id, originalCall);
         await appendMessage(input.pool, input.conversationId, {
           role: 'tool',
           content: '',
@@ -2119,14 +3214,51 @@ export async function* runAgentTurn(
           },
         })),
       });
+      // The cap must hold in the LIVE turn, not only on replay: one broad
+      // search is exactly the incident this feature exists to survive. Resolve
+      // row ids only when a result actually needs the envelope.
+      const capThreshold = toolResultModelMaxChars();
+      const needsCap = toolCallResults.some(
+        (res) => res.error === undefined && JSON.stringify(res.result ?? {}).length > capThreshold,
+      );
+      if (needsCap) {
+        try {
+          const resolved = await getToolMessageIds(
+            input.pool,
+            input.conversationId,
+            pendingToolCalls.map((tc) => tc.id),
+          );
+          for (const [callId, rowId] of resolved) midTurnIds.set(callId, rowId);
+        } catch {
+          // Without a row id the result stays raw this turn; replay caps it.
+        }
+      }
+
       for (let i = 0; i < pendingToolCalls.length; i++) {
         const tc = pendingToolCalls[i];
         const res = toolCallResults[i];
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
-          content: JSON.stringify(res.error !== undefined ? { error: res.error } : res.result),
+          content: res.error !== undefined
+            ? JSON.stringify({ error: res.error })
+            : toolResultContentForModel(res.result, capThreshold, midTurnIds.get(tc.id)),
         });
+      }
+
+      if (accessBlockedReason) {
+        yield { type: 'blocked', reason: accessBlockedReason };
+        terminated = true;
+        break outer;
+      }
+      if (proposalRetryBlocked) {
+        const summary = 'Repeated preparation attempts for the same operation were stopped after three refusals. Review the recorded refusal before submitting another request.';
+        await appendMessage(input.pool, input.conversationId, { role: 'assistant', content: summary, toolCallId: null, toolName: null, toolArgs: null, toolResult: null, modelUsed: input.model });
+        lastAssistantText = summary;
+        yield { type: 'assistant_message', content: summary };
+        yield { type: 'error', code: 'proposal_retry_limit_reached', message: summary };
+        terminated = true;
+        break outer;
       }
     }
 
@@ -2142,6 +3274,7 @@ export async function* runAgentTurn(
   } finally {
     // End-of-turn: flush touched apps + record usage (guaranteed to run)
     for (const appId of touchedApps) {
+      if (!await cleanupAllowed()) break;
       const baseline = baselineByApp.get(appId) ?? new Map<string, string>();
       try {
         const flushResult = await repoSync.flush({
@@ -2153,9 +3286,9 @@ export async function* runAgentTurn(
 
         // Task 5 (Plan 3d): auto-name the new snapshot. Entirely best-effort —
         // must never block or fail the SSE stream, so every step is wrapped.
-        if (flushResult.newSnapshotId) {
+        if (flushResult.newSnapshotId && await cleanupAllowed()) {
           try {
-            const gateway = snapshotTitleGatewayFactory(input.jwt);
+            const gateway = snapshotTitleGatewayFactory(input.jwt, officeOrganizationId);
             const snapshotTitle = await deriveSnapshotTitle(
               input.userMessage,
               lastAssistantText,
@@ -2201,11 +3334,11 @@ export async function* runAgentTurn(
     // Task 2 (Plan 3e): auto-title the conversation after its first assistant
     // turn. Entirely best-effort — never blocks or fails the SSE stream, and
     // never overwrites a title the user (or a prior turn) already set.
-    if (lastAssistantText) {
+    if (lastAssistantText && await cleanupAllowed()) {
       try {
         const conversation = await getConversationFn(input.pool, input.conversationId, input.userId);
         if (conversation && conversation.title === 'New conversation') {
-          const gateway = snapshotTitleGatewayFactory(input.jwt);
+          const gateway = snapshotTitleGatewayFactory(input.jwt, officeOrganizationId);
           const title = await generateConversationTitle(input.userMessage, lastAssistantText, gateway);
           if (title) {
             const updated = await updateConversationTitleFn(

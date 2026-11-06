@@ -1,5 +1,5 @@
 // services/control-api/src/services/s3.ts
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, type S3ClientConfig } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { config } from '../config.js';
 import { randomUUID } from 'crypto';
@@ -16,6 +16,16 @@ const s3Credentials = config.s3.accessKeyId && config.s3.secretAccessKey ? {
   accessKeyId: config.s3.accessKeyId,
   secretAccessKey: config.s3.secretAccessKey,
 } : undefined;
+
+/** Durable video obligations own retries; one SDK send must dispatch at most one PUT. */
+export function createRetainedObjectClient(overrides: Pick<S3ClientConfig, 'endpoint' | 'region' | 'credentials' | 'forcePathStyle'> = {}): S3Client {
+  return new S3Client({
+    region: config.s3.region, endpoint: config.s3.endpoint,
+    forcePathStyle: config.s3.forcePathStyle, credentials: s3Credentials,
+    ...overrides,
+    requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED', maxAttempts: 1,
+  });
+}
 
 // R2 does not fully support S3 flexible checksums; WHEN_REQUIRED prevents the
 // SDK from auto-injecting CRC32 headers/query params that R2 may mishandle.

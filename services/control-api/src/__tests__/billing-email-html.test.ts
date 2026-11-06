@@ -64,6 +64,8 @@ describe('limit email bodies', () => {
 
 describe('HTML variants', () => {
   const ownerTemplates: Array<[BillingEmailTemplate, Record<string, string>]> = [
+    ['project_idle_warning', { appId: 'app_1', appName: 'Pantry', warnDays: '7' }],
+    ['project_paused_idle', { appId: 'app_1', appName: 'Pantry' }],
     ['payment_failed', { gracePeriodEndsAt: '2026-10-13T00:00:00Z' }],
     ['plan_downgraded', {}],
     ['soft_locked', { violations: 'mau: 60/50' }],

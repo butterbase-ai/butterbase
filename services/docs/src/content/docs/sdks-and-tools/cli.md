@@ -5,6 +5,8 @@ description: Command-line tool for Butterbase project scaffolding and backend ma
 
 The `@butterbase/cli` provides a command-line interface for managing your Butterbase apps, schemas, functions, storage, and deployments.
 
+`butterbase office` also provides 22 organization commands for Ask, decisions, conversations and business memory. Every command requires `--org <uuid>` and supports `--json`; no selected app is needed. Protected commands return browser confirmation URLs (`--open` is opt-in; `--wait` observes the receipt). Run `butterbase office --help` or read [Office clients](/core-concepts/office-clients/) for the full command table, JSON output and exit codes.
+
 ## Installation
 
 ```bash

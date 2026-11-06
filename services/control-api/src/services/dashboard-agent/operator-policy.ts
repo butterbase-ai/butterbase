@@ -22,9 +22,14 @@
 
 import {
   OPERATOR_SCRATCHPAD_TOOL,
+  READ_OPERATOR_SCRATCHPAD_TOOL,
   OPERATOR_SANDBOX_CODE_TOOL,
   OPERATOR_BUILD_TOOL,
   OPERATOR_PENDING_DECISIONS_TOOL,
+  READ_TOOL_RESULT_TOOL,
+  SKILL_CREATOR_TOOL,
+  RUN_SKILL_SCRIPT_TOOL,
+  PROPOSE_ACTION_TOOL,
 } from './tool-catalog.js';
 
 export type OperatorPolicy = 'allow' | 'approval' | 'deny';
@@ -72,10 +77,15 @@ export type OperatorPolicyContext = {
  * path, which ends in `callMcpTool`) and the loop's internal `turnMcp` wrapper.
  */
 export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
+  READ_OPERATOR_SCRATCHPAD_TOOL,
+  PROPOSE_ACTION_TOOL,
   OPERATOR_SCRATCHPAD_TOOL,
   OPERATOR_SANDBOX_CODE_TOOL,
   OPERATOR_BUILD_TOOL,
   OPERATOR_PENDING_DECISIONS_TOOL,
+  READ_TOOL_RESULT_TOOL,
+  SKILL_CREATOR_TOOL,
+  RUN_SKILL_SCRIPT_TOOL,
 ]);
 
 /**
@@ -212,6 +222,7 @@ export const OPERATOR_LOCAL_TOOLS: ReadonlySet<string> = new Set([
  * nothing but presigned, blob-scoped, one-hour GET urls.
  */
 export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Map<string, OperatorToolTier>([
+  [PROPOSE_ACTION_TOOL, 'allow'],
   // ---- allow: reads, and writes that stay inside the org's own memory ----
   ['butterbase_docs', 'allow'],
   ['list_regions', 'allow'],
@@ -226,6 +237,7 @@ export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Ma
   ['manage_integrations', 'allow'],
   // loop-internal tools, unchanged (see OPERATOR_LOCAL_TOOLS)
   [OPERATOR_SCRATCHPAD_TOOL, 'allow'],
+  [READ_OPERATOR_SCRATCHPAD_TOOL, 'allow'],
   [OPERATOR_SANDBOX_CODE_TOOL, 'allow'],
   // see the `build_app` section of this comment block for the argument
   [OPERATOR_BUILD_TOOL, 'allow'],
@@ -243,6 +255,19 @@ export const OPERATOR_TOOL_TIERS: ReadonlyMap<string, OperatorToolTier> = new Ma
    * queue for the owner's approval would never be used.
    */
   [OPERATOR_PENDING_DECISIONS_TOOL, 'allow'],
+  // A read of the conversation's own stored tool result; no tenant data, no
+  // MCP call, and the conversation comes from the turn, not an argument.
+  [READ_TOOL_RESULT_TOOL, 'allow'],
+  /**
+   * Office skill seams are 'approval' in the GENERAL operator table: the table
+   * describes an unattended operator on any deployment, and these tools do not
+   * exist there (no executor is supplied, so the catalog filter removes them).
+   * In a customer Office the Office policy classifies both as 'allow'; the
+   * stricter of the two answers governs, so Office turns dispatch them without
+   * a human while a hypothetical self-hosted turn could not.
+   */
+  [SKILL_CREATOR_TOOL, 'approval'],
+  [RUN_SKILL_SCRIPT_TOOL, 'approval'],
 
   // ---- approval: everything else the catalog advertises ----
   // app lifecycle & discovery
@@ -491,6 +516,9 @@ export const OPERATOR_ALLOWED_SUBSTRATE_ACTIONS: ReadonlySet<string> = new Set([
   // memory
   'search_memory',
   'list_memory',
+  'list_agent_memories',
+  'search_agent_memories',
+  'get_agent_memory',
   // outbox — reads, plus retry (re-sends work a human already authorised;
   // cancel_outbox is gated instead, see OPERATOR_APPROVAL_SUBSTRATE_ACTIONS)
   'list_outbox',
@@ -656,7 +684,8 @@ export function orgIdArgIsForeign(args: unknown, ownOrgId: string | null | undef
  *   4. the TOOL tier      — OPERATOR_TOOL_TIERS, floored at 'approval' for any
  *                           name with no entry.
  *
- * There is no longer a tool-level deny step. That is the point of the
+ * The external manage_office facade is explicitly denied before these steps.
+ * The remaining catalog keeps the
  * 2026-08-07 spec: the operator reaches the whole catalog, at one of two
  * tiers. `deny` survives only for the substrate actions that would let the
  * agent weaken the controls governing it.
@@ -666,6 +695,9 @@ export function orgIdArgIsForeign(args: unknown, ownOrgId: string | null | undef
  * source could cover both. They are both here, in one table, by design.
  */
 function tableVerdict(name: string, args: unknown): OperatorPolicy {
+  // External Office clients authorize with the initiating owner's browser.
+  // The agent must never route back through that facade to govern itself.
+  if (name === 'manage_office') return 'deny';
   if (name === 'manage_substrate') {
     // The action rules below are the whole substrate guardrail, so anything we
     // cannot read confidently is denied rather than waved through.
@@ -692,7 +724,20 @@ function tableVerdict(name: string, args: unknown): OperatorPolicy {
     }
   }
 
-  // 4. The tool tier, deny-by-default floored at 'approval'.
+  // 4. Schema and RLS reads. The tool-level tier is 'approval', but a read
+  // cannot change the app, so it must not wait in the owner's queue. Any
+  // unreadable action stays at the approval floor.
+  if (name === 'manage_rls' || name === 'manage_schema') {
+    const parsed = coerceArgs(args);
+    const action = parsed === UNREADABLE ? UNREADABLE : readAction(parsed);
+    if (action !== UNREADABLE) {
+      if (name === 'manage_rls' && action === 'list') return 'allow';
+      if (name === 'manage_schema' && action && ['get', 'dry_run', 'list_migrations'].includes(action)) return 'allow';
+    }
+    return 'approval';
+  }
+
+  // 5. The tool tier, deny-by-default floored at 'approval'.
   return operatorToolTier(name);
 }
 
@@ -764,13 +809,48 @@ export function operatorPolicyForOrg(
 }
 
 /**
+ * Combine this table's verdict with the Office consequential floor
+ * (`office-tool-policy.ts`).
+ *
+ * `operatorVerdict` is what `operatorPolicyForOrg` said BEFORE yolo is applied;
+ * the Office path never consults yolo. `null` means the caller is not an
+ * operator turn (an Office-origin foreground conversation, Task 9), where there
+ * is no operator table to defer to.
+ *
+ * WHY THE OFFICE VERDICT IS AUTHORITATIVE OVER 'approval' RATHER THAN MERGED
+ * BY STRICTNESS. The operator table's `approval` tier is a general
+ * unattended-agent affordance — a self-hosted org may lift all of it with
+ * `yolo_mode`. A customer Office has a narrower, contractual contract: reads
+ * and preparation are autonomous, consequential work is not. So `write_file`
+ * and `read_file`, which sit at the operator `approval` tier for historical
+ * reasons, are allowed for Office without requiring yolo; office-tool-policy
+ * names them explicitly. Merging by strictness would silently leave Office
+ * unable to prepare work, which contradicts the spec's "prepare work and
+ * compile code in a sandbox".
+ *
+ * WHAT IS NEVER LOOSENED: an operator `deny`. Cross-org targeting
+ * (`operatorPolicyForOrg`) and the substrate action denials are not product
+ * trade-offs, so they survive every Office verdict — including an Office
+ * 'approval'. Office 'deny' is absolute, and Office 'approval' cannot turn a
+ * denied cross-org call into a proposal the executor would refuse anyway.
+ *
+ * Precedence: any deny wins; otherwise office approval > operator approval > allow.
+ */
+export function resolveOfficeVerdict(
+  operatorVerdict: OperatorPolicy | null,
+  officeVerdict: OperatorPolicy,
+): OperatorPolicy {
+  if (officeVerdict === 'deny' || operatorVerdict === 'deny') return 'deny';
+  if (officeVerdict === 'approval') return 'approval';
+  return 'allow';
+}
+
+/**
  * Thin wrapper over the table: may the operator call this tool at all?
  *
- * Since 2026-08-07 this is true for every tool: there is no tool-level deny
- * tier, so the answer is "yes, at some tier". Retained because the loop uses it
- * to build the operator's offered catalog and because it keeps that call site
- * asking the policy module rather than assuming — if a tool-level denial is
- * ever reintroduced, the filter picks it up with no edit.
+ * The external Office facade is denied to prevent recursive/self-authorizing
+ * control. Other tools retain the existing allow/approval tiers. The loop uses
+ * this policy helper to build the operator's offered catalog.
  */
 export function isOperatorToolAllowed(name: string): boolean {
   return operatorPolicyFor(name, undefined) !== 'deny';

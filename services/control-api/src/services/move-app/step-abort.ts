@@ -55,6 +55,14 @@ export const executeAbort: StepHandler = async (ctx, m) => {
   if (m.dest_resources.dest_app_id) {
     try {
       const destPool = ctx.runtimePoolFor(m.dest_region);
+      // The reservation copies template_source_app_id, and the apps delete
+      // trigger (trg_apps_fork_count_delete) would decrement the template's
+      // fork_count in this region even though the fork still exists. Null the
+      // link first so deleting the placeholder is count-neutral.
+      await destPool.query(
+        `UPDATE apps SET template_source_app_id = NULL WHERE id = $1 AND provisioning_status = 'migration_target_reserved'`,
+        [m.app_id],
+      );
       await destPool.query(
         `DELETE FROM apps WHERE id = $1 AND provisioning_status = 'migration_target_reserved'`,
         [m.app_id],

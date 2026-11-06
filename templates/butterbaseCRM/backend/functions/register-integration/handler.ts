@@ -23,7 +23,7 @@ export async function handler(req, ctx) {
   }
   const userId = ctx.user.id;
 
-  let body: { workspace_id?: string; toolkit?: string };
+  let body: { workspace_id?: string; toolkit?: string; email?: string };
   try {
     body = await req.json();
   } catch {
@@ -31,6 +31,11 @@ export async function handler(req, ctx) {
   }
   const workspaceId = body.workspace_id;
   const toolkit = body.toolkit;
+  // The runtime's ctx.user has no email. The browser knows it at connect time,
+  // so it is captured here and used later to tell sent mail from inbound mail.
+  const ownerEmail = typeof body.email === 'string' && /^[^@\s]+@[^@\s]+$/.test(body.email.trim())
+    ? body.email.trim().toLowerCase()
+    : null;
   if (!workspaceId || !toolkit) {
     return json({ error: 'missing_fields', detail: 'workspace_id and toolkit are required' }, 400);
   }
@@ -52,11 +57,13 @@ export async function handler(req, ctx) {
 
   // Upsert binding.
   await ctx.db.query(
-    `INSERT INTO workspace_integrations (workspace_id, user_id, toolkit_slug, composio_account_id)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO workspace_integrations (workspace_id, user_id, toolkit_slug, composio_account_id, metadata)
+     VALUES ($1, $2, $3, $4, $5::jsonb)
      ON CONFLICT (workspace_id, user_id, toolkit_slug)
-     DO UPDATE SET composio_account_id = EXCLUDED.composio_account_id, connected_at = now()`,
-    [workspaceId, userId, toolkit, conn.composio_account_id ?? null],
+     DO UPDATE SET composio_account_id = EXCLUDED.composio_account_id, connected_at = now(),
+       metadata = workspace_integrations.metadata || EXCLUDED.metadata`,
+    [workspaceId, userId, toolkit, conn.composio_account_id ?? null,
+      JSON.stringify(ownerEmail ? { email: ownerEmail } : {})],
   );
 
   return json({ ok: true, workspace_id: workspaceId, toolkit, composio_account_id: conn.composio_account_id });

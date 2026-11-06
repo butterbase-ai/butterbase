@@ -151,6 +151,7 @@ async function handleRouterError(reply: FastifyReply, err: unknown): Promise<Fas
       transport:             { status: 502, type: 'api_error',           msg: 'Upstream transport error. Please retry.' },
       insufficient_credits:  { status: 503, type: 'api_error',           msg: 'Model is temporarily unavailable. Please try again or use a different model.' },
       bad_request:           { status: 400, type: 'invalid_request_error', msg: 'The upstream provider rejected the request.' },
+      param_unsupported:     { status: 400, type: 'invalid_request_error', msg: 'The selected model does not support one or more request parameters.' },
       unknown:               { status: 502, type: 'api_error',           msg: 'Upstream provider error. Please retry.' },
     };
     const spec = KIND_MESSAGE[err.kind] ?? KIND_MESSAGE.unknown;

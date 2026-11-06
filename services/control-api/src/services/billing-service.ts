@@ -307,16 +307,17 @@ export async function markAiUsageAsBilled(
  */
 export async function getSpendingCapStatus(
   db: DbClient,
-  userId: string
+  userId: string,
+  activeOrganizationId?: string,
 ): Promise<{ capUsd: number | null; overageSpentUsd: number; remainingUsd: number | null; isAtCap: boolean }> {
   // Post-Plan-07: spending_cap_usd + plan_id live on organizations, not platform_users.
   const userResult = await db.query(
     `SELECT o.spending_cap_usd, o.plan_id, p.max_ai_credits_usd, p.default_spending_cap_usd
      FROM platform_users pu
-     JOIN organizations o ON o.id = pu.personal_organization_id
+     JOIN organizations o ON o.id = COALESCE($2::uuid, pu.personal_organization_id)
      JOIN plans p ON p.id = o.plan_id
      WHERE pu.id = $1`,
-    [userId]
+    [userId, activeOrganizationId ?? null]
   );
 
   if (userResult.rows.length === 0) {
@@ -334,7 +335,7 @@ export async function getSpendingCapStatus(
   }
 
   const includedCredits = parseFloat(row.max_ai_credits_usd);
-  const organizationId = await resolveOrganizationId(db as Pool, userId);
+  const organizationId = activeOrganizationId ?? await resolveOrganizationId(db as Pool, userId);
   const totalUsed = await getAiCreditsUsed(db, organizationId, false);
   const overageSpentUsd = Math.max(0, totalUsed - includedCredits);
   const remainingUsd = Math.max(0, capUsd - overageSpentUsd);

@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { normalizeExecutionResult, recordUnconfirmedOutcome, unconfirmedExecution } from './execution-outcome.js';
 import { callMcpTool, type McpCallResult } from './mcp-client.js';
 import { principalMayExecute, orgIdArgIsForeign, type OperatorPrincipal } from './operator-policy.js';
 
@@ -57,9 +58,9 @@ import { stripJsonbNulls as stripNulls } from './store.js';
  * call, and a crash mid-call degrades to at-least-once. Deliberately no
  * stale-claim timeout or other recovery machinery.
  *
- * Failures are NOT cached: a transient MCP error must remain retryable. On a
- * failed result no row is written and the lock releases at COMMIT, leaving the
- * approval open for a retry.
+ * Known no-effect failures remain retryable. Uncertain responses are cached as
+ * a refusal and recorded on the approval, including legacy approvals, so a
+ * lost response cannot silently dispatch the same effect again.
  *
  * ── PRECONDITION, load-bearing: ONE approval id means ONE distinct call ────
  *
@@ -120,6 +121,18 @@ export async function executeOnce(
      * for the human assistant's own approvals, which have no trace.
      */
     traceId?: string | null;
+    /**
+     * How the call actually reaches its tool. Defaults to `callMcpTool`.
+     *
+     * Exists for the operator's IN-PROCESS deploy tools (`deploy_frontend`,
+     * `deploy_function_from_workspace`), which have no MCP counterpart at all —
+     * replaying them through `callMcpTool` reaches no server and fails. The
+     * approval executor supplies a local dispatcher for exactly those names;
+     * everything else keeps the default. This does NOT widen the exactly-once
+     * contract: the dispatch still runs inside the same advisory-lock
+     * transaction and its success is cached under the same approval id.
+     */
+    dispatch?: (call: { name: string; args: unknown }) => Promise<McpCallResult>;
   },
 ): Promise<McpCallResult> {
   // Ahead of every path that can reach callMcpTool, and ahead of touching the
@@ -181,19 +194,32 @@ export async function executeOnce(
       [opts.approvalId],
     );
     if (cached.rows.length > 0) {
+      const result = normalizeExecutionResult({ toolName: opts.name, toolArgs: opts.args }, cached.rows[0].result);
+      if (result.code === 'execution_unconfirmed') await recordUnconfirmedOutcome(client, opts.approvalId);
       await client.query('COMMIT');
-      return cached.rows[0].result;
+      return result;
     }
 
-    const result = await callMcpTool(opts.name, opts.args, opts.jwt, opts.orgId, opts.traceId);
+    let result: McpCallResult;
+    try {
+      result = opts.dispatch
+        ? await opts.dispatch({ name: opts.name, args: opts.args })
+        : await callMcpTool(opts.name, opts.args, opts.jwt, opts.orgId, opts.traceId);
+      if (!result.ok && !result.code) result = unconfirmedExecution();
+    } catch {
+      result = unconfirmedExecution();
+    }
 
-    if (result.ok) {
+    result = normalizeExecutionResult({ toolName: opts.name, toolArgs: opts.args }, result);
+
+    if (result.ok || result.code === 'execution_unconfirmed') {
       await client.query(
         `INSERT INTO dashboard_agent_tool_executions (approval_id, result)
          VALUES ($1, $2) ON CONFLICT (approval_id) DO NOTHING`,
         [opts.approvalId, JSON.stringify(stripNulls(result))],
       );
     }
+    if (result.code === 'execution_unconfirmed') await recordUnconfirmedOutcome(client, opts.approvalId);
 
     await client.query('COMMIT');
     return result;

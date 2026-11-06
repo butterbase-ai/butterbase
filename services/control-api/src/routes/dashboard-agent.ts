@@ -24,6 +24,10 @@
  *          approve/deny + resume-and-execute steps described in the Plan 3b
  *          Task 3 brief into a single endpoint (documented choice — see brief
  *          "For simplicity ... pick and document").
+ *   GET    /operator/approvals/:id – one approval, resolved or pending, for
+ *          smoke/ops checks that must observe a resolution (no transcript).
+ *   GET    /operator/approvals/:id/conversation – the prose window up to the
+ *          approval's turn (no tool rows, args or results).
  *   GET    /operator/approvals – pending approvals raised by the headless
  *          operator for the caller's org (org-scoped, membership-checked).
  *   POST   /operator/approvals/:id/resolve – approve/deny one of those.
@@ -37,15 +41,32 @@
  * Pool: app.controlDb (decorated by plugins/database.ts).
  */
 
+import { readOfficeConversationActivityHistory } from '../services/dashboard-agent/office-activity-history.js';
+import { createOfficeActivityProjector } from '../services/dashboard-agent/office-activity.js';
+import { readOfficeActivityObservation } from '../services/dashboard-agent/office-activity-details-recorder.js';
+import { readOfficeActivityDetails } from '../services/dashboard-agent/office-activity-details-store.js';
+import { canReadOfficeActivity } from '../services/dashboard-agent/office-activity-access.js';
+import { buildProposalReview, verifyPreparedApproval } from '../services/dashboard-agent/proposal-review.js';
+import { redactProposalArguments } from '../services/dashboard-agent/approval-proposal.js';
+import { validateProposalToolArguments } from '../services/dashboard-agent/proposal-validation.js';
+import { publicAgentErrorMessage } from '../services/dashboard-agent/public-error.js';
+import { readConfirmedExecution } from '../services/dashboard-agent/execution-outcome.js';
+import { requestApprovalReview } from '../services/dashboard-agent/request-proposal-review.js';
+import { listReviewPreparations } from '../services/dashboard-agent/review-preparation-store.js';
+import { explainReviewPreparations } from '../services/dashboard-agent/review-preparation-context.js';
+import { listRecentResolvedByOrg, type OrgApproval } from '../services/dashboard-agent/approvals-store.js';
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { z } from 'zod';
-import { DEFAULT_ASSISTANT_MODEL, resolveAssistantModel } from '../services/dashboard-agent/assistant-model.js';
+import { resolveAssistantModel } from '../services/dashboard-agent/assistant-model.js';
+import { readPersonalAssistantModel } from '../services/dashboard-agent/model-preferences.js';
+import { registerAgentModelPreferencesRoutes } from './agent-model-preferences.js';
 import { requireUserId } from '../utils/require-auth.js';
 import {
   createConversation,
   listConversations,
   getConversation,
+  isOfficeClientConversation,
   deleteConversation,
   updateConversationModel,
   renameConversation,
@@ -71,18 +92,26 @@ import { callMcpTool } from '../services/dashboard-agent/mcp-client.js';
 import {
   resolveApprovalAndPersistResult,
   completeApprovalResolution,
+  type ApprovalExecutor,
 } from '../services/dashboard-agent/resume.js';
 import {
+  getApproval,
   getApprovalForOrg,
   listPendingByOrg,
 } from '../services/dashboard-agent/approvals-store.js';
+import { listApprovalConversation } from '../services/dashboard-agent/approval-conversation.js';
 import {
   executeApprovedOperatorTool,
   rejectEscalatedSubstrateAction,
 } from '../services/dashboard-agent/substrate-approval-bridge.js';
+import { getSharedDeployTreeStore } from '../services/dashboard-agent/deploy-tree-store.js';
+import { evaluateOperatorAccess } from '../services/dashboard-agent/operator-access-policy.js';
 // TEMPORARY — dev-mode operator trace viewer. Delete with GET /operator/traces.
 import { operatorUserId } from '../services/dashboard-agent/operator-store.js';
 import { listOperatorTraces } from '../services/dashboard-agent/operator-traces.js';
+import type {
+  IntegrationReader, SkillCreatorExecutor,
+} from '../services/dashboard-agent/skill-types.js';
 
 // ---------------------------------------------------------------------------
 // Feature-flag guard
@@ -138,6 +167,51 @@ const rewindMcp = {
 
 function getRewindRepoSync() {
   return createRepoSync({ cache: getSharedWorkingTreeCache(), mcp: rewindMcp });
+}
+
+// ---------------------------------------------------------------------------
+// Office Ask executors (skill_creator + org integration reads)
+// ---------------------------------------------------------------------------
+
+export type OfficeAskExecutors = {
+  skillCreator?: SkillCreatorExecutor;
+  integrationReader?: IntegrationReader;
+};
+
+type OfficeAskLoader = (input: {
+  controlPool: unknown;
+  conversation: { origin: string; organizationId: string | null };
+  userId: string;
+}) => Promise<OfficeAskExecutors>;
+
+let officeAskLoader: OfficeAskLoader | null = null;
+
+/** Test-only: replace the overlay import. Pass `null` to restore. */
+export function __setOfficeAskExecutorsLoaderForTest(loader: OfficeAskLoader | null): void {
+  officeAskLoader = loader;
+}
+
+/**
+ * The overlay supplies these ONLY for an owner's Office Ask turn; it performs
+ * the role check. This function performs the provenance gate (Office only) and
+ * FAILS CLOSED to `{}` whenever the overlay is absent or throws — OSS mode has
+ * no skill store and no organization integrations, so neither tool may exist
+ * there.
+ */
+export async function resolveOfficeAskExecutors(
+  input: Parameters<OfficeAskLoader>[0],
+): Promise<OfficeAskExecutors> {
+  if (input.conversation.origin !== 'office') return {};
+  if (officeAskLoader) {
+    try { return await officeAskLoader(input); } catch { return {}; }
+  }
+  try {
+    // @ts-expect-error — overlay path exists only in the built cloud image
+    const overlay = await import('../../../../cloud-overlays/dist/cloud-overlays/office/skills/tool-executor.js');
+    return await overlay.officeAskExecutors(input) as OfficeAskExecutors;
+  } catch {
+    return {};
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,15 +279,97 @@ export { DEFAULT_ASSISTANT_MODEL, resolveAssistantModel } from '../services/dash
 
 const createConversationBody = z.object({
   title: z.string().min(1).max(500).default('New conversation'),
-  // Optional — falls back to DEFAULT_ASSISTANT_MODEL when the caller sends none.
-  model: z.string().min(1).default(DEFAULT_ASSISTANT_MODEL),
+  // Resolve the deployment default when the request runs, not at import time.
+  model: z.string().min(1).optional(),
+  /**
+   * Task 9 — a client may ASK for an Office conversation; it cannot choose the
+   * organization. The org comes from the membership-checked
+   * `x-organization-id` header and is bound immutably by the server. Zod
+   * strips any `organization_id` a body carries, which is the point: no
+   * request field can bind a conversation to an org the caller did not prove
+   * membership of.
+   */
+  origin: z.enum(['dashboard', 'office']).optional(),
 });
 
+/**
+ * Can this conversation be used from the organization the request names?
+ *
+ * Ordinary dashboard conversations predate provenance (and have none): they
+ * stay reachable exactly as they always were, by their owner. An Office
+ * conversation is bound for life to one organization — a member of two orgs
+ * who opens it with the other one selected gets the same 404 as a stranger,
+ * so neither its existence nor its content leaks across the boundary.
+ *
+ * Comparison is case-insensitive because Postgres normalises a UUID's casing
+ * in storage while the header is whatever the client sent.
+ */
+export function isConversationReachableFromOrg(
+  conversation: { origin: string; organizationId: string | null },
+  requestOrgId: string | null,
+): boolean {
+  if (conversation.origin !== 'office') return true;
+  if (!conversation.organizationId || !requestOrgId) return false;
+  return conversation.organizationId.toLowerCase() === requestOrgId.toLowerCase();
+}
+
+/**
+ * Load a conversation for a request and enforce its organization binding in
+ * one step. Every conversation-scoped route uses this instead of a bare
+ * `getConversation`, so a future route cannot forget the check: the only way
+ * to get a row back from here is to be its owner AND to name its organization.
+ */
+async function getConversationForRequest(
+  pool: pg.Pool,
+  id: string,
+  userId: string,
+  request: { headers: Record<string, unknown> },
+) {
+  const conversation = await getConversation(pool, id, userId);
+  if (!conversation) return null;
+  if (!isConversationReachableFromOrg(conversation, readOrgId(request))) return null;
+  return conversation;
+}
+
+/**
+ * Task 9 — the pre-stream eligibility check for an Office-origin turn.
+ *
+ * The loop rechecks this before every model request and every tool batch, so
+ * this is not the control; it exists because the loop's own refusal lands
+ * AFTER the SSE hijack, where the only channel left is an event. A customer
+ * whose subscription lapsed should get an honest 403 on the Ask request, not
+ * a stream that opens and then says nothing useful.
+ *
+ * Runs before any spend and before headers. Ordinary dashboard conversations
+ * are not consulted — the policy is an Office product gate, and the dashboard
+ * remains its own surface.
+ */
+async function officeTurnAccessOutcome(
+  conversation: { origin: string; organizationId: string | null },
+  userId: string,
+  model: string,
+): Promise<{ ok: true } | { ok: false; code: 403; error: string }> {
+  if (conversation.origin !== 'office' || !conversation.organizationId) return { ok: true };
+
+  const access = await evaluateOperatorAccess({
+    organizationId: conversation.organizationId,
+    phase: 'run',
+    origin: 'office',
+    actorUserId: userId,
+    model,
+  });
+  if (!access.allowed) {
+    return { ok: false, code: 403, error: access.reason ?? 'service_unavailable' };
+  }
+  return { ok: true };
+}
+
 const postMessageBody = z.object({
+  activity_version: z.union([z.literal(1), z.literal(2)]).optional(),
   conversation_id: z.string().uuid(),
   message: z.string().min(1),
-  // Optional — falls back to DEFAULT_ASSISTANT_MODEL when the caller sends none.
-  model: z.string().min(1).default(DEFAULT_ASSISTANT_MODEL),
+  // An omitted model keeps the conversation's saved choice.
+  model: z.string().min(1).optional(),
 });
 
 const rewindBody = z.object({
@@ -317,9 +473,59 @@ export async function resolveCallerOrgId(
   return { ok: true, orgId: member.rows[0].organization_id };
 }
 
+/** Authorized projection; frozen executable arguments remain server-only. */
+async function projectOrgApproval(pool: pg.Pool, approval: OrgApproval, orgId: string, userId: string, authMethod?: string) {
+  const [owner, access, cached] = await Promise.all([
+    isOrganizationOwner(pool, orgId, userId),
+    evaluateOperatorAccess({ organizationId: orgId, actorUserId: userId, origin: approval.source, phase: 'execute' }),
+    approval.proposalDetails ? readConfirmedExecution(pool, approval) : Promise.resolve(null),
+  ]);
+  const current = cached ? { ...approval, executionOutcome: {
+    version: 1 as const, state: 'succeeded' as const, attemptCount: Math.max(1, approval.executionOutcome?.attemptCount ?? 0),
+    startedAt: approval.executionOutcome?.startedAt ?? null, finishedAt: approval.executionOutcome?.finishedAt ?? approval.resolvedAt ?? null,
+    safeErrorCode: null, resultReference: { kind: 'tool_execution' as const, id: approval.id },
+  } } : approval;
+  const review = await buildProposalReview(current, {
+    organizationId: orgId, actorUserId: userId, origin: approval.source,
+    conversationId: approval.conversationId,
+    operation: approval.approvedOperation ?? { version: 1, toolName: approval.toolName, args: approval.toolArgs },
+    validateRegisteredToolArguments: validateProposalToolArguments,
+  }, { approve: owner && access.allowed && (authMethod === undefined || authMethod === 'jwt'), decline: true, requestReview: owner && (authMethod === undefined || authMethod === 'jwt') });
+  return {
+    id: approval.id, conversationId: approval.conversationId, turnMessageId: approval.turnMessageId,
+    toolName: approval.toolName, toolArgs: redactProposalArguments(approval.toolArgs), sensitivity: approval.sensitivity,
+    status: approval.status, trustScope: approval.trustScope, denyReason: approval.denyReason,
+    createdAt: approval.createdAt, resolvedAt: approval.resolvedAt, resolvedBy: approval.resolvedBy,
+    source: approval.source, references: [], review,
+    tool_name: approval.toolName, created_at: approval.createdAt, resolved_at: approval.resolvedAt,
+  };
+}
+
 export type OperatorResolveOutcome =
   | { ok: true }
-  | { ok: false; code: 400 | 404 | 409 | 502; error: string };
+  | { ok: false; code: 400 | 403 | 404 | 409 | 502; error: string };
+
+/**
+ * Is `userId` a current OWNER of `orgId`?
+ *
+ * The operator routes authorise on membership (any member may see and, for an
+ * ordinary self-hosted operator, resolve). Task 8 tightens that for
+ * CONSEQUENTIAL Office approvals: only an owner may approve a deployment or a
+ * live-data change. Read from the database on every resolution — an
+ * indefinitely cached role is exactly the stale authority the spec forbids.
+ */
+export async function isOrganizationOwner(
+  pool: pg.Pool,
+  orgId: string,
+  userId: string,
+): Promise<boolean> {
+  const result = await pool.query<{ role: string }>(
+    `SELECT role FROM organization_members
+      WHERE organization_id = $1 AND user_id = $2 LIMIT 1`,
+    [orgId, userId],
+  );
+  return result.rows[0]?.role === 'owner';
+}
 
 /**
  * Org-scoped approval resolution for operator turns.
@@ -367,11 +573,84 @@ export async function resolveOperatorApproval(
      * which human authorised an operator-raised, irreversible action.
      */
     userId: string;
+    /**
+     * How the caller authenticated (`request.auth.authMethod`). Only a human
+     * session may approve a consequential Office action — service keys and
+     * API keys cannot. Optional because direct/server callers (tests, internal
+     * helpers) have no transport to read it from; the HTTP route always
+     * supplies it.
+     */
+    authMethod?: string;
+    /** Server-only admission adapter; HTTP bodies cannot supply executors. */
+    executeApproval?: ApprovalExecutor;
     resolution: { status: 'approved' } | { status: 'denied'; reason?: string };
   },
 ): Promise<OperatorResolveOutcome> {
   const approval = await getApprovalForOrg(pool, input.approvalId, input.orgId);
   if (!approval) return { ok: false, code: 404, error: 'approval not found' };
+
+  /**
+   * ── Office consequential gate (Task 8) ──────────────────────────────────
+   *
+   * In cloud mode the access policy answers `approvalMode: 'consequential'`
+   * for operator/Office origins. A consequential approval is:
+   *
+   *   - approvable only by a HUMAN session (not a service/API key);
+   *   - approvable only by a CURRENT OWNER of the approval's organization;
+   *   - executable only while the policy still allows `execute` for that org
+   *     (paid entitlement, account state, managed credential, funding);
+   *   - required to carry a recorded immutable operation. A legacy row that
+   *     predates one must be re-proposed rather than executed on trust.
+   *
+   * DENIAL IS DELIBERATELY NOT GATED. Refusing old work must remain possible
+   * with no paid plan, no credits and no current owner — that is how an org
+   * unwinds a pending action. The evaluation therefore runs only for approve,
+   * and the deny path is unchanged.
+   */
+  const access =
+    input.resolution.status === 'approved'
+      ? await evaluateOperatorAccess({
+          organizationId: input.orgId,
+          phase: 'execute',
+          /**
+           * The row's own surface decides the origin. An Office-origin
+           * foreground approval (Task 9) is listed here beside the operator's
+           * and must be judged by the same Office contract; passing
+           * 'operator' for it would be a lie the policy currently happens to
+           * treat identically, which is exactly the kind of coincidence that
+           * breaks silently when the policy changes.
+           */
+          origin: approval.source === 'office' ? 'office' : 'operator',
+          actorUserId: input.userId,
+        })
+      : { allowed: true, reason: null, approvalMode: 'standard' as const };
+  const officeConsequential = access.approvalMode === 'consequential';
+
+  if (input.resolution.status === 'approved' && officeConsequential) {
+    if (input.authMethod !== undefined && input.authMethod !== 'jwt') {
+      return {
+        ok: false,
+        code: 403,
+        error: 'a human organization-owner session is required to approve this action',
+      };
+    }
+    if (!(await isOrganizationOwner(pool, input.orgId, input.userId))) {
+      return { ok: false, code: 403, error: 'only an organization owner may approve this action' };
+    }
+    if (!access.allowed) {
+      // 409: the approval is still valid and still pending; it simply cannot
+      // execute under the organization's current state. Denial remains
+      // available, so this is not a wedge.
+      return { ok: false, code: 409, error: access.reason ?? 'service_unavailable' };
+    }
+    if (!approval.approvedOperation) {
+      return {
+        ok: false,
+        code: 409,
+        error: 'approval_operation_missing: this approval must be re-proposed',
+      };
+    }
+  }
 
   const outcome = await completeApprovalResolution(pool, {
     approval,
@@ -388,8 +667,25 @@ export async function resolveOperatorApproval(
     // approve(action_id), so the human's one click actually EXECUTES the
     // capability instead of leaving a second pending action for them to
     // approve again. See substrate-approval-bridge.ts.
-    execute: (a) =>
-      executeApprovedOperatorTool(pool, {
+    execute: async (a, resolutionPool) => {
+      if (input.executeApproval) {
+        // A transport-specific executor replaces dispatch, never the prepared
+        // review boundary. Check the locked, current row before lending it out.
+        if (officeConsequential || a.proposalDetails) {
+          if (!a.proposalDetails || !a.approvedOperation) return { ok: false, code: 'proposal_review_required', error: 'Request a complete proposal before approving this legacy action.' };
+          const currentAccess = await evaluateOperatorAccess({ organizationId: input.orgId, actorUserId: input.userId,
+            origin: approval.source, phase: 'execute' });
+          if (!currentAccess.allowed || !(await isOrganizationOwner(resolutionPool ?? pool, input.orgId, input.userId))) {
+            return { ok: false, code: 'office_access_blocked', error: 'Current owner access is required.' };
+          }
+          const verification = await verifyPreparedApproval({ organizationId: input.orgId, actorUserId: input.userId,
+            origin: approval.source, conversationId: a.conversationId, operation: a.approvedOperation,
+            validateRegisteredToolArguments: validateProposalToolArguments }, a);
+          if (verification.status !== 'valid') return { ok: false, code: verification.code, error: verification.code };
+        }
+        return input.executeApproval(a, resolutionPool);
+      }
+      return executeApprovedOperatorTool(resolutionPool ?? pool, {
         approvalId: a.id,
         name: a.toolName,
         args: a.toolArgs,
@@ -400,7 +696,20 @@ export async function resolveOperatorApproval(
         // this execution reports the id of the TURN that gated, not a fresh
         // one for the click that resolved it.
         traceId: a.traceId,
-      }),
+        // The row carries the immutable operation and the conversation whose
+        // working tree a deploy replay needs. A deploy approved here runs
+        // through the same HTTP transports a live turn uses; a changed tree
+        // is refused with approval_operation_changed.
+        approval: a,
+        officeConsequential,
+        actorUserId: input.userId,
+        origin: approval.source === 'office' ? 'office' : 'operator',
+        cache: getSharedWorkingTreeCache(),
+        // The snapshot, not the process cache, is what proves and builds a
+        // deploy on whichever API machine resolves this approval.
+        treeStore: getSharedDeployTreeStore(),
+      });
+    },
     /**
      * Deny path, SUBSTRATE-ESCALATED approvals only (fix E).
      *
@@ -411,8 +720,8 @@ export async function resolveOperatorApproval(
      * no-op (attempted: false) for every other approval kind, because those
      * paused before dispatch and there is nothing on the far side.
      */
-    denyCleanup: (a) =>
-      rejectEscalatedSubstrateAction(pool, {
+    denyCleanup: (a, resolutionPool) =>
+      rejectEscalatedSubstrateAction(resolutionPool ?? pool, {
         approvalId: a.id,
         approval: { toolName: a.toolName, toolArgs: a.toolArgs },
         reason: input.resolution.status === 'denied' ? input.resolution.reason : undefined,
@@ -430,6 +739,7 @@ export async function resolveOperatorApproval(
 // ---------------------------------------------------------------------------
 
 export async function dashboardAgentRoutes(app: FastifyInstance) {
+  registerAgentModelPreferencesRoutes(app, isEnabled);
   // ── Startup env warnings ─────────────────────────────────────────────────
   if (process.env.DASHBOARD_ASSISTANT_ENABLED === '1') {
     if (!process.env.AI_GATEWAY_URL) {
@@ -451,11 +761,56 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
 
+    const model = parsed.data.model?.trim() || await readPersonalAssistantModel(app.controlDb, userId);
+
+    /**
+     * ── Office creation (Task 9) ──────────────────────────────────────────
+     *
+     * Asking for an Office conversation is the only way one comes into
+     * existence, and the server decides both facts that make it an Office:
+     *
+     *   - the ORGANIZATION is the membership-checked `x-organization-id`
+     *     header (resolveCallerOrgId proves membership and returns the
+     *     database's own normalisation of it);
+     *   - eligibility is the registered access policy's `run` answer for that
+     *     organization with the asking human as the audit identity — a paid
+     *     plan, an enabled activation, a current managed credential, and
+     *     funding. A member may create; the policy does not require them to be
+     *     the owner.
+     *
+     * A denial writes nothing. The client cannot supply an organization id: it
+     * is stripped by the schema, so the only org it can bind is one it just
+     * proved membership of.
+     */
+    const wantsOffice = parsed.data.origin === 'office';
+
+    if (wantsOffice) {
+      const org = await resolveCallerOrgId(app.controlDb, request, userId);
+      if (!org.ok) return reply.code(org.code).send({ error: org.error });
+
+      const access = await evaluateOperatorAccess({
+        organizationId: org.orgId,
+        phase: 'run',
+        origin: 'office',
+        actorUserId: userId,
+        model,
+      });
+      if (!access.allowed) {
+        return reply.code(403).send({ error: access.reason ?? 'office_not_available' });
+      }
+
+      const conversation = await createConversation(app.controlDb, userId, parsed.data.title, model, {
+        origin: 'office',
+        organizationId: org.orgId,
+      });
+      return reply.code(201).send({ conversation });
+    }
+
     const conversation = await createConversation(
       app.controlDb,
       userId,
       parsed.data.title,
-      resolveAssistantModel(parsed.data.model),
+      model,
     );
 
     return reply.code(201).send({ conversation });
@@ -478,13 +833,34 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
     const { id } = request.params as { id: string };
 
-    const conversation = await getConversation(app.controlDb, id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
 
+    const version = z.object({ activity_version: z.enum(['1','2']).optional() }).safeParse(request.query);
+    if (!version.success) return reply.code(400).send({ error: 'invalid activity version' });
+    if (version.data.activity_version) {
+      if (version.data.activity_version === '2' && !await canReadOfficeActivity(app.controlDb, conversation, request.auth)) return reply.code(404).send({ error: 'conversation not found' });
+      const options = z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }).safeParse(request.query);
+      if (!options.success) return reply.code(400).send({ error: 'invalid history limit' });
+      return reply.send({ conversation, ...await readOfficeConversationActivityHistory(app.controlDb, id, options.data.limit, version.data.activity_version === '2' ? 2 : 1) });
+    }
     const messages = await listMessages(app.controlDb, id);
     return reply.send({ conversation, messages });
+  });
+
+  app.get('/conversations/:id/activity/:invocationId', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+    const userId = requireUserId(request);
+    const params = z.object({ id: z.string().uuid(), invocationId: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.code(400).send({ error: 'invalid activity identity' });
+    const conversation = await getConversationForRequest(app.controlDb, params.data.id, userId, request);
+    if (!conversation) return reply.code(404).send({ error: 'conversation not found' });
+    if (!await canReadOfficeActivity(app.controlDb, conversation, request.auth)) return reply.code(404).send({ error: 'conversation not found' });
+    const details = await readOfficeActivityDetails(app.controlDb, { conversationId: conversation.id, invocationId: params.data.invocationId });
+    if (!details) return reply.code(404).send({ error: 'activity details not found' });
+    return reply.send(details);
   });
 
   // ── DELETE /conversations/:id ────────────────────────────────────────────
@@ -494,11 +870,12 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
     const { id } = request.params as { id: string };
 
-    const conversation = await getConversation(app.controlDb, id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
 
+    if (await isOfficeClientConversation(app.controlDb, id)) return reply.code(409).send({ error: 'Continue this conversation through an Office client.', code: 'office_client_conversation_required' });
     await deleteConversation(app.controlDb, id, userId);
     return reply.code(204).send();
   });
@@ -513,6 +890,9 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
     const { id } = request.params as { id: string };
     const body = patchConversationBody.parse(request.body);
+
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
+    if (!conversation) return reply.code(404).send({ error: 'conversation not found' });
 
     // Persists the picker choice so regenerate/resume replay on the same model.
     const updated = await updateConversationModel(app.controlDb, id, userId, resolveAssistantModel(body.model));
@@ -547,7 +927,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     // Ownership check up front so a bad id 404s without touching the store's
     // transaction (duplicateConversation throws for the same case, but this
     // gives an early, cheap, consistent 404 path with the rest of the file).
-    const conversation = await getConversation(app.controlDb, id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
@@ -584,14 +964,37 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
 
-    const { conversation_id, message, model } = parsed.data;
+    const { conversation_id, message, model, activity_version } = parsed.data;
 
     // Ownership check BEFORE sending SSE headers — once headers are sent we
     // cannot return a JSON 404.
-    const conversation = await getConversation(app.controlDb, conversation_id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, conversation_id, userId, request);
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
+
+    if (conversation.origin === 'office' && await isOfficeClientConversation(app.controlDb, conversation.id)) return reply.code(409).send({ error: 'Continue this conversation through an Office client.', code: 'office_client_conversation_required' });
+
+    /**
+     * Eligibility, also before headers. The loop rechecks it per request, but
+     * a lost entitlement should not open a stream first.
+     */
+    const turnModel = resolveAssistantModel(model, conversation.model);
+    const officeAccess = await officeTurnAccessOutcome(conversation, userId, turnModel);
+    if (!officeAccess.ok) {
+      return reply.code(officeAccess.code).send({ error: officeAccess.error });
+    }
+
+    /**
+     * Office Ask tools, resolved BEFORE the stream opens: an owner's Office
+     * conversation may receive the skill creator and the org integration
+     * reader; a member's and every dashboard conversation get `{}`.
+     */
+    const officeAsk = await resolveOfficeAskExecutors({
+      controlPool: app.controlDb,
+      conversation,
+      userId,
+    });
 
     // Extract JWT verbatim from Authorization header for the loop / gateway.
     const authHeader = request.headers.authorization ?? '';
@@ -624,22 +1027,31 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userId,
         jwt,
         userMessage: message,
-        // Resolve rather than passing the parsed value straight through: the
-        // zod default only fires when `model` is absent, so an explicit empty
-        // or whitespace id would otherwise reach the gateway verbatim.
-        model: resolveAssistantModel(model),
+        recordOfficeActivity: activity_version !== undefined,
+        model: turnModel,
         pool: app.controlDb,
         organizationId: readOrgId(request),
+        ...officeAsk,
       });
 
+      const activity = createOfficeActivityProjector();
       for await (const event of gen) {
         publishEvent(conversation_id, event);
+        // Projection still observes every event when a browser disconnects.
+        const legacyStep = activity_version ? activity.observe(event) : null;
+        const step = activity_version === 2 ? readOfficeActivityObservation(event)?.step ?? legacyStep : legacyStep;
         if (clientDisconnected) continue;
-        reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+        if (!activity_version) reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+        else {
+          if (step) reply.raw.write(`data: ${JSON.stringify({ type: 'activity', step })}\n\n`);
+          if (['token', 'assistant_message', 'done', 'title_updated', 'blocked'].includes(event.type)) reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+          else if (event.type === 'approval_required') reply.raw.write(`data: ${JSON.stringify({ type: event.type, approval_id: event.approval_id, tool_name: event.tool_name, sensitivity: event.sensitivity })}\n\n`);
+          else if (event.type === 'error') reply.raw.write(`data: ${JSON.stringify({ type: 'error', message: publicAgentErrorMessage(event.message) })}\n\n`);
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const errEvent = { type: 'error' as const, message: msg };
+      const errEvent = { type: 'error' as const, message: activity_version ? publicAgentErrorMessage(msg) : msg };
       publishEvent(conversation_id, errEvent);
       if (!clientDisconnected) reply.raw.write(`data: ${JSON.stringify(errEvent)}\n\n`);
     } finally {
@@ -655,7 +1067,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
     const userId = requireUserId(request);
     const { id } = request.params as { id: string };
-    const conversation = await getConversation(app.controlDb, id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
     if (!conversation) return reply.code(404).send({ error: 'conversation not found' });
 
     // reply.hijack() bypasses Fastify's onSend (where @fastify/cors normally
@@ -744,9 +1156,25 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
 
     // Ownership check BEFORE sending SSE headers — once headers are sent we
     // cannot return a JSON 404/400.
-    const conversation = await getConversation(app.controlDb, id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
+    }
+
+    if (conversation.origin === 'office' && await isOfficeClientConversation(app.controlDb, conversation.id)) return reply.code(409).send({ error: 'Continue this conversation through an Office client.', code: 'office_client_conversation_required' });
+
+    /**
+     * Eligibility BEFORE the destructive part of regenerate. Losing the
+     * entitlement must stop the spend — and must not delete a customer's
+     * messages on the way to discovering it cannot answer.
+     */
+    const officeAccess = await officeTurnAccessOutcome(
+      conversation,
+      userId,
+      resolveAssistantModel(conversation.model),
+    );
+    if (!officeAccess.ok) {
+      return reply.code(officeAccess.code).send({ error: officeAccess.error });
     }
 
     const target = await getMessageById(app.controlDb, id, messageId);
@@ -844,10 +1272,12 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const { app_id: appId, snapshot_id: snapshotId } = parsed.data;
 
     // 1. Ownership check.
-    const conversation = await getConversation(app.controlDb, id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
+
+    if (conversation.origin === 'office' && await isOfficeClientConversation(app.controlDb, conversation.id)) return reply.code(409).send({ error: 'Continue this conversation through an Office client.', code: 'office_client_conversation_required' });
 
     // Extract JWT verbatim from Authorization header, same as /messages.
     const authHeader = request.headers.authorization ?? '';
@@ -939,7 +1369,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const userId = requireUserId(request);
     const { id, app_id: appId } = request.params as { id: string; app_id: string };
 
-    const conversation = await getConversation(app.controlDb, id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
     if (!conversation) return reply.code(404).send({ error: 'conversation not found' });
 
     const authHeader = request.headers.authorization ?? '';
@@ -994,7 +1424,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const appId = q.app_id;
 
     // 1. Ownership check.
-    const conversation = await getConversation(app.controlDb, id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
@@ -1062,7 +1492,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const { app_id: appId, snapshot_id: snapshotId, label } = parsed.data;
 
     // 1. Ownership check.
-    const conversation = await getConversation(app.controlDb, id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
@@ -1098,7 +1528,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
 
     // Ownership check
-    const conversation = await getConversation(app.controlDb, id, userId);
+    const conversation = await getConversationForRequest(app.controlDb, id, userId, request);
     if (!conversation) {
       return reply.code(404).send({ error: 'conversation not found' });
     }
@@ -1152,7 +1582,77 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const org = await resolveCallerOrgId(app.controlDb, request, userId);
     if (!org.ok) return reply.code(org.code).send({ error: org.error });
 
-    return reply.send({ approvals: await listPendingByOrg(app.controlDb, org.orgId) });
+    const approvals = await listPendingByOrg(app.controlDb, org.orgId);
+    const includeHistory = (request.query as { history?: string })?.history === '1';
+    const project = (approval: OrgApproval) => projectOrgApproval(app.controlDb, approval, org.orgId, userId, request.auth?.authMethod);
+    const [pending, history] = await Promise.all([
+      Promise.all(approvals.map(project)),
+      includeHistory ? listRecentResolvedByOrg(app.controlDb, org.orgId).then(rows => Promise.all(rows.map(project))) : Promise.resolve(undefined),
+    ]);
+    const preparations = await explainReviewPreparations(app.controlDb, org.orgId, userId, await listReviewPreparations(app.controlDb, org.orgId));
+    return reply.send({ approvals: pending, preparations, ...(history ? { history } : {}) });
+  });
+
+  // ── GET /operator/approvals/:id ──────────────────────────────────────────
+  //
+  // ONE approval, including a resolved one. The list above is pending-only by
+  // design, so a smoke or ops check could never observe the outcome it just
+  // approved — the gap that made the Office canary verify resolutions by hand
+  // in the database.
+  //
+  // Scoped exactly like the list route: membership of the organization that
+  // owns the approval's conversation is what authorises the read, and the
+  // lookup (`getApprovalForOrg`) applies the operator/Office-origin predicate.
+  // The response is a PROJECTION — id, status, timestamps, source and tool
+  // name only. No tool arguments, recorded operation, or transcript: observing
+  // a decision must not become a way to read one organization's conversation.
+  app.get('/operator/approvals/:id', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const org = await resolveCallerOrgId(app.controlDb, request, userId);
+    if (!org.ok) return reply.code(org.code).send({ error: org.error });
+
+    const { id } = request.params as { id: string };
+    const approval = await getApprovalForOrg(app.controlDb, id, org.orgId);
+    if (!approval) return reply.code(404).send({ error: 'approval not found' });
+
+    return reply.send({ approval: await projectOrgApproval(app.controlDb, approval, org.orgId, userId, request.auth?.authMethod) });
+  });
+
+  // ── GET /operator/approvals/:id/conversation ─────────────────────────────
+  //
+  // The prose window that led to a decision. Membership of the approval's
+  // organization authorises the read; the response carries only user/assistant
+  // text up to the approval's turn. Tool rows, args and results never leave the
+  // server, and the window is capped because the operator conversation is one
+  // per organization forever.
+  app.get('/operator/approvals/:id/conversation', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+
+    const userId = requireUserId(request);
+    const org = await resolveCallerOrgId(app.controlDb, request, userId);
+    if (!org.ok) return reply.code(org.code).send({ error: org.error });
+
+    const rawLimit = (request.query as { limit?: string } | undefined)?.limit;
+    const limit = rawLimit === undefined
+      ? 20
+      : /^\d+$/.test(rawLimit) ? Number(rawLimit) : Number.NaN;
+    if (!Number.isFinite(limit) || limit < 1 || limit > 50) {
+      return reply.code(400).send({ error: 'limit must be an integer between 1 and 50' });
+    }
+
+    const { id } = request.params as { id: string };
+    const approval = await getApprovalForOrg(app.controlDb, id, org.orgId);
+    if (!approval) return reply.code(404).send({ error: 'approval not found' });
+
+    const window = await listApprovalConversation(app.controlDb, {
+      conversationId: approval.conversationId,
+      turnMessageId: approval.turnMessageId,
+      approvalCreatedAt: new Date(approval.createdAt),
+      limit,
+    });
+    return reply.send(window);
   });
 
   // ── GET /operator/traces ─────────────────────────────────────────────────
@@ -1243,6 +1743,22 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
   //
   // Execution goes through executeOnce, which holds an advisory lock on the
   // approval id so a retried approve fires the tool once.
+  app.post('/operator/approvals/:id/request-review', async (request, reply) => {
+    if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
+    if (!z.object({}).strict().safeParse(request.body ?? {}).success) return reply.code(400).send({ error: 'No replacement operation is accepted.' });
+    const userId = requireUserId(request);
+    const org = await resolveCallerOrgId(app.controlDb, request, userId);
+    if (!org.ok) return reply.code(org.code).send({ error: org.error });
+    if (request.auth?.authMethod !== 'jwt' || !await isOrganizationOwner(app.controlDb, org.orgId, userId)) return reply.code(403).send({ error: 'An organization owner session is required.' });
+    const { id } = request.params as { id: string };
+    const approval = await getApprovalForOrg(app.controlDb, id, org.orgId);
+    if (!approval) return reply.code(404).send({ error: 'approval not found' });
+    const access = await evaluateOperatorAccess({ organizationId: org.orgId, actorUserId: userId, origin: approval.source, phase: 'run' });
+    const outcome = await requestApprovalReview(app.controlDb, { approval, organizationId: org.orgId, actorUserId: userId, mayRun: access.allowed });
+    if (!outcome.ok) return reply.code(409).send({ error: 'Review is resolved or execution requires reconciliation.' });
+    return reply.send(outcome);
+  });
+
   app.post('/operator/approvals/:id/resolve', async (request, reply) => {
     if (!isEnabled()) return reply.code(404).send({ error: 'not enabled' });
 
@@ -1257,11 +1773,19 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const authHeader = request.headers.authorization ?? '';
     const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
 
+    if (parsed.data.status === 'approved') {
+      const pending = await getApprovalForOrg(app.controlDb, approvalId, org.orgId);
+      if (pending && await isOfficeClientConversation(app.controlDb, pending.conversationId)) return reply.code(409).send({ error: 'Use the Office client browser confirmation for this decision.', code: 'office_client_confirmation_required' });
+    }
     const outcome = await resolveOperatorApproval(app.controlDb, {
       approvalId,
       orgId: org.orgId,
       jwt,
       userId,
+      // Consequential Office approvals require a HUMAN session: a service or
+      // API key can list and deny, but only a person (and, below, only an
+      // owner) may authorise a deployment or live-data change.
+      authMethod: request.auth?.authMethod,
       resolution:
         parsed.data.status === 'approved'
           ? { status: 'approved' }
@@ -1269,7 +1793,8 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     });
 
     if (!outcome.ok) return reply.code(outcome.code).send({ error: outcome.error });
-    return reply.send({ ok: true });
+    const resolved = await getApprovalForOrg(app.controlDb, approvalId, org.orgId);
+    return reply.send({ ok: true, ...(resolved ? { approval: await projectOrgApproval(app.controlDb, resolved, org.orgId, userId, request.auth?.authMethod) } : {}) });
   });
 
   // ── POST /approvals/:id/resolve ───────────────────────
@@ -1294,16 +1819,107 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     const authHeader = request.headers.authorization ?? '';
     const jwt = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
 
+    // ── Ownership + provenance (Task 9) ────────────────────────────────────
+    //
+    // The approval must belong to the caller AND to a conversation the caller
+    // can reach from the organization this request names. Checking that here,
+    // before anything executes, is what keeps an Office approval from being
+    // resolved through a different organization's context — and it is the
+    // same 404 whether the conversation is missing or merely foreign, so
+    // nothing leaks across the boundary.
+    const approval = await getApproval(app.controlDb, approvalId, userId);
+    if (!approval) {
+      return reply.code(404).send({ error: 'approval not found' });
+    }
+    const conversation = await getConversation(app.controlDb, approval.conversationId, userId);
+    if (!conversation || !isConversationReachableFromOrg(conversation, readOrgId(request))) {
+      return reply.code(404).send({ error: 'approval not found' });
+    }
+
+    const isOffice = conversation.origin === 'office';
+    const officeOrganizationId = isOffice ? conversation.organizationId : null;
+    const clientCoordinated = isOffice && await isOfficeClientConversation(app.controlDb, conversation.id);
+    if (clientCoordinated && status === 'approved') return reply.code(409).send({ error: 'Use the Office client browser confirmation for this decision.', code: 'office_client_confirmation_required' });
+
+    /**
+     * ── The Office consequential gate, foreground (Task 9) ────────────────
+     *
+     * Byte-for-byte the same contract as `resolveOperatorApproval`'s: a HUMAN
+     * session, a CURRENT OWNER of the conversation's organization, an
+     * entitlement that still allows execution, and a recorded immutable
+     * operation. `office-conversations.test.ts` pins the member-asks /
+     * owner-approves split through the org route; this route is the day the
+     * approver is also the author, and it must not be a weaker path.
+     *
+     * Denial is NOT gated — refusing old work must remain possible with no
+     * plan, no credits and no current owner.
+     */
+    if (isOffice && status === 'approved') {
+      if (request.auth?.authMethod !== undefined && request.auth.authMethod !== 'jwt') {
+        return reply.code(403).send({ error: 'a human organization-owner session is required to approve this action' });
+      }
+      if (!(await isOrganizationOwner(app.controlDb, officeOrganizationId as string, userId))) {
+        return reply.code(403).send({ error: 'only an organization owner may approve this action' });
+      }
+      const access = await evaluateOperatorAccess({
+        organizationId: officeOrganizationId as string,
+        phase: 'execute',
+        origin: 'office',
+        actorUserId: userId,
+        model: resolveAssistantModel(conversation.model),
+      });
+      if (!access.allowed) {
+        return reply.code(409).send({ error: access.reason ?? 'service_unavailable' });
+      }
+      if (!approval.approvedOperation) {
+        return reply.code(409).send({ error: 'approval_operation_missing: this approval must be re-proposed' });
+      }
+    }
+
     // Ownership + status checks, tool execution/denial-synthesis, and the
     // follow-up tool-result row are all done BEFORE any SSE headers are
     // sent — once hijacked we can't return a JSON 404/409/400.
-    const outcome = await resolveApprovalAndPersistResult(app.controlDb, {
-      approvalId,
-      userId,
-      jwt,
-      resolution:
-        status === 'approved' ? { status: 'approved', trustScope } : { status: 'denied', reason },
-    });
+    //
+    // Office approvals execute through the SAME bridge the org feed uses —
+    // executeOnce (exactly-once), the recorded-operation check, and the
+    // substrate escalation cleanup. There is deliberately no second executor.
+    const outcome = isOffice
+      ? await completeApprovalResolution(app.controlDb, {
+          approval,
+          resolution:
+            status === 'approved' ? { status: 'approved', trustScope } : { status: 'denied', reason },
+          resolvedBy: userId,
+          execute: (a, resolutionPool) =>
+            executeApprovedOperatorTool(resolutionPool ?? app.controlDb, {
+              approvalId: a.id,
+              name: a.toolName,
+              args: a.toolArgs,
+              jwt,
+              orgId: officeOrganizationId as string,
+              traceId: a.traceId,
+              approval: a,
+              officeConsequential: true,
+              actorUserId: userId,
+              origin: 'office',
+              cache: getSharedWorkingTreeCache(),
+              treeStore: getSharedDeployTreeStore(),
+            }),
+          denyCleanup: (a, resolutionPool) =>
+            rejectEscalatedSubstrateAction(resolutionPool ?? app.controlDb, {
+              approvalId: a.id,
+              approval: { toolName: a.toolName, toolArgs: a.toolArgs },
+              reason,
+              jwt,
+              orgId: officeOrganizationId as string,
+            }),
+        })
+      : await resolveApprovalAndPersistResult(app.controlDb, {
+          approvalId,
+          userId,
+          jwt,
+          resolution:
+            status === 'approved' ? { status: 'approved', trustScope } : { status: 'denied', reason },
+        });
 
     if (!outcome.ok) {
       return reply.code(outcome.code).send({ error: outcome.error });
@@ -1330,8 +1946,15 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
     });
 
     try {
-      const conversation = await getConversation(app.controlDb, conversationId, userId);
-      const model = resolveAssistantModel(conversation?.model);
+      // Read once above, before the hijack — no second lookup, and no chance
+      // of the resumed turn running on a row the gate did not see.
+      if (clientCoordinated) {
+        const done = { type: 'done' as const };
+        publishEvent(conversationId, done);
+        if (!clientDisconnected) reply.raw.write(`data: ${JSON.stringify(done)}\n\n`);
+        return;
+      }
+      const model = resolveAssistantModel(conversation.model);
 
       // Empty userMessage: the resumed turn's history already contains the
       // just-persisted tool-result row (via resolveApprovalAndPersistResult).
@@ -1342,6 +1965,7 @@ export async function dashboardAgentRoutes(app: FastifyInstance) {
         userId,
         jwt,
         userMessage: '',
+        ...(conversation.origin === 'office' ? { officeActivityResumeApprovalId: approvalId } : {}),
         model,
         pool: app.controlDb,
         organizationId: readOrgId(request),

@@ -1,5 +1,30 @@
 import pg from 'pg';
 import { operatorUserId } from './operator-store.js';
+import { readPreparedProposal, readExecutionOutcome, type PreparedProposal, type ExecutionOutcome } from './approval-proposal.js';
+import {
+  captureApprovalOperation,
+  readApprovedOperation,
+  type ApprovedOperation,
+} from './approval-operation.js';
+
+export type ApprovalReferenceKind =
+  | 'entity'
+  | 'record'
+  | 'file'
+  | 'app'
+  | 'artifact'
+  | 'message';
+
+export type ApprovalReference = {
+  kind: ApprovalReferenceKind;
+  /** Stable id when the tool result has one; used for dedupe and client
+   *  resolution. Never displayed. */
+  id?: string;
+  /** Human label from the tool result. Never an id. */
+  label: string;
+  /** Optional second line from the tool result. Never raw JSON. */
+  detail?: string;
+};
 
 export type Approval = {
   id: string;
@@ -40,14 +65,32 @@ export type Approval = {
    * actually continues the gated turn.
    */
   resumedAt: string | null;
+  /**
+   * The server-owned record of the operation a human is approving (Task 8).
+   *
+   * Downstream tools still receive `toolArgs` only; this is the immutable
+   * identity the replay verifies against, including a digest of the proposed
+   * build artifact for deployment tools. Null for rows that predate the
+   * column and for approvals created outside the operator path — see
+   * `readApprovedOperation`, which also turns a corrupted value into null so
+   * a hand-inserted row can never authorise an execution.
+   */
+  approvedOperation: ApprovedOperation | null;
+  /** The records, files and apps the turn read before proposing this action.
+   *  Empty for rows that predate the column and for payloads the extractor
+   *  cannot prove. Never a tool name, raw id or JSON blob. */
+  references: ApprovalReference[];
+  /** Null for legacy rows; never reconstructed from transcript prose. */
+  proposalDetails?: PreparedProposal | null;
+  executionOutcome?: ExecutionOutcome | null;
 };
 
 const APPROVAL_COLS = `id, conversation_id, turn_message_id, tool_name, tool_args,
   sensitivity, status, trust_scope, deny_reason, created_at, resolved_at, resolved_by,
-  trace_id, resumed_at`;
+  trace_id, resumed_at, approved_operation, "references", proposal_details, execution_outcome`;
 
 /** Same columns as APPROVAL_COLS, `a.`-prefixed for queries that JOIN dashboard_agent_conversations. */
-const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by, a.trace_id, a.resumed_at`;
+const APPROVAL_COLS_JOIN = `a.id, a.conversation_id, a.turn_message_id, a.tool_name, a.tool_args, a.sensitivity, a.status, a.trust_scope, a.deny_reason, a.created_at, a.resolved_at, a.resolved_by, a.trace_id, a.resumed_at, a.approved_operation, a."references", a.proposal_details, a.execution_outcome`;
 
 function rowToApproval(row: any): Approval {
   return {
@@ -65,6 +108,42 @@ function rowToApproval(row: any): Approval {
     resolvedBy: row.resolved_by ?? null,
     traceId: row.trace_id ?? null,
     resumedAt: row.resumed_at ?? null,
+    approvedOperation: readApprovedOperation(row.approved_operation),
+    references: Array.isArray(row.references) ? row.references : [],
+    proposalDetails: readPreparedProposal(row.proposal_details),
+    executionOutcome: readExecutionOutcome(row.execution_outcome),
+  };
+}
+
+/** Internal refresh after the caller has authorized this exact conversation. */
+export async function getApprovalInConversation(pool: pg.Pool, id: string, conversationId: string): Promise<Approval | null> {
+  const result = await pool.query(`SELECT ${APPROVAL_COLS} FROM dashboard_agent_approvals WHERE id=$1 AND conversation_id=$2`, [id, conversationId]);
+  return result.rows[0] ? rowToApproval(result.rows[0]) : null;
+}
+
+/**
+ * A pending decision as the ORGANIZATION feed sees it (Task 9).
+ *
+ * `source` says which surface raised it, and it is deliberately the only new
+ * fact:
+ *
+ *   - `'operator'` — the headless operator's own conversation (the
+ *     `operator:<org>` sentinel author);
+ *   - `'office'` — a foreground Ask conversation created by a MEMBER of the
+ *     organization. The owner must be able to see and answer it from the same
+ *     queue as background work, or the owner-only approval contract would
+ *     have no UI.
+ *
+ * It carries nothing from the conversation itself: no message content, no
+ * transcript, no title. The decision payload was already the pending tool
+ * call; a member's chat stays theirs.
+ */
+export type OrgApproval = Approval & { source: 'operator' | 'office' };
+
+function rowToOrgApproval(row: any): OrgApproval {
+  return {
+    ...rowToApproval(row),
+    source: row.source === 'office' ? 'office' : 'operator',
   };
 }
 
@@ -75,6 +154,12 @@ function rowToApproval(row: any): Approval {
 export async function createApproval(
   pool: pg.Pool,
   input: {
+    /**
+     * Pre-allocated id, used by deploy approvals so the persisted source tree
+     * and the approval row share one key. Omitted for every other approval;
+     * the database default then applies.
+     */
+    id?: string;
     conversationId: string;
     turnMessageId: string;
     toolName: string;
@@ -86,14 +171,34 @@ export async function createApproval(
      * for the human assistant, which has no distributed trace.
      */
     traceId?: string | null;
+    /**
+     * The server-owned operation being approved. Supplied by the operator
+     * loop's approval gate (loop.ts); absent for the human assistant's
+     * sensitivity gate, whose approvals keep their existing behaviour.
+     */
+    approvedOperation?: ApprovedOperation | null;
+    /** Evidence the turn read before the gate. Defaults to empty. */
+    references?: ApprovalReference[];
+    proposalDetails?: PreparedProposal | null;
   }
 ): Promise<Approval> {
   const result = await pool.query(
     `INSERT INTO dashboard_agent_approvals
-     (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id)
-     VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+     (id, conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id, approved_operation, "references", proposal_details)
+     VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, 'pending', $7, $8, $9, $10)
      RETURNING ${APPROVAL_COLS}`,
-    [input.conversationId, input.turnMessageId, input.toolName, JSON.stringify(input.toolArgs), input.sensitivity, input.traceId ?? null]
+    [
+      input.id ?? null,
+      input.conversationId,
+      input.turnMessageId,
+      input.toolName,
+      JSON.stringify(input.toolArgs),
+      input.sensitivity,
+      input.traceId ?? null,
+      input.approvedOperation ? JSON.stringify(input.approvedOperation) : null,
+      JSON.stringify(input.references ?? []),
+      input.proposalDetails ? JSON.stringify(input.proposalDetails) : null,
+    ]
   );
 
   return rowToApproval(result.rows[0]);
@@ -261,10 +366,22 @@ export async function createSubstrateEscalationApproval(
 
     const inserted = await client.query(
       `INSERT INTO dashboard_agent_approvals
-       (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id)
-       VALUES ($1, $2, $3, $4, 'destructive', 'pending', $5)
+       (conversation_id, turn_message_id, tool_name, tool_args, sensitivity, status, trace_id, approved_operation)
+       VALUES ($1, $2, $3, $4, 'destructive', 'pending', $5, $6)
        RETURNING ${APPROVAL_COLS}`,
-      [input.conversationId, input.pausedMessageId, SUBSTRATE_ESCALATION_TOOL, JSON.stringify(toolArgs), input.traceId ?? null],
+      [
+        input.conversationId,
+        input.pausedMessageId,
+        SUBSTRATE_ESCALATION_TOOL,
+        JSON.stringify(toolArgs),
+        input.traceId ?? null,
+        // The operation here is built above from a server-issued action id,
+        // so it is immutable by construction — there is no model argument or
+        // working-tree artifact to re-verify. Recording it keeps every
+        // operator approval row uniform: an Office approval with no recorded
+        // operation means "re-propose".
+        JSON.stringify(captureApprovalOperation({ toolName: SUBSTRATE_ESCALATION_TOOL, args: toolArgs })),
+      ],
     );
 
     const marked = await client.query(
@@ -314,37 +431,40 @@ export async function getApproval(
 }
 
 /**
- * Org-scoped lookup for the OPERATOR's approvals: any member of the org may
- * resolve them (the operator conversation's user_id is the sentinel
- * `operator:<org>`, which no human user_id ever matches, so this is the only
- * path a human can use to reach it).
+ * Org-scoped lookup for approvals the caller's organization may resolve.
  *
- * The `user_id` predicate is load-bearing, not decorative. The operator
- * approval routes authorise on org membership alone, so without it this would
- * match ANY conversation carrying an organization_id. That is safe today only
- * because createConversation never sets that column — an unstated invariant
- * nothing enforces. The moment a migration, an analytics feature, or org-scoped
- * chat backfills it, these routes would silently widen to "any org member can
- * read another member's tool_args and execute their gated tool calls". Scope
- * structurally instead of relying on that accident.
+ * An ordinary operator approval is reachable here because the operator
+ * conversation's `user_id` is the `operator:<org>` sentinel — no human
+ * user_id ever matches, so this is the only path a human can use to reach it.
  *
- * operatorUserId is the single source of truth for the sentinel format; do not
- * inline the `operator:` prefix here.
+ * Task 9 WIDENS this to Office-origin FOREGROUND approvals: a member asked in
+ * the customer Office, the turn paused for a human, and the owner decides it
+ * from the same organization queue. The predicate is exact:
+ * `c.user_id = $3 OR (c.origin = 'office' AND c.organization_id = $2)` — the
+ * organization match is already the outer condition, so an Office approval
+ * from another org can never appear. It does NOT widen to "any conversation
+ * carrying an organization_id": a dashboard conversation that one day carries
+ * one stays invisible here.
+ *
+ * `source` is returned so the caller can tell the two apart without looking at
+ * anything private.
  */
 export async function getApprovalForOrg(
   pool: pg.Pool,
   id: string,
   orgId: string
-): Promise<Approval | null> {
+): Promise<OrgApproval | null> {
   const result = await pool.query(
-    `SELECT ${APPROVAL_COLS_JOIN}
+    `SELECT ${APPROVAL_COLS_JOIN},
+            CASE WHEN c.user_id = $3 THEN 'operator' ELSE 'office' END AS source
      FROM dashboard_agent_approvals a
      JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
-     WHERE a.id = $1 AND c.organization_id = $2 AND c.user_id = $3`,
+     WHERE a.id = $1 AND c.organization_id = $2
+       AND (c.user_id = $3 OR c.origin = 'office')`,
     [id, orgId, operatorUserId(orgId)]
   );
 
-  return result.rows.length === 0 ? null : rowToApproval(result.rows[0]);
+  return result.rows.length === 0 ? null : rowToOrgApproval(result.rows[0]);
 }
 
 /**
@@ -439,23 +559,35 @@ export async function listPendingGatedCalls(
 }
 
 /**
- * List an org's pending OPERATOR approvals (the operator conversation's
- * user_id sentinel excludes them from any user-scoped query).
- *
- * Scoped to the operator conversation, not merely to the org — see
- * getApprovalForOrg for why that predicate is load-bearing.
+ * List an organization's pending approvals — background operator work AND
+ * Office-origin foreground decisions (Task 9; see getApprovalForOrg for the
+ * exact predicate and why it does not widen further).
  */
-export async function listPendingByOrg(pool: pg.Pool, orgId: string): Promise<Approval[]> {
+export async function listPendingByOrg(pool: pg.Pool, orgId: string): Promise<OrgApproval[]> {
   const result = await pool.query(
-    `SELECT ${APPROVAL_COLS_JOIN}
+    `SELECT ${APPROVAL_COLS_JOIN},
+            CASE WHEN c.user_id = $2 THEN 'operator' ELSE 'office' END AS source
      FROM dashboard_agent_approvals a
      JOIN dashboard_agent_conversations c ON a.conversation_id = c.id
-     WHERE c.organization_id = $1 AND c.user_id = $2 AND a.status = 'pending'
+     WHERE c.organization_id = $1
+       AND (c.user_id = $2 OR c.origin = 'office')
+       AND a.status = 'pending'
      ORDER BY a.created_at ASC`,
     [orgId, operatorUserId(orgId)]
   );
 
-  return result.rows.map(rowToApproval);
+  return result.rows.map(rowToOrgApproval);
+}
+
+export async function listRecentResolvedByOrg(pool: pg.Pool, orgId: string): Promise<OrgApproval[]> {
+  const result = await pool.query(
+    `SELECT ${APPROVAL_COLS_JOIN}, CASE WHEN c.user_id=$2 THEN 'operator' ELSE 'office' END AS source
+     FROM dashboard_agent_approvals a JOIN dashboard_agent_conversations c ON c.id=a.conversation_id
+     WHERE c.organization_id=$1 AND (c.user_id=$2 OR c.origin='office') AND a.status!='pending'
+     ORDER BY a.resolved_at DESC NULLS LAST,a.created_at DESC LIMIT 50`,
+    [orgId,operatorUserId(orgId)],
+  );
+  return result.rows.map(rowToOrgApproval);
 }
 
 /**

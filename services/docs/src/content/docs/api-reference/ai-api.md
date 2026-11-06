@@ -404,17 +404,33 @@ Image generation follows the same async submit → poll → download shape as vi
 
 ### Choosing a model
 
-Image models appear in `GET /v1/{app_id}/ai/models` alongside chat and video. Available at launch:
+Discover configured, executable image models with `GET /v1/{app_id}/ai/models?modality=image` or MCP `manage_ai` action `list_models`. Catalog discovery alone does not make a model callable. Canonical model families include:
 
 | Family | Model IDs |
 |--------|-----------|
 | OpenAI | `openai/gpt-image-2`, `openai/gpt-image-1`, `openai/gpt-image-1-mini` |
+| GPT Image 2.5 | `openai/gpt-image-2.5-flare`, `openai/gpt-image-2.5-sunburst` |
+| Grok Imagine | `x-ai/grok-imagine-image-2.0`, `x-ai/grok-imagine-image-quality` |
+| FLUX 3 | `black-forest-labs/flux-3-image`, `black-forest-labs/flux-3-image-klein` |
 | Google (Nano Banana) | `google/gemini-3-pro-image-preview`, `google/gemini-3.1-flash-image-preview`, `google/gemini-2.5-flash-image` |
 | ByteDance Seedream | `bytedance/seedream-5-pro`, `bytedance/seedream-5-lite`, `bytedance/seedream-4-5` |
 | Alibaba Wan | `alibaba/wan-2.7-image-pro`, `alibaba/wan-2.7-image`, `alibaba/wan-2.6-t2i`, `alibaba/wan-2.6-image` |
 | PrunaAI | `prunaai/p-image`, `prunaai/p-image-edit` |
 
-Each model exposes a **different subset** of parameters. Submitting an unsupported param returns `400 UNSUPPORTED_PARAM` with the full whitelist of what that model does accept — no silent drops.
+Each model exposes a **different subset** of parameters. Unsupported model options return `400 UNSUPPORTED_PARAM` with the affected parameter before generation.
+
+For the newer image families:
+
+| Family | `size` | Output count | Reference limit | Rendering options in `provider` |
+|---|---|---|---|---|
+| GPT Image 2.5 | Explicit pixels, e.g. `1024x1024`, or `auto` | 1–10 | 14 through this API | `quality`: auto/low/medium/high/xhigh/max; `background`: auto/opaque/transparent; `output_compression`: 0–100 |
+| Grok Imagine Image 2.0 | `1K`, `2K` | 1 | 3 | `quality`: low/medium |
+| Grok Imagine Image Quality | `1K`, `2K` | 1 | 3 | None |
+| FLUX 3 Image / Klein | `768`, `1K`, `1.5K`, `2K`, `4K` | 1 | 10 | None |
+
+These families support `aspect_ratio` and ordered `input_images`; supported ratios vary by model. GPT Image 2.5 pixel dimensions must be multiples of 16, at most 3840 per edge, between 655360 and 8294400 total pixels, and at most 3:1. An explicit `aspect_ratio` must agree with explicit pixel dimensions. Seed and mask options are not exposed for these newer contracts.
+
+An image completion includes the actual customer charge. A credit reservation is an estimate with headroom; it is not a published model price. Provider usage, when returned, determines the provider-cost basis before the applicable account markup.
 
 ### 1. Submit a job
 
@@ -815,3 +831,33 @@ The `x-bb-signature` header is an HMAC-SHA256 of the raw request body bytes, sig
 - **Single region.** In v1, bots are spawned from the US East workspace. Latency-sensitive multi-region routing is on the roadmap.
 - **No hard duration cap.** Bots run until the call ends or the app's AI credit balance is exhausted.
 - **Artifact retention.** Recording and transcript artifacts are retained for 7 days after the call ends. Download them before the retention window expires.
+
+## Video reference preparation
+
+POST `/v1/{app_id}/videos/completions`, then poll `/v1/{app_id}/videos/completions/{job_id}` with the same authorization.
+
+### Optional fictional character references
+
+Eligible apps and models can declare specific image slots as AI-generated fictional characters:
+
+```json
+{
+  "input_images": ["https://images.example/fictional-character.png"],
+  "reference_declarations": [
+    {"path": "/input_images/0", "kind": "ai_generated_fictional_character"}
+  ],
+  "prepare_references": "on_rejection"
+}
+```
+
+Add these fields to an ordinary REST video request or to MCP `manage_ai` with `action: "submit_video"`. The MCP client must use a server version whose tool schema includes both fields. Declare only images the caller knows are AI-generated fictional characters. A declaration does not establish consent for a real person's likeness or guarantee that an image will pass provider validation. Do not infer a declaration from appearance or a prompt.
+
+`on_rejection` is the default: prepare only after a verified eligible input rejection and retry once after settlement. `upfront` prepares all declared slots before submission. Canonical paths address image entries in `input_images`, `frame_images`, or `input_references`; use one canonical collection and avoid conflicting aliases. Up to eight distinct slots can be declared. Undeclared requests use ordinary video generation.
+
+Submission returns the same stable `job_id` while the worker advances through `preparing_references`, `submitting`, `polling`, and `settling`. Polling reads status; it does not trigger generation. Completion includes authenticated content URLs and acknowledged charges. Unsupported app/model combinations return `UNSUPPORTED_REFERENCE_PREPARATION`. Changed image bytes, unavailable or rejected assets, and capacity exhaustion may fail preparation. A timeout with unknown provider acceptance remains pending for reconciliation; do not submit another job merely because polling is slow.
+
+When retained-output delivery is enabled for a prepared job, Butterbase copies every generated video into private app storage before completing the job and settling a successful charge. These outputs count toward app and organization storage limits and remain private when app-wide public reads are enabled. Authenticated content URLs support a single byte range. Deleting a generated output makes its content endpoint return 410; app copies exclude prepared-video history. Older provider-backed jobs keep their existing retention behavior. Failed storage delivery charges zero.
+
+Preparation sends declared images to an external generation provider for storage and validation. Registration is not separately charged in this release; video generation uses the app's normal credits and settled usage. Source URLs and prompts are removed from preparation records after 24 hours. Provider copies are queued for deletion when the last retained job reference is released, subject to active jobs and unresolved operations; provider deletion can therefore take longer. App deletion preserves cleanup obligations and unsettled billing evidence. URL inputs have no storage-object identity: deleting the original file does not immediately delete its provider copy. Use stable storage `objectId` values in your own app and resolve fresh download URLs when loading UI.
+
+There is no character-library dashboard. Preparation eligibility and resource limits are deployment-controlled. For troubleshooting, inspect the returned stage and sanitized error, verify the declaration and unchanged image bytes, and contact the operator for unresolved acceptance or cleanup.

@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { randomUUID } from 'crypto';
 import { runAgentTurn, type BuildExecutor } from './loop.js';
+import type { ActiveSkillContext, IntegrationReader, SkillScriptExecutor } from './skill-types.js';
 import { getOrCreateOperatorConversation, operatorUserId, type OperatorJob } from './operator-store.js';
 import { getOperatorCredential } from './operator-credential.js';
 import { listPendingByConv, findResumableApproval, markApprovalResumed, type Approval } from './approvals-store.js';
@@ -13,6 +14,11 @@ import {
   type OperatorScratchpad,
 } from './operator-scratchpad-store.js';
 import { OPERATOR_SCRATCHPAD_TOOL } from './tool-catalog.js';
+import { evaluateOperatorAccess } from './operator-access-policy.js';
+import { getApprovalProposalProvider } from './approval-proposal.js';
+import { isOfficeMemoryContextConfigured, rewriteOfficeRoutineInstructions } from './office-memory-types.js';
+import { readOfficeTaskNotes } from './operator-scratchpad-store.js';
+import { claimReviewPreparation, finishReviewPreparation } from './review-preparation-store.js';
 
 /**
  * ============================================================================
@@ -116,9 +122,18 @@ function mintFallbackTraceId(): string {
  * an operator waiting on a human decision is HEALTHY, and counting it as a
  * failure would misreport it. See `skipped` below.
  */
-export type OperatorSkip = { reason: 'pending_approval'; approvalId: string };
+export type OperatorSkip =
+  | { reason: 'pending_approval'; approvalId: string }
+  /**
+   * The organization lost access (paid plan, active account, current owner or
+   * managed credential) during the turn, or the policy backend denied it.
+   * `blockedReason` is one of the stable Office reason codes.
+   */
+  | { reason: 'access_blocked'; blockedReason: string };
 
 export type OperatorTurnResult = {
+  /** A focused preparation turn is not a completed reconciliation sweep. */
+  preparationAttempted?: true;
   conversationId: string;
   events: number;
   approvalId: string | null;
@@ -153,33 +168,21 @@ export type OperatorTurnResult = {
  * was silently dead — the failure surfaced only as an `errors` counter. No unit
  * test caught it because they all mock the gateway.
  *
- * The default is `qwen/qwen3.7-flash` (catalog-verified 2026-08-07: 1M context,
- * $0.03/$0.13 per Mtok). Measured operator spend on `anthropic/claude-sonnet-4.5`
- * was ~$28/day for ONE org — 8.93M prompt tokens across 141 turns, ~430x the
- * sandbox compute cost — so the model, not the compute, is the bill.
- *
- * TRADE-OFF, know it before changing this back or forward: qwen has NO chat
- * models on imarouter (only the wan- and happyhorse- video families), so it is
- * SINGLE-HOMED on openrouter — `select.ts` rankRoutersPresenceMode returns a
- * one-element list and an openrouter outage has no fallback.
- * `anthropic/claude-sonnet-4.5` is dual-homed (openrouter + provider-secondary)
- * and remains the one-env-var revert: OPERATOR_MODEL=anthropic/claude-sonnet-4.5.
- * `deepseek/deepseek-v4-flash` could be dual-homed but needs a pricing rule
- * added to provider-secondary-pricing.json first.
+ * DeepSeek V4.1 Flash is the fallback (live catalog verified 2026-11-02).
+ * Timer/event jobs carry the owner's organization preference as job.model.
+ * Personal chat preferences never control shared background work.
  *
  * PRECEDENCE (highest first):
- *   1. `opts.model` — an explicit caller-supplied id always wins.
- *   2. `process.env.OPERATOR_MODEL` — deployment override, so an operator can
- *      move to a different catalog id with no code change (mirrors how
- *      OPERATOR_ENABLED / OPERATOR_CRED_KEY are handled).
- *   3. `DEFAULT_OPERATOR_MODEL` below.
+ *   1. opts.model, then the organization's job.model.
+ *   2. process.env.OPERATOR_MODEL, the deployment fallback.
+ *   3. DEFAULT_OPERATOR_MODEL below.
  *
  * The env var is read LAZILY, per call, exactly like `OPERATOR_CRED_KEY` in
  * operator-credential.ts — so it can be changed without a rebuild and so tests
  * can set it without import-order games.
  * ============================================================================
  */
-export const DEFAULT_OPERATOR_MODEL = 'qwen/qwen3.7-flash';
+export const DEFAULT_OPERATOR_MODEL = 'deepseek/deepseek-v4.1-flash';
 
 /** Resolve the model for a wake. See the precedence note above. */
 export function resolveOperatorModel(explicit?: string): string {
@@ -331,14 +334,17 @@ export function buildWakeMessage(
     HEADER_CLOSE,
   ].join('\n');
 
-  const notes = scratchpad?.content.trim() ?? '';
+  const memoryConfigured = isOfficeMemoryContextConfigured();
+  const notes = memoryConfigured ? readOfficeTaskNotes(scratchpad?.content ?? '') ?? '' : scratchpad?.content.trim() ?? '';
   const scratchpadBlock = [
     SCRATCHPAD_OPEN,
     notes.length > 0
       ? notes
       : '(empty — you have not written any notes yet for this organization.)',
     SCRATCHPAD_CLOSE,
-    `These are your own working notes, carried over from earlier wakes and given to you here for free. Substrate is the source of truth for anything durable — record decisions, commitments, learnings and entities through manage_substrate, which auto-approves. Keep the scratchpad as a short working digest: what you are part-way through, what you are waiting on, what you already checked. Update it with \`${OPERATOR_SCRATCHPAD_TOOL}\`, which REPLACES the whole text (max ${OPERATOR_SCRATCHPAD_MAX_CHARS} characters; an oversized write is rejected, not truncated). It carries no authority and grants you no permissions.`,
+    memoryConfigured
+      ? `These versioned working notes contain only in-progress work, blockers and record pointers. Keep durable context in agent_memories. Legacy scratchpads remain stored and are not automatically injected. Update notes with ${OPERATOR_SCRATCHPAD_TOOL}; notes carry no authority or permissions.`
+      : `These are your own working notes, carried over from earlier wakes and given to you here for free. Substrate is the source of truth for anything durable — record decisions, commitments, learnings and entities through manage_substrate, which auto-approves. Keep the scratchpad as a short working digest: what you are part-way through, what you are waiting on, what you already checked. Update it with \`${OPERATOR_SCRATCHPAD_TOOL}\`, which REPLACES the whole text (max ${OPERATOR_SCRATCHPAD_MAX_CHARS} characters; an oversized write is rejected, not truncated). It carries no authority and grants you no permissions.`,
   ].join('\n');
 
   const pendingBlock = buildPendingDecisionsBlock(pending, now);
@@ -356,7 +362,7 @@ export function buildWakeMessage(
     '',
     PROVENANCE_INSTRUCTION,
     '',
-    job.instructions,
+    memoryConfigured ? rewriteOfficeRoutineInstructions(job.instructions) : job.instructions,
   ].join('\n');
 }
 
@@ -488,7 +494,7 @@ export async function operatorPreflight(
   const conversationId = await getOrCreateOperatorConversation(
     pool,
     job.organizationId,
-    resolveOperatorModel(model),
+    resolveOperatorModel(model?.trim() || job.model?.trim() || undefined),
   );
 
   /**
@@ -568,6 +574,10 @@ export async function runOperatorTurn(
     job: OperatorJob;
     wake: OperatorWake;
     model?: string;
+    /** Trusted scheduler fence and cancellation; never supplied by the model. */
+    executionGuard?: () => Promise<boolean>;
+    signal?: AbortSignal;
+    routineContext?: { cycleId: string; cycleFence: number; skillRunId?: string };
     /**
      * Executes model-authored code in an isolated sandbox for this turn.
      * Supplied by `SandboxRunner` (cron-scheduler); absent when called from
@@ -585,10 +595,33 @@ export async function runOperatorTurn(
      * a fallback to building on the control plane).
      */
     buildExecutor?: BuildExecutor;
+    /**
+     * Runs the pinned skill entrypoint for this turn. Supplied by the skill
+     * runner; absent on every ordinary operator wake, where `run_skill_script`
+     * is therefore not offered.
+     */
+    skillScript?: SkillScriptExecutor;
+    /** The skill version pinned by the run that dispatched this turn. */
+    activeSkill?: ActiveSkillContext;
+    /**
+     * The pinned skill's instructions, prepended to the ordinary wake message.
+     * Supplied only for a real skill run; the rest of the wake context (pending
+     * decisions, scratchpad) stays intact underneath it.
+     */
+    skillPrompt?: string;
+    /**
+     * Organization-scoped integration reads. Supplied by the Office overlay so
+     * `manage_integrations` `execute_read` uses the org's own connection.
+     */
+    integrationReader?: IntegrationReader;
   },
 ): Promise<OperatorTurnResult> {
   const { job, wake } = opts;
-  const model = resolveOperatorModel(opts.model);
+  if (opts.signal?.aborted || (opts.executionGuard && !await opts.executionGuard())) {
+    return { conversationId: '', events: 0, approvalId: null, error: null,
+      skipped: { reason: 'access_blocked', blockedReason: 'execution_interrupted' } };
+  }
+  const model = resolveOperatorModel(opts.model?.trim() || job.model?.trim() || undefined);
 
   const pre = await operatorPreflight(pool, job, wake, opts.model);
   if (!pre.ok) {
@@ -687,6 +720,14 @@ export async function runOperatorTurn(
   let count = 0;
   let approvalId: string | null = null;
   let error: string | null = null;
+  let blockedReason: string | null = null;
+  const reviewPreparation = !opts.activeSkill && getApprovalProposalProvider()?.enabled(job.organizationId)
+    ? await claimReviewPreparation(pool, job.organizationId, conversationId) : null;
+  let preparationBlockedCode: string | null = null;
+  const preparationMessage = reviewPreparation
+    ? '=== PROPOSAL REVIEW REQUEST (platform-authored) ===\n' + JSON.stringify({ approval_id: reviewPreparation.approvalId, operation: reviewPreparation.operation })
+      + '\nThe owner requested a complete proposal for this exact frozen operation. Verify the current target and supporting facts, explain your reason, then use propose_action. This request does not authorize execution. If it cannot safely be proposed, explain the blocking condition. A clean sweep summary does not fulfill this request.\n=== END PROPOSAL REVIEW REQUEST ==='
+    : '';
 
   /**
    * `planned` — the turn has everything it needs (credential, conversation,
@@ -713,13 +754,44 @@ export async function runOperatorTurn(
       conversationId,
       userId: operatorUserId(job.organizationId),
       jwt: credential,
-      userMessage: buildWakeMessage(job, wake, scratchpad, pending),
+      userMessage: preparationMessage || (opts.skillPrompt
+        ? `${opts.skillPrompt}\n\n---\n\n${buildWakeMessage(job, wake, scratchpad, pending)}`
+        : buildWakeMessage(job, wake, scratchpad, pending)),
+      reviewPreparation: reviewPreparation ?? undefined,
+      onReviewPreparationBlocked: code => { preparationBlockedCode = code; },
       model,
       pool,
       organizationId: job.organizationId,
       codeExecutor: opts.codeExecutor,
       buildExecutor: opts.buildExecutor,
+      skillScript: opts.skillScript,
+      activeSkill: opts.activeSkill,
+      integrationReader: opts.integrationReader,
+      executionGuard: opts.executionGuard,
+      signal: opts.signal,
       traceId,
+      /**
+       * Re-checked before every model request and before dispatching tools, so
+       * a downgrade, suspension or owner removal that lands mid-turn stops the
+       * next spend instead of finishing the turn. Org-scoped and resolved from
+       * the job, never from anything the model supplies.
+       */
+      accessGuard: async () => {
+        const decision = await evaluateOperatorAccess({
+          organizationId: job.organizationId,
+          phase: 'run',
+          origin: 'operator',
+        });
+        return {
+          allowed: decision.allowed,
+          reason: decision.reason,
+          // A cloud Office policy answers 'consequential'; that activates the
+          // Office floor in the loop (consequential tools need a human even
+          // with yolo on, preparation stays autonomous). The OSS default and
+          // the ordinary dashboard answer 'standard'.
+          approvalMode: decision.approvalMode,
+        };
+      },
       // Until now, job name and wake reason existed only as prose inside the
       // wake message — in the model's context window, in no structured field.
       // The ledger recorded every one of these as triggered_by
@@ -730,6 +802,8 @@ export async function runOperatorTurn(
         wake_reason:
           wake.reason === 'timer' ? 'timer' : `event (${wake.table} row ${wake.rowId})`,
         trace_id: traceId,
+        ...(opts.routineContext ? { routine_cycle_id: opts.routineContext.cycleId,
+          routine_cycle_fence: opts.routineContext.cycleFence, skill_run_id: opts.routineContext.skillRunId } : {}),
       },
     });
 
@@ -737,9 +811,37 @@ export async function runOperatorTurn(
       count++;
       if (event.type === 'approval_required') approvalId = event.approval_id;
       if (event.type === 'error') error = event.message;
+      if (event.type === 'blocked') blockedReason = event.reason;
     }
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
+  }
+  if (reviewPreparation) await finishReviewPreparation(pool, reviewPreparation,
+    blockedReason ? 'waiting' : preparationBlockedCode ? 'blocked' : 'failed',
+    blockedReason ? 'office_access_blocked' : preparationBlockedCode ?? (error ? 'proposal_preparation_failed' : 'proposal_not_prepared'));
+
+  // A blocked turn is a deliberate stop, not a failure: no error, no approval,
+  // and records/history stay exactly as the turn left them.
+  if (blockedReason) {
+    logOperatorCheckpoint('completed', {
+      traceId,
+      organizationId: job.organizationId,
+      conversationId,
+      events: count,
+      gated: false,
+      error: null,
+      outcome: 'skipped',
+      skippedReason: 'access_blocked',
+      blockedReason,
+    });
+    return {
+      conversationId,
+      events: count,
+      approvalId: null,
+      error: null,
+      skipped: { reason: 'access_blocked', blockedReason },
+      ...(reviewPreparation ? { preparationAttempted: true as const } : {}),
+    };
   }
 
   /**
@@ -773,5 +875,5 @@ export async function runOperatorTurn(
     error,
   });
 
-  return { conversationId, events: count, approvalId, error, skipped: null };
+  return { conversationId, events: count, approvalId, error, skipped: null, ...(reviewPreparation ? { preparationAttempted: true as const } : {}) };
 }

@@ -144,10 +144,19 @@ Response shape is identical to the login response. Failure responses are HTTP 40
 | GET | /v1/\{app_id}/config | Read full app config |
 | PATCH | /v1/\{app_id}/config/cors | Update CORS origins |
 | PATCH | /v1/\{app_id}/config/jwt | Update token lifetimes |
-| PATCH | /v1/\{app_id}/config/pause | Pause / resume the app (kill-switch). Body: `{ paused: boolean, reason?: string }`. While paused, all data-plane traffic returns 503 with `code: APP_PAUSED`. Auth and control-plane endpoints stay reachable. |
+| PATCH | /v1/\{app_id}/config/pause | Pause / resume the app (kill-switch). Body: `{ paused: boolean, reason?: string }`. While paused, every app-scoped API returns 503 with `code: APP_PAUSED` for everyone except the app's owners and org members (dashboard session or API key, non-public routes). |
 
 ## Audit logs
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | /v1/\{app_id}/audit-logs | Query auth events. Filters: `user_id`, `event_type`, `limit`, `offset` |
+
+## Organization scope
+
+Platform requests made with a dashboard JWT can name the organization with the
+`X-Organization-Id` header. The API verifies that the caller is a member; a
+missing or foreign organization is rejected. Organization-locked platform keys
+are managed credentials bound to exactly one organization — they cannot be used
+to administer organizations and cannot be pointed at another organization. This
+is separate from end-user authentication above, which is scoped by `{app_id}`.

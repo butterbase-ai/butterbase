@@ -111,6 +111,53 @@ describeDb('PUT → GET round-trip', () => {
   });
 });
 
+// ── Raw reads ─────────────────────────────────────────────────────────────────
+
+describeDb('raw reads', () => {
+  it('returns the stored JSON text when raw=1', async () => {
+    await req('PUT', `/v1/${appId}/kv/k`, { payload: { value: 'abc' } });
+
+    const raw = await req('GET', `/v1/${appId}/kv/k?raw=1`);
+    expect(raw.statusCode).toBe(200);
+    expect(raw.json()).toEqual({ value: '"abc"' });
+
+    const decoded = await req('GET', `/v1/${appId}/kv/k`);
+    expect(decoded.json()).toEqual({ value: 'abc' });
+  });
+
+  it('honors raw on batch get ops', async () => {
+    await req('PUT', `/v1/${appId}/kv/k`, { payload: { value: 'abc' } });
+    const res = await req('POST', `/v1/${appId}/kv/_batch`, {
+      payload: { ops: [{ op: 'get', key: 'k', raw: true }] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().results[0]).toEqual({ value: '"abc"' });
+  });
+
+  it('rejects raw writes explicitly', async () => {
+    const res = await req('PUT', `/v1/${appId}/kv/raw-write`, {
+      payload: { value: 'x', raw: true },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('raw_unsupported_for_write');
+  });
+
+  it('never reports an undecodable present key as a null value in batch', async () => {
+    const c = await RedisClient.connect({ ...baseRedisOpts, db: 0 });
+    try {
+      await c.set(`{${appId}}:u:bad`, 'not-json');
+    } finally {
+      await c.close();
+    }
+
+    const res = await req('POST', `/v1/${appId}/kv/_batch`, {
+      payload: { ops: [{ op: 'get', key: 'bad' }] },
+    });
+    expect(res.json().results[0]).toEqual({ error: 'redis_error', message: expect.any(String) });
+    expect(res.json().results[0]).not.toHaveProperty('value');
+  });
+});
+
 // ── DELETE ─────────────────────────────────────────────────────────────────────
 
 describeDb('DELETE', () => {
