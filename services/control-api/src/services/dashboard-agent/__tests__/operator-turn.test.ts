@@ -331,6 +331,15 @@ describe('runOperatorTurn', () => {
     expect(msg).toMatch(/re-read|reconcile/i);
   });
 
+  it('tells the operator to write for a non-technical owner on every wake', async () => {
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+    const msg = mockRunAgentTurn.mock.calls[0][0].userMessage as string;
+    expect(msg).toContain('non-technical business owner');
+    expect(msg).toContain('Ship the goods');
+    expect(msg.indexOf('non-technical business owner')).toBeLessThan(msg.indexOf(job.instructions));
+  });
+
   it('sends the identical instructions body for a timer wake and an event wake, differing only in the preamble', async () => {
     mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
     await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });

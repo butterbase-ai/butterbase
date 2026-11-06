@@ -35,6 +35,20 @@ describe('structured approval contract', () => {
     for (const reason of ['', '  ', 'x'.repeat(2001)]) expect(ProposalInputSchema.safeParse({ operation, reason }).success).toBe(false);
     expect(ProposalInputSchema.safeParse({ operation: { ...operation, arguments: '{}' }, reason: 'Reason' }).success).toBe(false);
   });
+  it('accepts an owner-facing title and summary, trimmed', () => {
+    const parsed = ProposalInputSchema.parse({ operation, reason: 'Ship it.', title: '  Ship the goods  ', summary: '  Send the order to Acme.  ' });
+    expect(parsed.title).toBe('Ship the goods');
+    expect(parsed.summary).toBe('Send the order to Acme.');
+  });
+  it('rejects empty or oversized title and summary and still rejects unknown keys', () => {
+    for (const title of ['', '   ', 'x'.repeat(301)]) {
+      expect(ProposalInputSchema.safeParse({ operation, reason: 'Reason', title }).success).toBe(false);
+    }
+    for (const summary of ['', '   ', 'x'.repeat(4001)]) {
+      expect(ProposalInputSchema.safeParse({ operation, reason: 'Reason', summary }).success).toBe(false);
+    }
+    expect(ProposalInputSchema.safeParse({ operation, reason: 'Reason', audience: 'owner' }).success).toBe(false);
+  });
   it('allows no supporting records but bounds and types supplied references', () => {
     expect(ProposalInputSchema.parse({ operation, reason: 'Reason' }).evidence_refs).toEqual([]);
     const evidence_refs = Array.from({ length: 10 }, (_, i) => ({ kind: 'entity', id: `ent_example${i}` }));

@@ -40,6 +40,8 @@ export type EvidenceInput = z.infer<typeof EvidenceInputSchema>;
 export const ProposalInputSchema = z.object({
   operation: z.object({ tool: z.string().min(1).max(128), arguments: z.record(z.unknown()) }).strict(),
   reason: z.string().trim().min(1).max(2000),
+  title: z.string().trim().min(1).max(300).optional(),
+  summary: z.string().trim().min(1).max(4000).optional(),
   evidence_refs: z.array(EvidenceInputSchema).max(10).default([]),
 }).strict();
 export type ProposalInput = z.infer<typeof ProposalInputSchema>;

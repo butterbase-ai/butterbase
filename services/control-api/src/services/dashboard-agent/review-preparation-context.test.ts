@@ -37,7 +37,8 @@ describe('read-only preparation explanations', () => {
     const query = vi.fn(async () => ({ rows: [row(), { ...row(), id: 'approval-two' }] }));
     provider({ explain: vi.fn().mockRejectedValueOnce(Error('private-provider-value')).mockResolvedValueOnce(explanation) });
     const result = await explainReviewPreparations({ query } as any, org, 'member', [request, { ...request, approvalId: 'approval-two' }]);
-    expect(result[0]).toEqual(request); expect(result[1].explanation).toEqual(explanation);
+    expect(result[0].explanation).toMatchObject({ blocker: { code: 'target_unavailable' } });
+    expect(result[1].explanation).toEqual(explanation);
     expect(JSON.stringify(result)).not.toMatch(/private-provider-value|outbox_id|input_args/);
   });
   it('keeps a readable prepared explanation when target description is unavailable', async () => {
@@ -54,6 +55,21 @@ describe('read-only preparation explanations', () => {
     expect(explained?.reason?.text).toBe('The recorded operator explanation.');
     expect(explained?.facts).toEqual({ source: 'prepared', at: request.createdAt });
     provider({ canRead: async () => false, explain: async () => null });
-    expect((await explainReviewPreparations({ query } as any, org, 'member', [request]))[0].explanation).toBeUndefined();
+    const fallback = (await explainReviewPreparations({ query } as any, org, 'member', [request]))[0].explanation;
+    expect(fallback?.blocker?.code).toBe('target_unavailable');
+  });
+  it('falls back to the model input when neither current nor saved explanation can be read', async () => {
+    const record = row();
+    (record as any).input_args = {
+      ...record.input_args,
+      title: 'Email Sam about the invoice',
+      summary: 'Send the March invoice to sam@example.com.',
+    };
+    const query = vi.fn(async () => ({ rows: [record] }));
+    provider({ explain: async () => null });
+    const explained = (await explainReviewPreparations({ query } as any, org, 'member', [request]))[0].explanation;
+    expect(explained?.title).toBe('Email Sam about the invoice');
+    expect(explained?.summary).toContain('sam@example.com');
+    expect(explained?.blocker).toEqual({ code: 'target_unavailable', summary: expect.stringContaining('could not re-read the target') });
   });
 });
