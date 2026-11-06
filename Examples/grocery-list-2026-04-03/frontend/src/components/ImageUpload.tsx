@@ -1,3 +1,4 @@
+import { useLocale, text } from '../i18n';
 import { useState, type ChangeEvent } from 'react';
 
 interface ImageUploadProps {
@@ -6,17 +7,18 @@ interface ImageUploadProps {
 }
 
 export function ImageUpload({ onImageSelected, currentImageUrl }: ImageUploadProps) {
+  useLocale();
   const [preview, setPreview] = useState<string | null>(currentImageUrl || null);
 
   const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       if (file.size > 10 * 1024 * 1024) {
-        alert('File size must be less than 10MB');
+        alert(text("File size must be less than 10MB"));
         return;
       }
       if (!file.type.startsWith('image/')) {
-        alert('File must be an image');
+        alert(text("File must be an image"));
         return;
       }
       const reader = new FileReader();
@@ -38,9 +40,7 @@ export function ImageUpload({ onImageSelected, currentImageUrl }: ImageUploadPro
 
   return (
     <div style={{ marginBottom: '15px' }}>
-      <label htmlFor="image" style={{ display: 'block', marginBottom: '5px' }}>
-        Photo (optional)
-      </label>
+      <label htmlFor="image" style={{ display: 'block', marginBottom: '5px' }}>{text("Photo (optional)")}</label>
       <input
         id="image"
         type="file"
@@ -52,12 +52,10 @@ export function ImageUpload({ onImageSelected, currentImageUrl }: ImageUploadPro
         <div>
           <img
             src={preview}
-            alt="Preview"
+            alt={text("Preview")}
             style={{ maxWidth: '200px', maxHeight: '200px', display: 'block', marginBottom: '10px' }}
           />
-          <button type="button" onClick={handleClear} style={{ padding: '5px 10px' }}>
-            Clear image
-          </button>
+          <button type="button" onClick={handleClear} style={{ padding: '5px 10px' }}>{text("Clear image")}</button>
         </div>
       )}
     </div>

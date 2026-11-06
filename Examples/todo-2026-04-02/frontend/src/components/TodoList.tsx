@@ -1,3 +1,4 @@
+import { useLocale, text } from '../i18n';
 import { TodoItem } from './TodoItem';
 import type { Todo } from '../types';
 
@@ -8,17 +9,16 @@ interface TodoListProps {
 }
 
 export function TodoList({ todos, onTodoUpdated, onTodoDeleted }: TodoListProps) {
+  useLocale();
   if (todos.length === 0) {
     return (
-      <div style={{ textAlign: 'center', padding: '40px', color: '#999' }}>
-        No todos yet. Create one above!
-      </div>
+      <div style={{ textAlign: 'center', padding: '40px', color: '#999' }}>{text("No todos yet. Create one above!")}</div>
     );
   }
 
   return (
     <div>
-      <h2>Your Todos ({todos.length})</h2>
+      <h2>{text("Your Todos (")}{todos.length}{text(")")}</h2>
       {todos.map((todo) => (
         <TodoItem
           key={todo.id}

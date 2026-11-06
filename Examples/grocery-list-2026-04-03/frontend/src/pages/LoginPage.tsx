@@ -1,12 +1,15 @@
+import type { ReactNode } from 'react';
+import { useLocale, text, errorMessage } from '../i18n';
 import { useState, type FormEvent } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { login } from '../services/auth';
 import { useAuth } from '../contexts/AuthContext';
 
 export function LoginPage() {
+  useLocale();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ReactNode>('');
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const { login: authLogin } = useAuth();
@@ -23,7 +26,7 @@ export function LoginPage() {
         navigate('/');
       }
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Login failed';
+      const message = errorMessage(err, "Login failed");
       setError(message);
     } finally {
       setLoading(false);
@@ -32,12 +35,10 @@ export function LoginPage() {
 
   return (
     <div style={{ maxWidth: '400px', margin: '50px auto', padding: '20px' }}>
-      <h1>Login</h1>
+      <h1>{text("Login")}</h1>
       <form onSubmit={handleSubmit}>
         <div style={{ marginBottom: '15px' }}>
-          <label htmlFor="email" style={{ display: 'block', marginBottom: '5px' }}>
-            Email
-          </label>
+          <label htmlFor="email" style={{ display: 'block', marginBottom: '5px' }}>{text("Email")}</label>
           <input
             id="email"
             type="email"
@@ -48,9 +49,7 @@ export function LoginPage() {
           />
         </div>
         <div style={{ marginBottom: '15px' }}>
-          <label htmlFor="password" style={{ display: 'block', marginBottom: '5px' }}>
-            Password
-          </label>
+          <label htmlFor="password" style={{ display: 'block', marginBottom: '5px' }}>{text("Password")}</label>
           <input
             id="password"
             type="password"
@@ -68,11 +67,10 @@ export function LoginPage() {
           disabled={loading}
           style={{ width: '100%', padding: '10px', cursor: loading ? 'not-allowed' : 'pointer' }}
         >
-          {loading ? 'Logging in...' : 'Login'}
+          {loading ? text("Logging in...") : text("Login")}
         </button>
       </form>
-      <p style={{ marginTop: '20px', textAlign: 'center' }}>
-        Don&apos;t have an account? <Link to="/signup">Sign up</Link>
+      <p style={{ marginTop: '20px', textAlign: 'center' }}>{text("Don't have an account?")}{' '}<Link to="/signup">{text("Sign up")}</Link>
       </p>
     </div>
   );
