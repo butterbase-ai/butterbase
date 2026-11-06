@@ -35,6 +35,13 @@ describe('Tool Catalog', () => {
     expect(tool!.description).toContain('"reason"');
   });
 
+  it('propose_action documents owner-facing title and summary', () => {
+    const tool = getToolCatalog().find(t => t.name === 'propose_action')!;
+    expect(tool.description).toContain('"title"');
+    expect(tool.description).toContain('"summary"');
+    expect(tool.description).toContain('non-technical');
+  });
+
   it('getToolCatalog() includes all four file-op tools', () => {
     const catalog = getToolCatalog();
     const names = catalog.map(t => t.name);

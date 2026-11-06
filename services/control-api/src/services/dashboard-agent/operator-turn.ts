@@ -217,6 +217,9 @@ export const OPERATOR_WAKE_PROMPT_VERSION = 'operator-wake/2026-08-07.1';
 const PROVENANCE_INSTRUCTION =
   'When you record a learning, decision or commitment that came from something you read — a call transcript, an email, a support ticket — set `source_artifact_id` to that artifact. An observation with no source cannot be checked by the person relying on it, and the owner sees these in their feed. If you read something that is not yet an artifact, record it with `upsert_source_artifact` first and cite the id it returns.';
 
+const OWNER_COPY_INSTRUCTION =
+  'Write every owner-facing sentence for a non-technical business owner. Describe the business outcome and why it matters now — for example “Ship the goods to Acme”, never “Invoke the function ship_order”, “POST”, “headers”, a capability slug or a raw field name. If the business outcome cannot be stated, say exactly what will change and that Office cannot confirm more.';
+
 const HEADER_OPEN = '=== OPERATOR WAKE (platform-authored) ===';
 const HEADER_CLOSE = '=== END OPERATOR WAKE ===';
 const SCRATCHPAD_OPEN = '--- YOUR SCRATCHPAD (you wrote this) ---';
@@ -361,6 +364,8 @@ export function buildWakeMessage(
     ...(pendingBlock ? ['', pendingBlock] : []),
     '',
     PROVENANCE_INSTRUCTION,
+    '',
+    OWNER_COPY_INSTRUCTION,
     '',
     memoryConfigured ? rewriteOfficeRoutineInstructions(job.instructions) : job.instructions,
   ].join('\n');
