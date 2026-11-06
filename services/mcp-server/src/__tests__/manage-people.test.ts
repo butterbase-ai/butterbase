@@ -5,10 +5,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { createButterbaseMcpServer } from '../create-server.js';
+import { createRegisteredToolServer } from '../tool-registry.js';
 
 async function createConnectedPair() {
-  const server = await createButterbaseMcpServer();
+  const server = await createRegisteredToolServer();
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([

@@ -17,6 +17,8 @@
 import { describe, it, expect, vi, beforeEach, type MockedFunction } from 'vitest';
 import type pg from 'pg';
 
+vi.mock('../approval-resolution-lock.js', () => ({ withApprovalResolutionLock: async (pool: unknown, approval: unknown, work: any) => work(pool, approval) }));
+
 vi.mock('../store.js', () => ({
   getMessageByPendingApprovalId: vi.fn(),
   clearPendingApproval: vi.fn(),
@@ -42,7 +44,8 @@ const mockAppend = storeModule.appendMessage as MockedFunction<typeof storeModul
 const mockReplace = storeModule.replaceToolResultForCall as MockedFunction<typeof storeModule.replaceToolResultForCall>;
 const mockResolveApproval = approvalsModule.resolveApproval as MockedFunction<typeof approvalsModule.resolveApproval>;
 
-const stubPool = {} as pg.Pool;
+const evidenceQuery = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+const stubPool = { query: evidenceQuery } as unknown as pg.Pool;
 
 const approval = {
   id: 'appr-1',
@@ -93,6 +96,7 @@ describe('resolution overwrites the "waiting on the owner" placeholder', () => {
     });
 
     expect(out.ok).toBe(true);
+    expect(evidenceQuery).toHaveBeenCalledWith(expect.stringContaining("outcome='unknown'"), ['conv-1', 'appr-1']);
     expect(mockReplace).toHaveBeenCalledWith(stubPool, 'conv-1', 'call-1', {
       toolName: 'manage_integrations',
       toolArgs: approval.toolArgs,

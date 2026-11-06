@@ -27,6 +27,14 @@ describe('Tool Catalog', () => {
     expect(properties).not.toHaveProperty('params');
   });
 
+  it('propose_action shows the exact nested payload shape', () => {
+    const tool = getToolCatalog().find(t => t.name === 'propose_action');
+    expect(tool).toBeDefined();
+    expect(tool!.description).toContain('"operation"');
+    expect(tool!.description).toContain('"arguments"');
+    expect(tool!.description).toContain('"reason"');
+  });
+
   it('getToolCatalog() includes all four file-op tools', () => {
     const catalog = getToolCatalog();
     const names = catalog.map(t => t.name);

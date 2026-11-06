@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { grantLease, settleLease } from '../lease-service.js';
 import { InsufficientCreditsError, type LeaseHandle } from '../ai-router/billing-gate.js';
+import { roundCreditUsd } from '../credit-precision.js';
 
 export const FLOOR_LEASE_SECONDS = 300;
 export const ACTOR_LEASE_TTL_SECONDS = 600;
@@ -24,7 +25,7 @@ export async function reserveActorCredits(
     (input.transcript ? input.transcriptionUsdPerSecond : 0);
   const base = perSec * FLOOR_LEASE_SECONDS;
   const charged = base * (1 + input.markupPct / 100);
-  const requested = Math.max(charged, 0.0001);
+  const requested = roundCreditUsd(Math.max(charged, 0.0001));
 
   const res = await grantLease(platformPool, {
     userId: input.userId,

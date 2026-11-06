@@ -229,6 +229,7 @@ async function handleGet(
   auth: AuthOk,
   baseOpts: Omit<RedisClientOptions, 'db'>,
   touch: boolean,
+  raw: boolean,
   reply: import('fastify').FastifyReply,
   account: AccountFn,
 ) {
@@ -270,7 +271,7 @@ async function handleGet(
 
   // Reads don't change storage or keys; pass deltas=0
   account(0, 0);
-  return reply.code(200).send({ value: JSON.parse(v!) });
+  return reply.code(200).send({ value: raw ? v : JSON.parse(v!) });
 }
 
 async function handleGetTtl(
@@ -316,7 +317,7 @@ async function handlePut(
   key: string,
   auth: AuthOk,
   baseOpts: Omit<RedisClientOptions, 'db'>,
-  body: { value?: unknown; ttl?: unknown; ephemeral?: boolean },
+  body: { value?: unknown; ttl?: unknown; ephemeral?: boolean; raw?: boolean },
   reply: import('fastify').FastifyReply,
   account: AccountFn,
 ) {
@@ -326,6 +327,7 @@ async function handlePut(
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
 
+  if (body.raw === true) return reply.code(400).send(errBody('raw_unsupported_for_write'));
   if (!('value' in body)) return reply.code(400).send(errBody('bad_request', 'missing value'));
 
   const ttlResult = resolveTtl(body.ttl);
@@ -484,7 +486,7 @@ async function handleSetnx(
   key: string,
   auth: AuthOk,
   baseOpts: Omit<RedisClientOptions, 'db'>,
-  body: { value?: unknown; ttl?: unknown; ephemeral?: boolean },
+  body: { value?: unknown; ttl?: unknown; ephemeral?: boolean; raw?: boolean },
   reply: import('fastify').FastifyReply,
   account: AccountFn,
 ) {
@@ -494,6 +496,7 @@ async function handleSetnx(
     if (denial) return reply.code(denial.status).send(errBody(denial.error));
   }
 
+  if (body.raw === true) return reply.code(400).send(errBody('raw_unsupported_for_write'));
   if (!('value' in body)) return reply.code(400).send(errBody('bad_request', 'missing value'));
 
   const ttlResult = resolveTtl(body.ttl);
@@ -649,7 +652,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     let batchStorageDelta = 0;
     let batchKeyDelta = 0;
     await withRedis(baseOpts, async (client) => {
-      for (const op of body.ops as Array<{ op?: unknown; key?: unknown; value?: unknown }>) {
+      for (const op of body.ops as Array<{ op?: unknown; key?: unknown; value?: unknown; raw?: unknown }>) {
         if (typeof op.op !== 'string' || !['get', 'set', 'del'].includes(op.op)) {
           results.push({ error: 'invalid op' });
           continue;
@@ -672,7 +675,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
         try {
           if (op.op === 'get') {
             const v = await client.get(fk);
-            results.push({ value: v === null ? null : JSON.parse(v) });
+            results.push({ value: v === null ? null : (op.raw === true ? v : JSON.parse(v)) });
           } else if (op.op === 'set') {
             if (!('value' in op)) {
               results.push({ error: 'missing value' });
@@ -723,7 +726,7 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
   // Handles: GET key, GET key/ttl, GET key/exists
   fastify.get<{
     Params: { app_id: string; '*': string };
-    Querystring: { touch?: string };
+    Querystring: { touch?: string; raw?: string };
   }>('/v1/:app_id/kv/*', { config: { public: true } }, async (req, reply) => {
     const { app_id: appId } = req.params;
     const wildcard = (req.params as Record<string, string>)['*'] ?? '';
@@ -754,7 +757,8 @@ const kvDataRoutes: FastifyPluginAsync = async (fastify) => {
     }
 
     const touch = req.query.touch === 'true';
-    return handleGet(key, authOk, baseOpts, touch, reply, account);
+    const raw = req.query.raw === '1' || req.query.raw === 'true';
+    return handleGet(key, authOk, baseOpts, touch, raw, reply, account);
   });
 
   // ── Wildcard PUT /v1/:app_id/kv/* ─────────────────────────────────────────

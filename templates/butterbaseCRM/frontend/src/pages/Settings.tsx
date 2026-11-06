@@ -398,13 +398,19 @@ export default function Settings() {
       // register-integration and strip the params, leaving no way to retry
       // without another OAuth round-trip.
       if (!ws) return;
-      bb.functions
-        .invoke('register-integration', { body: { workspace_id: ws, toolkit } })
-        .catch((e) => {
-          toast.error('Could not register integration with workspace', {
-            description: e instanceof Error ? e.message : String(e),
+      void (async () => {
+        // The runtime has no email on ctx.user; capture the signed-in address
+        // here so sent mail can be told apart from inbound mail later.
+        const { data: me } = await bb.auth.getUser().catch(() => ({ data: null }) as { data: null });
+        const email = (me as { email?: string } | null)?.email ?? null;
+        await bb.functions
+          .invoke('register-integration', { body: { workspace_id: ws, toolkit, email } })
+          .catch((e) => {
+            toast.error('Could not register integration with workspace', {
+              description: e instanceof Error ? e.message : String(e),
+            });
           });
-        });
+      })();
       const label = toolkit === 'googlesuper' ? 'Google' : (toolkit[0].toUpperCase() + toolkit.slice(1));
       toast.success(`${label} connected`, {
         description: 'You can now send invites and outreach through this account.',

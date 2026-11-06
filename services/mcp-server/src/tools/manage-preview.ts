@@ -28,6 +28,9 @@ What deliberately does NOT travel:
     belongs to the live app.
   - Uploaded file IDs change. If the app stores a file id inside one of its own
     tables, that column still points at the live app's copy of the file.
+  - Files whose contents are already missing in the live app (a file record with
+    no data, e.g. an upload that never finished). They are skipped, and the
+    create/reset job's warnings name them by their live object ids.
 On a self-hosted deployment without the app-copy engine, a preview is populated
 from tables marked _seed:true only; the create/reset job says so in its warnings.
 

@@ -4,6 +4,7 @@ import { createAgentError, getDocUrl, isHttpError } from '../services/error-hand
 import { RESOURCE_NOT_FOUND, EXTERNAL_DB_ERROR } from '@butterbase/shared/error-types';
 import { requireUserId } from '../utils/require-auth.js';
 import { getRuntimeDbForApp } from '../services/region-resolver.js';
+import { decodeAuditCursor, encodeAuditCursor } from '../services/audit-cursor.js';
 
 /**
  * Returns audit events for an app. Reads from the current `audit_events` table
@@ -31,6 +32,22 @@ export async function auditLogRoutes(app: FastifyInstance) {
     const limit = Math.min(Math.max(1, isNaN(rawLimit) ? 100 : rawLimit), 500);
     const rawOffset = q.offset ? parseInt(q.offset, 10) : 0;
     const offset = Math.max(0, isNaN(rawOffset) ? 0 : rawOffset);
+    const rawCursor = typeof q.cursor === 'string' && q.cursor.length > 0 ? q.cursor : null;
+    if (rawCursor && offset > 0) {
+      return reply.code(400).send(createAgentError({
+        code: 'VALIDATION_CONFLICTING_PAGINATION',
+        message: 'cursor and offset cannot be combined',
+        remediation: 'Use cursor for keyset pagination, or offset for legacy pagination, not both.',
+      }));
+    }
+    const cursor = rawCursor ? decodeAuditCursor(rawCursor) : null;
+    if (rawCursor && !cursor) {
+      return reply.code(400).send(createAgentError({
+        code: 'VALIDATION_INVALID_CURSOR',
+        message: 'The audit cursor is invalid',
+        remediation: 'Pass the exact nextCursor returned by the previous response.',
+      }));
+    }
 
     const filters = {
       category: q.category,
@@ -113,6 +130,16 @@ export async function auditLogRoutes(app: FastifyInstance) {
         pi++;
       }
 
+      if (cursor) {
+        params.push(cursor.createdAt);
+        const atIndex = pi++;
+        params.push(cursor.id);
+        const idIndex = pi++;
+        const predicate = `(created_at, id) < ($${atIndex}::timestamptz, $${idIndex}::uuid)`;
+        eventsWhere.push(predicate);
+        legacyWhere.push(predicate);
+      }
+
       // Platform-side: legacy auth_audit_logs + any audit_events still written
       // via controlDb (e.g. rag.ts, auto-api.ts). Pre-cutover events also
       // remain here until migration 061.
@@ -157,10 +184,12 @@ export async function auditLogRoutes(app: FastifyInstance) {
         WHERE ${eventsWhere.join(' AND ')}
       `;
 
-      // Fetch (limit+offset) rows from each tier, merge in JS, then slice.
+      // Keyset mode fetches `limit` per tier; the global top `limit` rows are
+      // necessarily within each tier's top `limit`. Offset mode keeps its
+      // original fetch and ordering.
       // Approximate for very large offsets; fine for typical dashboard pagination.
-      const fetchCap = Math.min(limit + offset, 1000);
-      const fetchSql = (body: string) => `${body} ORDER BY created_at DESC LIMIT ${fetchCap}`;
+      const fetchCap = cursor ? limit : Math.min(limit + offset, 1000);
+      const fetchSql = (body: string) => `${body} ORDER BY created_at DESC, id DESC LIMIT ${fetchCap}`;
       // Read runtime-side audit_events from the app's home region (auth +
       // function events written by the post-cutover handlers live there).
       const runtimePool = await getRuntimeDbForApp(app.controlDb, app_id);
@@ -184,18 +213,24 @@ export async function auditLogRoutes(app: FastifyInstance) {
           seen.add(key);
           return true;
         })
-        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        .sort((a, b) => {
+          const byTime = new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+          return byTime !== 0 ? byTime : String(b.id).localeCompare(String(a.id));
+        });
 
       const total: number =
         (platformCount.rows[0]?.total ?? 0) + (runtimeCount.rows[0]?.total ?? 0);
-      const page = merged.slice(offset, offset + limit);
-      const nextOffset = offset + page.length < total ? offset + page.length : null;
+      const page = cursor ? merged.slice(0, limit) : merged.slice(offset, offset + limit);
+      const last = page[page.length - 1];
+      const nextCursor = page.length === limit && last ? encodeAuditCursor(last) : null;
+      const nextOffset = cursor ? null : (offset + page.length < total ? offset + page.length : null);
 
       return reply.send({
         logs: page,
         total,
         limit,
         offset,
+        nextCursor,
         nextOffset,
       });
     } catch (error) {

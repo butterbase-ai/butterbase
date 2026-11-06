@@ -32,9 +32,20 @@ When a user asks you to "create a backend" or "set up a database":
 3. File is automatically tracked in storage_objects table
 \`\`\`
 
+### Fictional character video references
+
+For eligible video requests, explicitly declare known AI-generated fictional images with \`reference_declarations: [{path: "/input_images/0", kind: "ai_generated_fictional_character"}]\`.
+Use MCP \`manage_ai\` action \`submit_video\` when its connected tool schema includes the declaration fields; otherwise send them through REST \`POST /v1/{app_id}/videos/completions\`.
+Use \`prepare_references: "on_rejection"\` (default, at most one eligible retry) or \`"upfront"\`. Never infer fictional provenance or consent from an image. Preparation sends declared images to an external provider for storage and validation.
+Keep the returned job ID and poll through preparing_references/submitting/polling/settling. Unsupported combinations return UNSUPPORTED_REFERENCE_PREPARATION; an uncertain submission needs reconciliation, not another POST. Source URLs are erased after24hours; provider copies wait for retained jobs and retryable cleanup. Registration is not separately charged; generation uses normal credits. See butterbase_docs topic ai for the full contract.
+
+### Paused apps
+
+Use \`manage_app\` action \`resume\` to resume an app, or action \`get_config\` to inspect it. HTTP 503 \`APP_PAUSED\` includes \`details.paused_by\`. Owners keep management and data access, but compute, KV and realtime remain blocked. An automatic inactivity pause on a free plan returns HTTP 402 \`APP_RESUME_REQUIRES_UPGRADE\`; upgrading the organization resumes idle-paused apps. Pause/resume can return HTTP 409 \`APP_STATE_BUSY\` during concurrent state changes or region cutovers: retry after a short delay.
+
 ## Error Handling
 
-All errors follow this structure:
+Many app-management errors use this structure:
 \`\`\`json
 {
   "error": {
@@ -54,7 +65,7 @@ When you encounter an error:
 
 ## Response Metadata
 
-Success responses include \`_meta\` with:
+Many app-management success responses include \`_meta\` with:
 - \`resource_info\`: Current state (e.g., table count, storage usage)
 - \`next_actions\`: Suggested next steps with tool names
 
@@ -79,6 +90,26 @@ Example:
   }
 }
 \`\`\`
+
+### Organization scope
+
+When the user is working in an organization, send \`X-Organization-Id\` on organization-scoped requests. The API verifies membership and rejects a foreign or missing organization. Managed organization-locked keys are bound to exactly one organization and cannot administer organizations. Stored assistant conversations keep the provenance they were created with; do not try to move one between product surfaces.
+
+### Office clients (optional cloud capability)
+
+Use \`butterbase_docs\` topic \`office\` before Office work. Hosted MCP can expose \`manage_office\` with 44 actions; OSS-only installations may omit it. The same actions are available through \`butterbase office\` and the standalone SDK \`OfficeClient\`. Supply an explicit organization UUID (MCP \`org_id\`, CLI \`--org\`, SDK \`organizationId\`) and a platform credential. Office does not require an app or app end-user session.
+
+Enable, pause, resume and approve return saved confirmation receipts. Show \`confirmation_url\` to the initiating owner and let that owner sign in, review and confirm or cancel in the browser. An agent must never resolve the confirmation itself. Inspect saved outcomes with status plus \`confirmation_id\`; a pending receipt is not proof of execution.
+
+Ask admits once per intended request. Retain its \`idempotency_key\`, \`conversation_id\` and \`turn_id\`. Retry the same write with the same key; observe existing work with get_conversation or SDK askStream using the exact turn IDs, without another Ask submission. Disconnect/SIGINT stops observation only. Inspect an unknown outcome before retrying. Members can read and deny; new work requires the current owner and an eligible active organization. Business memory wraps the existing Substrate ledger and policy approvals.
+
+REST conversation and exact-turn event GETs optionally accept activity_version=1 for bounded tool metadata or activity_version=2 for captured invocation UUID detail_ref references. Authorized GET /v1/me/office/conversations/:id/activity/:invocationId and website GET /v1/dashboard-agent/conversations/:id/activity/:invocationId return latest recorded sanitized Input/Result, with approval-resolution phase/status/time distinct from a pending receipt. Default/version 1 and strict stored events are unchanged. Secrets, environment values, opaque/unknown content, code/logs/media, credential URLs and unclassified business-row columns are withheld; no raw backfill. Preview text/envelope limits are 4096/12288 UTF-8 bytes; capture allows 512 invocations/run and the selected-conversation UI cache 32 entries. Reads never execute tools. Apply additive control migration 150_office_tool_activity_previews.sql before API/capture, then customer Office/docs; keep additive tables on rollback. MCP/CLI/SDK arguments retain their defaults and expose no activity-version flag or detail-read action. Full contract: https://docs.butterbase.ai/api-reference/office-api/#input-and-result-previews-activity-version-2. Tool completion is not enclosing-turn completion. The Office website shows live steps above the answer; unrecorded historical outcomes remain unknown.
+
+Website model settings share a personal new-chat default between Office sidebar Settings and Dashboard Settings. Office's message-bar picker changes only the current conversation, including before its first message; New conversation resets to the personal default. Owners separately choose the organization's background model in Office Settings or Dashboard organization settings for timer/event checks and skills. JWT-only GET/PATCH /v1/dashboard-agent/preferences and /v1/dashboard-agent/operator/model return model, effective_model and platform_default_model. Organization requests require x-organization-id; organization PATCH requires an owner. PATCH {model:null} resets to the platform default. API keys cannot use these website preference routes. Defaults fall back to deepseek/deepseek-v4.1-flash; self-hosters apply control migration 149_agent_model_preferences.sql and may set DASHBOARD_ASSISTANT_MODEL / OPERATOR_MODEL. This adds no MCP/CLI/SDK actions. Details: https://docs.butterbase.ai/api-reference/office-api/#model-preferences.
+
+Full reference: https://docs.butterbase.ai/core-concepts/office-clients/ and https://docs.butterbase.ai/api-reference/office-api/.
+
+Office JSON responses use the documented protocol shapes without \`_meta\`; status retains its \`{status}\` envelope and streaming uses SSE. Errors use \`{error:{code,message,decision?,history?}}\`; remediation/documentation_url/details are not guaranteed. SDK and CLI wrap responses as \`{data,error}\`.
 
 ## Best Practices
 

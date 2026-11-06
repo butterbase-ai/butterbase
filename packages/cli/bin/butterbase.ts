@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { registerOfficeCommands } from '../src/commands/office.js';
 import chalk from 'chalk';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -1844,6 +1845,8 @@ previewPromote
   .action((opts) => previewPromoteRunCommand(opts));
 
 // Top-level error handlers for unhandled exceptions / rejections
+registerOfficeCommands(program);
+
 process.on('uncaughtException', (err) => {
   console.error(renderError(err));
   process.exit(1);
@@ -1854,4 +1857,9 @@ process.on('unhandledRejection', (err) => {
 });
 
 // Parse arguments
-program.parse();
+void program.parseAsync().catch((error: unknown) => {
+  if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && error.code.startsWith('commander.')) {
+    process.exit((error as { exitCode?: number }).exitCode ?? 2);
+  }
+  console.error(renderError(error)); process.exit(1);
+});

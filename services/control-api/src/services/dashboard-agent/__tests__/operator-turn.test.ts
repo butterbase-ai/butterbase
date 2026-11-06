@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, type MockedFunction } 
 import type pg from 'pg';
 
 vi.mock('../loop.js', () => ({ runAgentTurn: vi.fn() }));
+vi.mock('../review-preparation-store.js', () => ({ claimReviewPreparation: vi.fn().mockResolvedValue(null), finishReviewPreparation: vi.fn() }));
 vi.mock('../operator-store.js', () => ({
   getOrCreateOperatorConversation: vi.fn(),
   // Passthrough matching today's format. This is intentionally NOT the guard
@@ -41,6 +42,9 @@ import * as credModule from '../operator-credential.js';
 import * as approvalsModule from '../approvals-store.js';
 import * as scratchpadModule from '../operator-scratchpad-store.js';
 import * as messageStoreModule from '../store.js';
+import { setOperatorAccessPolicy } from '../operator-access-policy.js';
+import { setApprovalProposalProvider } from '../approval-proposal.js';
+import { claimReviewPreparation, finishReviewPreparation } from '../review-preparation-store.js';
 import {
   runOperatorTurn,
   resolveOperatorModel,
@@ -89,6 +93,47 @@ beforeEach(() => {
   mockListPending.mockResolvedValue([]);
   mockGetScratchpad.mockResolvedValue(null);
   mockCloseUnanswered.mockResolvedValue('closed');
+  vi.mocked(claimReviewPreparation).mockResolvedValue(null);
+});
+
+describe('trusted routine execution fence', () => {
+  it('stops before preflight bookkeeping when the cycle is no longer current', async () => {
+    const result = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' }, executionGuard: async () => false });
+    expect(result.skipped).toMatchObject({ blockedReason: 'execution_interrupted' });
+    expect(mockGetCred).not.toHaveBeenCalled(); expect(mockRunAgentTurn).not.toHaveBeenCalled();
+  });
+  it('threads cancellation and the cycle fence into the model/tool loop', async () => {
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    const signal = new AbortController().signal, executionGuard = async () => true;
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' }, signal, executionGuard,
+      routineContext: { cycleId: 'cycle', cycleFence: 2, skillRunId: 'run' } });
+    expect(mockRunAgentTurn).toHaveBeenCalledWith(expect.objectContaining({ signal, executionGuard,
+      triggerContext: expect.objectContaining({ routine_cycle_id: 'cycle', routine_cycle_fence: 2, skill_run_id: 'run' }) }));
+  });
+});
+
+describe('requested proposal preparation', () => {
+  afterEach(() => setApprovalProposalProvider(null));
+  it('makes an explicit frozen request and fails safely when the model only says everything is clean', async () => {
+    const claim = { approvalId: 'approval-1', organizationId: 'org-1', conversationId: 'conv-1', token: 'token', intentFingerprint: 'fingerprint', operation: { version: 1 as const, toolName: 'manage_substrate', args: { action: 'cancel_outbox', outbox_id: 'obx_original' } } };
+    vi.mocked(claimReviewPreparation).mockResolvedValue(claim);
+    setApprovalProposalProvider({ enabled: () => true, prepare: vi.fn(), revalidate: vi.fn() });
+    let suppliedMessage = '';
+    mockRunAgentTurn.mockImplementation((input) => { suppliedMessage = input.userMessage; return events({ type: 'text', text: 'Everything is clean.' }, { type: 'done' }) as any; });
+    const result = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+    expect(result.preparationAttempted).toBe(true);
+    expect(suppliedMessage).toContain('obx_original');
+    expect(suppliedMessage).toContain('This request does not authorize execution');
+    expect(finishReviewPreparation).toHaveBeenCalledWith(stubPool, claim, 'failed', 'proposal_not_prepared');
+  });
+  it('retains a safe blocked outcome rather than reporting a successful sweep', async () => {
+    const claim = { approvalId: 'approval-1', organizationId: 'org-1', conversationId: 'conv-1', token: 'token', intentFingerprint: 'fingerprint', operation: { version: 1 as const, toolName: 'manage_substrate', args: { action: 'cancel_outbox', outbox_id: 'obx_original' } } };
+    vi.mocked(claimReviewPreparation).mockResolvedValue(claim);
+    setApprovalProposalProvider({ enabled: () => true, prepare: vi.fn(), revalidate: vi.fn() });
+    mockRunAgentTurn.mockImplementation((input: any) => { input.onReviewPreparationBlocked('proposal_unreviewable'); return events({ type: 'done' }) as any; });
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+    expect(finishReviewPreparation).toHaveBeenCalledWith(stubPool, claim, 'blocked', 'proposal_unreviewable');
+  });
 });
 
 /**
@@ -570,8 +615,8 @@ describe('runOperatorTurn — model selection', () => {
 
     await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
 
-    expect(DEFAULT_OPERATOR_MODEL).toBe('anthropic/claude-sonnet-4.5');
-    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('anthropic/claude-sonnet-4.5');
+    expect(DEFAULT_OPERATOR_MODEL).toBe('deepseek/deepseek-v4.1-flash');
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('deepseek/deepseek-v4.1-flash');
     // The exact class of id that 404s: no provider segment.
     expect(DEFAULT_OPERATOR_MODEL).toContain('/');
     expect(DEFAULT_OPERATOR_MODEL).not.toMatch(/^claude-/);
@@ -641,6 +686,15 @@ describe('runOperatorTurn — model selection', () => {
     });
 
     expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('openai/gpt-5');
+  });
+
+  it.each(['timer', 'event'] as const)('uses the organization model on a %s wake before the deployment fallback', async reason => {
+    process.env.OPERATOR_MODEL = 'vendor/deployment';
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    const wake = reason === 'timer' ? { reason } : { reason, table: 'entities', rowId: 'row' };
+    await runOperatorTurn(stubPool, { job: { ...job, model: 'vendor/organization' }, wake });
+    expect(mockRunAgentTurn.mock.calls[0][0].model).toBe('vendor/organization');
+    expect(mockGetConv).toHaveBeenCalledWith(stubPool, job.organizationId, 'vendor/organization');
   });
 
   it('ignores a blank OPERATOR_MODEL rather than sending an empty model id', async () => {
@@ -781,12 +835,59 @@ describe('runOperatorTurn — trace id (D1)', () => {
     expect(mockMarkResumed).toHaveBeenCalledWith(stubPool, 'appr-gate-1');
   });
 
-  it('does not resume while an approval is still pending (no resumable row is even looked at)', async () => {
+  it('runs but does not resume while an approval is still pending', async () => {
+    // The previous test leaves a resolved-unconsumed approval on the mock; this
+    // case is about a still-PENDING one, which the real query filters out.
+    mockFindResumable.mockResolvedValue(null);
     mockListPending.mockResolvedValue([pendingApproval('appr-pending')]);
 
     await runOperatorTurn(stubPool, { job, wake: { reason: 'timer', traceId: 'optr_x' } });
 
-    expect(mockRunAgentTurn).not.toHaveBeenCalled();
+    // Since 2026-08-08 a pending decision no longer skips the wake (see the
+    // long note in operatorPreflight); it only must not be consumed as a
+    // resume, so this wake keeps its own minted trace id.
+    expect(mockRunAgentTurn).toHaveBeenCalledTimes(1);
+    expect(mockRunAgentTurn.mock.calls[0][0]).toMatchObject({ traceId: 'optr_x' });
     expect(mockMarkResumed).not.toHaveBeenCalled();
+  });
+});
+
+describe('runOperatorTurn — organization access guard', () => {
+  afterEach(() => { setOperatorAccessPolicy(null); });
+
+  it('passes a guard that consults the registered policy', async () => {
+    mockRunAgentTurn.mockReturnValue(events({ type: 'done' }) as any);
+    const evaluate = vi.fn(async () => ({ allowed: true, reason: null, approvalMode: 'consequential' as const }));
+    setOperatorAccessPolicy({ evaluate });
+
+    await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    const input = mockRunAgentTurn.mock.calls[0][0] as { accessGuard?: () => Promise<unknown> };
+    expect(typeof input.accessGuard).toBe('function');
+    // Task 8: the guard also carries the policy's `approvalMode`, which is
+    // what activates the Office consequential floor inside the loop. It is
+    // forwarded verbatim — the transport is not the place to reinterpret it.
+    await expect(input.accessGuard!()).resolves.toEqual({
+      allowed: true,
+      reason: null,
+      approvalMode: 'consequential',
+    });
+    expect(evaluate).toHaveBeenCalledWith({
+      organizationId: job.organizationId,
+      phase: 'run',
+      origin: 'operator',
+    });
+  });
+
+  it('returns a typed access-blocked skip when the turn reports blocked', async () => {
+    mockRunAgentTurn.mockReturnValue(events({ type: 'blocked', reason: 'credits_required' }) as any);
+
+    const r = await runOperatorTurn(stubPool, { job, wake: { reason: 'timer' } });
+
+    expect(r).toMatchObject({
+      error: null,
+      approvalId: null,
+      skipped: { reason: 'access_blocked', blockedReason: 'credits_required' },
+    });
   });
 });

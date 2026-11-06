@@ -30,6 +30,15 @@ import pg from 'pg';
  * didn't fit, with no signal that anything was lost.
  */
 export const OPERATOR_SCRATCHPAD_MAX_CHARS = 8000;
+const OFFICE_TASK_NOTES_PREFIX = '#!office-task-notes-v2\n';
+export function formatOfficeTaskNotes(content: string): string {
+  const max = OPERATOR_SCRATCHPAD_MAX_CHARS - OFFICE_TASK_NOTES_PREFIX.length;
+  if (content.length > max) throw new Error(`Office working notes exceed ${max} characters`);
+  return OFFICE_TASK_NOTES_PREFIX + content;
+}
+export function readOfficeTaskNotes(content: string): string | null {
+  return content.startsWith(OFFICE_TASK_NOTES_PREFIX) ? content.slice(OFFICE_TASK_NOTES_PREFIX.length) : null;
+}
 
 export type OperatorScratchpad = {
   organizationId: string;

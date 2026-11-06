@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { NotFoundError } from './api-errors.js';
+import { roundCreditUsd as roundUsd } from './credit-precision.js';
 
 export interface GrantArgs {
   /** User whose action is being billed (audit + credit_leases.user_id). */
@@ -15,6 +16,8 @@ export interface GrantArgs {
    *  FULL amount rather than partial-granting down to the balance. Overdraft
    *  lands in credits_usd, which may go negative. */
   allowFloor?: boolean;
+  /** Optional durable caller identity. Replays never debit twice. */
+  reservationId?: string;
 }
 
 export interface GrantResult {
@@ -27,20 +30,153 @@ export interface GrantResult {
   floorUsd: number;
 }
 
+/** A closed identity can never acquire a new lease, even if no lease existed. */
+export class ReservationClosedError extends Error {
+  constructor() {
+    super('Reservation is closed');
+    this.name = 'ReservationClosedError';
+  }
+}
+
+export interface LeaseReservationClosure {
+  reservationId: string;
+  organizationId: string;
+  hadLease: boolean;
+  closedAt: Date;
+}
+
+async function lockReservation(client: pg.PoolClient, reservationId: string): Promise<void> {
+  // Must precede the organization lock in grantLease. Closure itself never
+  // acquires an org/lease row lock; existing settlement runs after this commit.
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('credit-reservation:' || $1::uuid::text, 0))", [reservationId]);
+}
+
+export async function getLeaseReservationClosure(
+  db: pg.Pool | pg.PoolClient,
+  args: { reservationId: string; organizationId: string },
+): Promise<LeaseReservationClosure | null> {
+  const result = await db.query<{ reservation_id: string; organization_id: string; had_lease: boolean; closed_at: Date }>(
+    'SELECT reservation_id,organization_id,had_lease,closed_at FROM credit_reservation_closures WHERE reservation_id=$1',
+    [args.reservationId],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  if (row.organization_id !== args.organizationId) throw new Error('Reservation identity mismatch');
+  return { reservationId: row.reservation_id, organizationId: row.organization_id, hadLease: row.had_lease, closedAt: row.closed_at };
+}
+
+/**
+ * Serialize closure against ALL grants of this identity, including an absent
+ * lease. hadLease=false is durable evidence that no grant can ever arrive.
+ * hadLease=true still requires ordinary terminal settlement before a receipt.
+ */
+export async function closeLeaseReservation(
+  platformPool: pg.Pool,
+  args: { reservationId: string; organizationId: string },
+): Promise<LeaseReservationClosure> {
+  const client = await platformPool.connect();
+  try {
+    await client.query('BEGIN');
+    await lockReservation(client, args.reservationId);
+    const existing = await getLeaseReservationClosure(client, args);
+    if (existing) {
+      await client.query('COMMIT');
+      return existing;
+    }
+    const lease = await client.query<{ organization_id: string }>(
+      'SELECT organization_id FROM credit_leases WHERE lease_id=$1', [args.reservationId],
+    );
+    if (lease.rows[0] && lease.rows[0].organization_id !== args.organizationId) throw new Error('Reservation identity mismatch');
+    await client.query(
+      'INSERT INTO credit_reservation_closures(reservation_id,organization_id,had_lease) VALUES ($1,$2,$3)',
+      [args.reservationId,args.organizationId,lease.rows.length > 0],
+    );
+    const closed = (await getLeaseReservationClosure(client, args))!;
+    await client.query('COMMIT');
+    return closed;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * The exact columns and floor resolution `grantLease` admits on:
+ * `COALESCE(organizations.credit_floor_usd, plans.credit_floor_usd, 0)`.
+ * A per-org override beats the plan's tier default, which beats 0 when there
+ * is no plan at all (plan_id NULL or dangling).
+ *
+ * Kept as one string so the read-only inspector and the leasing path cannot
+ * drift apart. `grantLease` appends `FOR UPDATE OF o` to serialize its own
+ * write; `readOrganizationCreditState` reads without a lock.
+ */
+const CREDIT_STATE_SELECT = `SELECT o.monthly_allowance_usd,
+       o.credits_usd,
+       COALESCE(o.credit_floor_usd, p.credit_floor_usd, 0) AS credit_floor_usd
+  FROM organizations o
+  LEFT JOIN plans p ON p.id = o.plan_id`;
+
+interface CreditStateRow {
+  monthly_allowance_usd: string;
+  credits_usd: string;
+  credit_floor_usd: string;
+}
+
+export interface OrganizationCreditState {
+  /** Combined balance: monthly allowance + top-up credits. */
+  balanceUsd: number;
+  /** Effective admission floor for this organization. */
+  floorUsd: number;
+}
+
+function parseCreditState(row: CreditStateRow): OrganizationCreditState {
+  return {
+    balanceUsd: parseFloat(row.monthly_allowance_usd) + parseFloat(row.credits_usd),
+    floorUsd: parseFloat(row.credit_floor_usd),
+  };
+}
+
+/**
+ * Read-only mirror of `grantLease`'s admission inputs. Returns null when the
+ * organization does not exist. Never locks, leases, or debits anything; the
+ * gateway's own `grantLease` remains the authoritative admission decision.
+ */
+export async function readOrganizationCreditState(
+  db: pg.Pool | pg.PoolClient,
+  organizationId: string,
+): Promise<OrganizationCreditState | null> {
+  const result = await db.query<CreditStateRow>(
+    `${CREDIT_STATE_SELECT}
+     WHERE o.id = $1`,
+    [organizationId],
+  );
+  const row = result.rows[0];
+  return row ? parseCreditState(row) : null;
+}
+
 export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promise<GrantResult> {
-  if (args.amountUsd <= 0) throw new Error('grantLease: amountUsd must be positive');
+  const requested = roundUsd(args.amountUsd);
+  if (requested <= 0) throw new Error('grantLease: amountUsd must be positive');
   if (args.ttlSeconds <= 0) throw new Error('grantLease: ttlSeconds must be positive');
 
   const client = await platformPool.connect();
   try {
     await client.query('BEGIN');
+    if (args.reservationId) {
+      await lockReservation(client, args.reservationId);
+      if (await getLeaseReservationClosure(client, { reservationId: args.reservationId, organizationId: args.organizationId })) {
+        throw new ReservationClosedError();
+      }
+    }
     // Per-org billing (Phase 3b). Caller passes args.organizationId — this
     // is the app's owning org (AI gateway) or an explicit billing subject.
     // No implicit personal-org fallback at this layer.
     const organizationId = args.organizationId;
-    // Floor resolution: COALESCE(organizations.credit_floor_usd, plans.credit_floor_usd, 0)
-    // — a per-org override beats the plan's tier default, which beats 0 when
-    // there is no plan at all (plan_id NULL or dangling).
+    // Floor resolution and admission arithmetic live in CREDIT_STATE_SELECT /
+    // parseCreditState so the read-only funding inspector cannot drift from
+    // this path.
     //
     // `FOR UPDATE OF o` on purpose: this SELECT joins plans, and a bare
     // `FOR UPDATE` on a join takes row locks on BOTH tables. Locking a shared
@@ -48,26 +184,34 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     // every org on that tier and risks deadlock. Scoping the lock to `o`
     // leaves plans unlocked; organizations is the only row this function
     // mutates.
-    const u = await client.query<{
-      monthly_allowance_usd: string;
-      credits_usd: string;
-      credit_floor_usd: string;
-    }>(
-      `SELECT o.monthly_allowance_usd,
-              o.credits_usd,
-              COALESCE(o.credit_floor_usd, p.credit_floor_usd, 0) AS credit_floor_usd
-       FROM organizations o
-       LEFT JOIN plans p ON p.id = o.plan_id
+    const u = await client.query<CreditStateRow>(
+      `${CREDIT_STATE_SELECT}
        WHERE o.id = $1 FOR UPDATE OF o`,
       [organizationId]
     );
     if (u.rows.length === 0) throw new NotFoundError('organization', organizationId);
 
+    // `monthly` is also needed to draw the allowance before top-up credits.
     const monthly = parseFloat(u.rows[0].monthly_allowance_usd);
-    const topup = parseFloat(u.rows[0].credits_usd);
-    const floor = parseFloat(u.rows[0].credit_floor_usd);
-    const totalAvailable = monthly + topup;
+    const { balanceUsd: totalAvailable, floorUsd: floor } = parseCreditState(u.rows[0]);
     const expires = new Date(Date.now() + args.ttlSeconds * 1000);
+
+    if (args.reservationId) {
+      const existing = await client.query<{ lease_id: string; organization_id: string; user_id: string; region: string; amount_usd: string; expires_at: Date; status: string }>(
+        'SELECT lease_id,organization_id,user_id,region,amount_usd,expires_at,status FROM credit_leases WHERE lease_id=$1', [args.reservationId]);
+      const row = existing.rows[0];
+      if (row) {
+        if (row.organization_id !== organizationId || row.user_id !== args.userId || row.region !== args.region || Number(row.amount_usd) !== requested) throw new Error('Reservation identity mismatch');
+        if (row.status !== 'active' || row.expires_at <= new Date()) throw new Error('Reservation is no longer active');
+        // Reauthorization on replay excludes this reservation's own draw.
+        if (args.allowFloor && totalAvailable + Number(row.amount_usd) < floor) {
+          await client.query('COMMIT');
+          return { leaseId: null, amountGranted: 0, expiresAt: row.expires_at, balanceUsd: totalAvailable, floorUsd: floor };
+        }
+        await client.query('COMMIT');
+        return { leaseId: row.lease_id, amountGranted: Number(row.amount_usd), expiresAt: row.expires_at, balanceUsd: totalAvailable, floorUsd: floor };
+      }
+    }
 
     let granted: number;
     if (args.allowFloor) {
@@ -76,9 +220,9 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
         await client.query('COMMIT');
         return { leaseId: null, amountGranted: 0, expiresAt: expires, balanceUsd: totalAvailable, floorUsd: floor };
       }
-      granted = args.amountUsd;
+      granted = requested;
     } else {
-      granted = Math.min(totalAvailable, args.amountUsd);
+      granted = roundUsd(Math.min(totalAvailable, requested));
     }
 
     if (granted <= 0) {
@@ -89,8 +233,8 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     // monthly is drawn first and never driven negative; credits_usd absorbs the
     // remainder and is the ONLY column permitted to go negative (it persists
     // across billing cycles, so debt cannot be erased by a monthly reset).
-    const monthlyDraw = Math.max(0, Math.min(monthly, granted));
-    const topupDraw = +(granted - monthlyDraw).toFixed(4);
+    const monthlyDraw = roundUsd(Math.max(0, Math.min(monthly, granted)));
+    const topupDraw = roundUsd(granted - monthlyDraw);
     let sourcePool: 'monthly' | 'topup' | 'split';
     let topupAmountColumn: number | null;
     if (monthlyDraw > 0 && topupDraw === 0) {
@@ -118,10 +262,10 @@ export async function grantLease(platformPool: pg.Pool, args: GrantArgs): Promis
     }
 
     const ins = await client.query<{ lease_id: string }>(
-      `INSERT INTO credit_leases (user_id, organization_id, region, amount_usd, expires_at, status, source_pool, topup_amount_usd)
-       VALUES ($1, $2, $3, $4, $5, 'active', $6, $7)
+      `INSERT INTO credit_leases (user_id, organization_id, region, amount_usd, expires_at, status, source_pool, topup_amount_usd, lease_id)
+       VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, COALESCE($8::uuid,gen_random_uuid()))
        RETURNING lease_id`,
-      [args.userId, organizationId, args.region, granted, expires, sourcePool, topupAmountColumn]
+      [args.userId, organizationId, args.region, granted, expires, sourcePool, topupAmountColumn, args.reservationId ?? null]
     );
 
     await client.query('COMMIT');
@@ -206,10 +350,10 @@ export async function settleLease(
     const granted = parseFloat(r.rows[0].amount_usd);
     // Legacy clamps the charge to the reservation (never bills beyond what was
     // pre-debited). Reserve-small bills the true cost and trues up the delta.
-    const actual = args.allowOverdraft
+    const actual = roundUsd(args.allowOverdraft
       ? Math.max(0, args.actualUsd)
-      : Math.min(Math.max(0, args.actualUsd), granted);
-    const delta = +(actual - granted).toFixed(4);
+      : Math.min(Math.max(0, args.actualUsd), granted));
+    const delta = roundUsd(actual - granted);
     const orgIdRow = r.rows[0].organization_id;
     const sourcePool = r.rows[0].source_pool;
     const topupPortion = r.rows[0].topup_amount_usd ? parseFloat(r.rows[0].topup_amount_usd) : 0;
@@ -236,8 +380,8 @@ export async function settleLease(
         [orgIdRow]
       );
       const monthlyNow = parseFloat(cur.rows[0].monthly_allowance_usd);
-      const fromMonthly = Math.max(0, Math.min(monthlyNow, delta));
-      const fromTopup = +(delta - fromMonthly).toFixed(4);
+      const fromMonthly = roundUsd(Math.max(0, Math.min(monthlyNow, delta)));
+      const fromTopup = roundUsd(delta - fromMonthly);
       if (fromMonthly > 0) {
         await client.query(
           `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd - $1 WHERE id = $2`,
@@ -251,7 +395,7 @@ export async function settleLease(
         );
       }
     } else if (delta < 0) {
-      refund = +(-delta).toFixed(4);
+      refund = -delta;
       if (sourcePool === 'monthly') {
         await client.query(
           `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,
@@ -263,8 +407,8 @@ export async function settleLease(
           [refund, orgIdRow]
         );
       } else {
-        const monthlyRefund = +((refund * monthlyPortion) / granted).toFixed(4);
-        const topupRefund = +(refund - monthlyRefund).toFixed(4);
+        const monthlyRefund = roundUsd((refund * monthlyPortion) / granted);
+        const topupRefund = roundUsd(refund - monthlyRefund);
         if (monthlyRefund > 0) {
           await client.query(
             `UPDATE organizations SET monthly_allowance_usd = monthly_allowance_usd + $1 WHERE id = $2`,

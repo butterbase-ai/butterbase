@@ -116,11 +116,15 @@ export interface StorageConfig {
   allowedContentTypes?: string[];
 }
 
+export type PausedBy = 'owner' | 'admin' | 'idle_reaper' | 'staging_reaper';
+
 export interface PausedState {
   app_id: string;
   paused: boolean;
   paused_at: string | null;
   paused_reason: string | null;
+  /** Who paused the app; null when not paused (or paused before this field existed). */
+  paused_by: PausedBy | null;
 }
 
 // ── Functions ──

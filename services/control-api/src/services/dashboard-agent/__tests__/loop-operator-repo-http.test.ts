@@ -39,6 +39,18 @@ vi.mock('../approvals-store.js', () => ({
   checkTrust: vi.fn(),
 }));
 
+/**
+ * The operator's managed-key containment guard validates a `bb_sk_…` token
+ * against the control database. These tests use a real-looking service key
+ * deliberately (it must never reach the sandbox) over a stub pool, so the
+ * guard's lookup throws and every tool call is denied before the repo path is
+ * reached. The guard itself is covered by locked-key-access's own tests; this
+ * file is about which repo transport a turn uses.
+ */
+vi.mock('../../locked-key-access.js', () => ({
+  assertOperatorKeyArguments: vi.fn(async () => {}),
+}));
+
 /** See the file header: `write_file` must dispatch for hydration to be reached. */
 vi.mock('../operator-policy.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../operator-policy.js')>();

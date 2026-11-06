@@ -200,7 +200,15 @@ export interface CopyJobSnapshot {
   status: 'pending' | 'processing' | 'completed' | 'failed' | 'aborted';
   phase: string | null;
   error_message: string | null;
-  result: { reconnect?: { email: string; toolkit: string }[] } | null;
+  result: {
+    reconnect?: { email: string; toolkit: string }[];
+    /**
+     * Customer-facing notes the engine already worded, e.g. files whose bytes
+     * were missing in production and so could not be copied. Carried through
+     * verbatim; this side does not need to know what produced them.
+     */
+    warnings?: string[];
+  } | null;
   created_at: Date;
   started_at: Date | null;
 }
@@ -349,5 +357,6 @@ export function stagingCopyWarnings(copy: CopyJobSnapshot): string[] {
       + 'live in staging: connect them again on the staging app if you need them.',
     );
   }
+  warnings.push(...(copy.result?.warnings ?? []));
   return warnings;
 }

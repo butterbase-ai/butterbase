@@ -3,6 +3,8 @@
  * not internal implementation.
  */
 
+import { OFFICE_ACTIONS } from '@butterbase/shared';
+
 export const DOC_TOPICS = [
   'all',
   'overview',
@@ -24,11 +26,46 @@ export const DOC_TOPICS = [
   'rag',
   'integrations',
   'substrate',
+  'office',
 ] as const;
 
 export type DocTopic = (typeof DOC_TOPICS)[number];
 
 const SECTIONS: Record<Exclude<DocTopic, 'all'>, string> = {
+  office: `## Office clients
+
+The optional cloud MCP tool \`manage_office\`, CLI \`butterbase office\`, and standalone SDK \`OfficeClient\` share one organization-scoped facade. OSS-only MCP installations may omit this cloud tool. Every MCP call requires \`org_id\` (UUID); every CLI command requires \`--org <uuid>\` and supports \`--json\`. Use a platform credential, without an app ID or app end-user session.
+
+The exact ${OFFICE_ACTIONS.length} MCP actions are: ${OFFICE_ACTIONS.join(', ')}.
+
+Curated agent context uses agentMemories in the SDK and agent-memories in the CLI, independently of explicit business memory operations. Record accepts title (160 characters), relevance_summary (320), body (16000), capture_origin and optional sources. Amend/archive require memory_id and expected_revision. Lists/searches return compact summaries; get reads the full body. Shared context belongs to the organization. It never grants permissions or replaces standing rules. Agent retrieval uses only this category by default; other categories require an explicit read.
+
+Skill list/get/versions/runs are separate bounded reads; API clients see approved versions and non-test histories. draft_skill returns a durable Ask turn; test_skill pins a read-only test; reject_skill records a reason. approve_skill, set_skill_enabled, rollback_skill and run_skill prepare browser confirmations. Rule amend_principle/retire_principle writes always remain native proposals requiring approval. settings.get/update use get_office_settings/update_office_settings; update accepts interval_minutes (10,15,30,60), expected_revision and a write key, returning a browser confirmation. Paused settings changes never resume work. Every-loop skills run after admitted timer or event sweeps within one shared ten-minute budget; unchanged checks, Ask, tests, manual/scheduled skills and recovery-only turns do not create loops, and extra runs can spend credits.
+
+list_office_records / SDK records.list / CLI records list reads entities, business_memory, source_artifacts, actions, principles, skills, skill_versions or skill_runs. Supply skill_id for the two skill histories; optional kind/status filters are resource-specific. Pages default to 25, maximum 100. Continue next_cursor with identical organization, resource and filters. Cutoff-bound pages do not promise a transaction-wide snapshot. Loaded counts are not total counts.
+
+Enable, pause, resume and approve prepare one saved command. The result is a receipt: state awaiting_confirmation, confirmation_id, confirmation_url, expires_at. Show the URL to the initiating owner; never resolve it as an agent. The owner signs in to the browser, reviews the stored organization/target/consequence, and clicks Confirm or Cancel. Cancel rejects this receipt only; closing the tab leaves it pending. Browser resolution uses the initiating owner's JWT, current ownership/key/plan checks and the configured dashboard Origin. It grants no standing agent authority.
+
+Observe a receipt with action status + confirmation_id, CLI status --confirmation <id>, or SDK getConfirmation / waitForConfirmation. Protected CLI commands return immediately unless --wait is set; --open launches a browser only by explicit request. States executing, failed, expired, rejected and outcome_unknown are distinct. Unknown outcomes must be inspected, not blindly replayed.
+
+Ask input: {action:"ask", org_id, message, idempotency_key, conversation_id?, wait_ms?}. The bounded wait defaults to 15000 ms, maximum 25000 ms. A response may still be running or awaiting_approval and always identifies turn_id + conversation_id. Poll get_conversation with those exact IDs; never submit another Ask just to observe. One running/approval-suspended turn may be open per conversation. Conversations belong to the initiating user and organization and have Office origin.
+
+The SDK exports OfficeClient({apiUrl, organizationId, getToken, fetch?}), with getStatus, enable, pause, resume, ask, and decisions/conversations/memory/principles namespaces. Requests return {data,error}. askStream(message, options) submits once and yields public typed events; askStream('', {conversationId, turnId, afterSequence}) observes an existing turn with GET only. Typed stream failures preserve replay pointers. AbortSignal or CLI SIGINT stops observation without cancelling admitted server work. A suspended approval has no running lease; resolution runs no automatic model continuation. Replay expires after24 hours; events_expired includes exact history pointers and the saved turn remains readable.
+
+Memory wraps existing Substrate readers and the native ledger. record_decision requires payload.title and payload.kind; record_commitment requires payload.description and payload.status; record_learning requires payload.title and payload.description; record_principle requires payload.title, payload.applies_to and payload.constraint_spec. Optional source/entity references must be in this organization. CLI record commands read --file <json>; SDK exports OfficeRecordDecisionInput, OfficeRecordCommitmentInput, OfficeRecordLearningInput, OfficeRecordPrincipleInput. Principles remain pending native proposals. Office confirmation cannot override unresolved or newly discovered policy conflicts.
+
+Decisions use decision_id and decision_source (office or substrate, default office). CLI uses --source; SDK uses {source,id}. Read the exact saved context before approving. Current members can read and deny saved decisions even when paused/unfunded; new Ask, conversation creation and memory writes require the current owner and eligible active organization. Managed background keys cannot mutate this external facade. Lists expose next_cursor; search_memory is bounded and has no cursor.
+
+Enable/pause/resume/approve, Ask, conversation creation and memory/principle recording require idempotency keys: MCP uses idempotency_key and CLI accepts --idempotency-key. The SDK generates one key per intended keyed write and reuses it on a safe retry; failed keyed-write errors retain that key. Changed input under the same key returns idempotency_conflict. Denial addresses an existing decision and accepts no idempotency key; inspect its saved state before retrying. Waiting never re-POSTs. A wait timeout may return the last receipt alongside a typed observation_timeout error.
+
+CLI --json prints one {data,error} value on stdout and diagnostics only on stderr; --json --stream collects public events into the final object. Exit0 means accepted/read (including pending); exit1 means request/terminal failure, rejection/expiry/unknown or observation timeout/interruption; exit2 means usage/input error.
+
+REST conversation and exact-turn event GETs optionally accept activity_version=1 for bounded observed tool steps and safe result summaries, or activity_version=2 for captured invocation UUID detail_ref references. Default/version 1 and strict stored events are unchanged. Neither opt-in is currently exposed by MCP/CLI/SDK arguments. Read latest recorded sanitized Input/Result using GET /v1/me/office/conversations/:id/activity/:invocationId (external facade) or GET /v1/dashboard-agent/conversations/:id/activity/:invocationId (website), under current user/org/conversation authorization; no public-demo route. Later final approval resolution is distinct from the original receipt and includes observation phase/status/time. Unknown/opaque values, secrets, environment values, code/logs/media, credential URLs and unclassified business-row columns are withheld. Text is capped at 4096 UTF-8 bytes, each preview envelope at 12288 bytes, capture at 512 invocations per run and the website cache at 32 entries. No raw backfill; old steps say details were not recorded. Retry/open/refresh only read and never execute a tool. Apply additive control migration 150_office_tool_activity_previews.sql before the API, then customer Office/docs; retain additive tables on application rollback. Full contract: https://docs.butterbase.ai/api-reference/office-api/#input-and-result-previews-activity-version-2. A completed step is not enclosing-turn completion; use the saved turn outcome. Default observation remains compatible. The Office website separately shows live steps above answers and retains unknown outcomes for history without authoritative completion evidence.
+
+Website model settings: Dashboard Settings and Office sidebar Settings → Conversation defaults share a personal default for new chats. Office's message-bar picker changes only the current conversation, including before its first message; New conversation returns to the personal default. Both products support saved conversation model overrides. Owners separately choose the organization model in Office Settings → Office background model or Dashboard organization settings for routine checks and skill runs; members can read it. Defaults fall back to deepseek/deepseek-v4.1-flash. JWT-only GET/PATCH /v1/dashboard-agent/preferences and /v1/dashboard-agent/operator/model expose these preferences; the organization route requires x-organization-id and owner access for PATCH. PATCH {model:null} resets a preference. These are website routes, not new manage_office actions. Self-hosters apply control migration 149_agent_model_preferences.sql first. Environment fallbacks are DASHBOARD_ASSISTANT_MODEL and OPERATOR_MODEL. Full settings reference: https://docs.butterbase.ai/api-reference/office-api/#model-preferences.
+
+Full reference: https://docs.butterbase.ai/core-concepts/office-clients/ and https://docs.butterbase.ai/api-reference/office-api/.
+`,
   overview: `## Butterbase
 
 Butterbase is a backend platform built for developers who build products with AI assistants. You describe what you need in natural language; your assistant can provision apps, evolve your database schema safely, configure sign-in for your end users, manage file storage, deploy serverless functions, and expose data through automatic HTTP APIs.
@@ -77,6 +114,7 @@ Your AI assistant connects to Butterbase through MCP. That connection lets the a
 | **manage_app** (action: "move") | Move an existing app to another region. Pass \`dest_region\`; returns a \`migration_id\`. The app stays available for reads during the move. |
 | **manage_app** (action: "move_status") | Check the progress of a move in flight. Pass \`migration_id\` (returned by action: "move"). |
 | **manage_app** (action: "teardown_source_replica") | After a completed move, decommission the retained source-region replica. Pass \`migration_id\`. |
+| **manage_app** (action: "resume") | Resume a paused app. Use action "resume" to bring a paused app back. While an app is paused, its owners keep management and data access (functions, KV and realtime are blocked for everyone, owners included); every other caller gets 503 APP_PAUSED on every app-scoped API. 503 APP_PAUSED responses include details.paused_by ("owner", "admin", "idle_reaper", "staging_reaper"). An "idle_reaper" pause on a free plan can't be resumed directly (402 APP_RESUME_REQUIRES_UPGRADE); upgrading the plan resumes it. Pause/resume can return retryable 409 APP_STATE_BUSY during concurrent state changes or region cutovers. Visitors to a paused app's site get an HTTP 503 "This project is paused." page within about a minute; Durable Object (/_do/) paths keep working. |
 | **manage_app** (action: "list") | List all apps you have access to with their metadata. |
 | **manage_app** (action: "delete") | Permanently delete an app and its database. This is irreversible. |
 | **manage_app** (action: "get_config") | Read an app's current configuration (CORS origins, JWT settings, storage limits). |
@@ -147,7 +185,7 @@ Your AI assistant connects to Butterbase through MCP. That connection lets the a
 
 If your environment connects to a hosted MCP endpoint, include your API key as a Bearer token in the Authorization header on each request. The MCP endpoint URL and your API key are provided when you set up your connection.
 
-You can generate API keys using \`manage_auth_config\` (action: "generate_service_key") or through the dashboard. Keys are prefixed with \`bb_sk_\` and provide full access to your apps and data.
+You can generate API keys using \`manage_auth_config\` (action: "generate_service_key") or through the dashboard. Keys are prefixed with \`bb_sk_\` and provide full access to your apps and data. Platform keys are organization-scoped; organization-scoped API requests name the organization with the \`X-Organization-Id\` header and the API verifies membership. Managed keys created by a hosted product are locked to one organization and cannot administer organizations.
 
 ### Claude Code Plugin
 
@@ -943,6 +981,33 @@ export default async function handler(req: Request): Promise<Response> {
 Function-specific environment variables (set via \`envVars\` when deploying) are available through the \`ctx\` parameter passed to your handler function. Access them as \`ctx.env.VAR_NAME\`.
 
 **Important:** Use \`ctx.env\`, not \`Deno.env.get()\`. System environment variables (like database credentials) are available via \`Deno.env.get()\`, but function-specific env vars are isolated in \`ctx.env\` to prevent conflicts.
+
+**Key-value store: \`ctx.kv\`:**
+Functions share the app's KV store through \`ctx.kv\`. Methods: \`get\`, \`set\`, \`del\`, \`incr\`, \`decr\`, \`setnx\`, \`cas\`, \`exists\`, \`ttl\`, \`expire\`, \`mget\`, \`mset\`, \`expose\`, \`unexpose\`, \`listRules\`.
+
+- **Values round-trip through JSON.** \`set(key, value)\` stores any JSON value and \`get(key)\` returns the decoded value; a missing key is \`null\`. There is no raw mode inside the runtime — use the MCP \`manage_kv\` tool when you need the stored JSON text.
+- **TTL is fixed at write and does not slide.** \`set(key, value, { ttl: seconds })\` and \`setnx(key, value, { ttl })\` set it; \`expire(key, seconds)\` moves it; \`ttl(key)\` returns seconds, \`null\` when the key has no expiry, or \`null\` when absent.
+- **Atomic primitives.** \`setnx(key, value)\` writes only when the key is absent and returns \`true\` when it wrote, \`false\` otherwise. \`cas(key, expected, next)\` swaps only when the current value equals \`expected\` and returns \`true\` when it swapped.
+- **Release a lock with compare-and-delete, not get-then-delete.** \`get(key) === token\` followed by \`del(key)\` is race-prone: the TTL can expire between the two calls and a new holder's lock can be deleted. Use \`cas(key, token, null)\` and only call \`del\` when the swap succeeded.
+- **\`mget(keys)\` returns values in the same order as the keys.** A missing key is \`null\`. A present key whose stored value cannot be decoded raises a \`KvError\` naming the key — it is never reported as \`null\`.
+- **JWT/anon access** is granted per pattern with \`expose(pattern, { read, write })\`; \`listRules()\` shows the current rules.
+
+\`\`\`javascript
+export default async function handler(request, ctx) {
+  const lockKey = 'lock:daily-sync';
+  const token = crypto.randomUUID();
+  const acquired = await ctx.kv.setnx(lockKey, token, { ttl: 900 });
+  if (!acquired) return new Response('already running', { status: 409 });
+  try {
+    // ... work ...
+    const [a, b] = await ctx.kv.mget(['sync:a', 'sync:b']);
+    return Response.json({ a, b });
+  } finally {
+    const released = await ctx.kv.cas(lockKey, token, null);
+    if (released) await ctx.kv.del(lockKey);
+  }
+}
+\`\`\`
 
 ### Row-Level Security in Functions
 
@@ -1983,6 +2048,44 @@ Streams \`video/mp4\` bytes. The \`?index=\` parameter selects among multiple ou
 
 **MCP shortcut:** Through the \`manage_ai\` MCP tool, use \`{ action: "submit_video", ... }\` and \`{ action: "poll_video", ... }\`.
 
+### Image generation models and options
+
+Discover executable image models with MCP \`manage_ai\` action \`list_models\`, \`modality: "image"\`, or REST \`GET /v1/{app_id}/ai/models?modality=image\`. The list includes configured image adapters that claim the model; discovered but unimplemented models are excluded.
+
+Submit images with \`manage_ai\` action \`submit_image\` or \`POST /v1/{app_id}/images/completions\`. New canonical IDs are \`openai/gpt-image-2.5-flare\`, \`openai/gpt-image-2.5-sunburst\`, \`x-ai/grok-imagine-image-2.0\`, \`x-ai/grok-imagine-image-quality\`, \`black-forest-labs/flux-3-image\`, and \`black-forest-labs/flux-3-image-klein\`; use IDs returned by the connected deployment's model list.
+
+GPT Image 2.5 accepts explicit pixel \`size\` such as \`1024x1024\` or \`auto\`, 1–10 outputs and up to 14 references through this API. Pixel edges are multiples of 16, at most 3840 each, with 655360–8294400 total pixels and at most 3:1 aspect ratio. Grok uses \`1K\`/\`2K\`, one output and up to three references. FLUX 3 Image/Klein use \`768\`/\`1K\`/\`1.5K\`/\`2K\`/\`4K\`, one output and up to ten references. These models accept model-specific \`aspect_ratio\` and ordered \`input_images\`; explicit pixel dimensions and ratio must agree.
+
+Pass rendering options in \`provider\`: GPT Image 2.5 supports \`quality\` (auto/low/medium/high/xhigh/max), \`background\` (auto/opaque/transparent) and integer \`output_compression\` (0–100). Grok Image 2.0 supports \`quality\` low/medium; Grok Quality and FLUX 3 expose no provider options. These newer image contracts do not expose seed or mask. Unsupported options return \`UNSUPPORTED_PARAM\` before generation.
+
+Reservations are estimates with headroom. Returned provider usage is authoritative when available; the customer charge includes the applicable account markup. Unknown price formats remain estimates rather than verified price quotes.
+
+### Optional fictional character references
+
+Eligible apps and models can declare specific image slots as AI-generated fictional characters:
+
+\`\`\`json
+{
+  "input_images": ["https://images.example/fictional-character.png"],
+  "reference_declarations": [
+    {"path": "/input_images/0", "kind": "ai_generated_fictional_character"}
+  ],
+  "prepare_references": "on_rejection"
+}
+\`\`\`
+
+Add these fields to an ordinary REST video request or to MCP \`manage_ai\` with \`action: "submit_video"\`. The MCP client must use a server version whose tool schema includes both fields. Declare only images the caller knows are AI-generated fictional characters. A declaration does not establish consent for a real person's likeness or guarantee that an image will pass provider validation. Do not infer a declaration from appearance or a prompt.
+
+\`on_rejection\` is the default: prepare only after a verified eligible input rejection and retry once after settlement. \`upfront\` prepares all declared slots before submission. Canonical paths address image entries in \`input_images\`, \`frame_images\`, or \`input_references\`; use one canonical collection and avoid conflicting aliases. Up to eight distinct slots can be declared. Undeclared requests use ordinary video generation.
+
+Submission returns the same stable \`job_id\` while the worker advances through \`preparing_references\`, \`submitting\`, \`polling\`, and \`settling\`. Polling reads status; it does not trigger generation. Completion includes authenticated content URLs and acknowledged charges. Unsupported app/model combinations return \`UNSUPPORTED_REFERENCE_PREPARATION\`. Changed image bytes, unavailable or rejected assets, and capacity exhaustion may fail preparation. A timeout with unknown provider acceptance remains pending for reconciliation; do not submit another job merely because polling is slow.
+
+When retained-output delivery is enabled for a prepared job, Butterbase copies every generated video into private app storage before completing the job and settling a successful charge. These outputs count toward app and organization storage limits and remain private when app-wide public reads are enabled. Authenticated content URLs support a single byte range. Deleting a generated output makes its content endpoint return 410; app copies exclude prepared-video history. Older provider-backed jobs keep their existing retention behavior. Failed storage delivery charges zero.
+
+Preparation sends declared images to an external generation provider for storage and validation. Registration is not separately charged in this release; video generation uses the app's normal credits and settled usage. Source URLs and prompts are removed from preparation records after 24 hours. Provider copies are queued for deletion when the last retained job reference is released, subject to active jobs and unresolved operations; provider deletion can therefore take longer. App deletion preserves cleanup obligations and unsettled billing evidence. URL inputs have no storage-object identity: deleting the original file does not immediately delete its provider copy. Use stable storage \`objectId\` values in your own app and resolve fresh download URLs when loading UI.
+
+There is no character-library dashboard. Preparation eligibility and resource limits are deployment-controlled. For troubleshooting, inspect the returned stage and sanitized error, verify the declaration and unchanged image bytes, and contact the operator for unresolved acceptance or cleanup.
+
 ### Available models
 
 Butterbase supports a wide range of frontier and open-source models. Common models include:
@@ -2592,7 +2695,7 @@ Butterbase offers three plan tiers. Each plan includes a set of monthly usage al
 | **HIPAA** | — | — | Paid add-on |
 | **SLA** | — | — | Yes |
 
-Free projects are paused after 1 week of inactivity.
+Free projects are paused after 1 week of inactivity. Owners receive a warning and a follow-up reminder first, with the remaining time explained in each email. Real app traffic and qualifying human frontend visits count as activity; scheduled cron jobs do not. An inactivity-paused free project requires an upgrade to resume; upgrading automatically brings it back. Paid projects are excluded from inactivity pausing. Visitors to a paused project see an HTTP 503 "This project is paused." page, and Durable Object (/_do/) paths keep working.
 
 ### Usage meters
 
@@ -3565,7 +3668,7 @@ Browse available integrations. Returns the curated list by default; pass \`searc
 
 #### manage_integrations (action: "execute_action")
 
-Execute an action on a user's connected account. The integration must be configured for the app, and the user must have a connected account.
+Execute an action on a user's connected account. The integration must be configured for the app, and the user must have a connected account. Pass the tool as \`tool_name\`; the older alias \`tool_slug\` is still accepted, and when both are sent \`tool_name\` wins. \`execute_read\` tools are Office-only; app-scoped calls should use the toolkit's regular action tools.
 
 \`\`\`json
 {
@@ -3816,7 +3919,7 @@ export async function handler(req, ctx) {
 }
 \`\`\`
 
-Every read method (\`searchMemory\`, \`listMemory\`, \`listSourceArtifacts\`, \`listActions\`) returns an array (empty when there are no matches — never an error). The \`get*\` methods return the row or \`null\` when the id is unknown.
+Successful read methods (\`searchMemory\`, \`listMemory\`, \`listSourceArtifacts\`, \`listActions\`) return an array, empty when there are no matches. Invalid arguments can return errors. The \`get*\` methods return the row or \`null\` when the id is unknown.
 
 Agent-proposed side-effecting actions (e.g. \`send_email_draft\`) always require human approval even if the user has \`yolo_mode\` on. Memory writes (\`record_decision\`, etc.) auto-execute.
 
@@ -3833,6 +3936,7 @@ Agent-proposed side-effecting actions (e.g. \`send_email_draft\`) always require
 | POST   | /v1/me/substrate/actions/{id}/reject | Reject a pending action |
 | GET    | /v1/me/substrate/entities | List / search entities |
 | GET    | /v1/me/substrate/entities/{id} | Fetch one entity |
+| GET    | /v1/me/substrate/removals | Audit log of hard entity removals |
 | GET    | /v1/me/substrate/memory?q=… | Full-text search (or list-all when q omitted) across decisions/commitments/learnings/source_artifacts |
 | GET    | /v1/me/substrate/memory/list | Chronological browse with structural filters (kinds, source_artifact_id, superseded, keyset pagination) |
 | GET    | /v1/me/substrate/source-artifacts[…] | List / fetch source artifacts (meeting transcripts, email threads, documents) |
@@ -3841,6 +3945,14 @@ Agent-proposed side-effecting actions (e.g. \`send_email_draft\`) always require
 | GET\\|PUT\\|DELETE | /v1/me/substrate/outbox-targets[…] | Webhook targets per capability |
 | POST   | /v1/me/substrate/ws-ticket | Mint a 60s ticket for the WS stream |
 | WS     | /v1/me/substrate/stream | Live push of every ledger / entity / rule / firing change |
+
+Ledger status filters accept \`proposed\`, \`approved\`, \`rejected\`, \`executing\`, \`executed\`, \`failed\`, and \`reverted\`. For reads only, \`pending\` is an alias for \`proposed\`. Omit status for all states; an empty or unknown HTTP filter returns 400 \`invalid_action_status\`, and MCP \`manage_substrate\` action \`list_actions\` rejects it during argument validation. The alias does not change action writes or outbox delivery states.
+
+\`approved\` is a decision fact, not a resting state: a row appears under \`status=approved\` once a human approved it (\`approved_at\` is set), whether it is still executing, already executed, or failed. \`proposed\` is the only status that means "awaiting a decision". No-op rows — an identical \`upsert_entity\`, an \`update_entity\` whose values already match — are recorded as \`executed\` with \`result.changed: false\` and hidden from \`list_actions\` by default; pass \`include_noops: true\` to include them.
+
+Entity reads exclude soft-deleted rows by default. \`retire_entity\` stamps \`deleted_at\`; pass \`include_deleted: true\` on \`find_entities\` to include retired rows. \`list_removals\` returns the \`entity_removals\` audit log — every hard-removed entity row (\`delete_entity\`, \`merge_entities\`, or out-of-band SQL), with a snapshot of the removed row and the ledger \`action_id\` that caused it (\`null\` for out-of-band deletes). Soft deletes are visible on the entity as \`deleted_at\` instead.
+
+Propose validates reference fields before dispatch: a dangling \`source_artifact_id\`, \`related_decision_id\`, or \`supersedes\` returns HTTP 400 \`VALIDATION_INVALID_REFERENCE\` with \`details.field\`; the MCP tool surfaces the same error body. Argument validation errors from \`manage_substrate\` include \`field\` naming the offending top-level argument, including unknown keys.
 
 ### Propose an action
 
@@ -3950,8 +4062,8 @@ All substrate operations are exposed through a single MCP tool: \`manage_substra
 
 Action groups:
 - **Writes:** \`propose\`, \`approve\`, \`reject\`. All substrate writes (decisions, commitments, learnings, entities, source artifacts) go through \`propose\` with the appropriate \`capability\`.
-- **Ledger:** \`list_actions\`, \`get_action\`.
-- **Entities:** \`find_entities\`, \`get_entity\`.
+- **Ledger:** \`list_actions\`, \`get_action\`, \`list_removals\` (hard entity-removal audit log).
+- **Entities:** \`find_entities\`, \`get_entity\`. Pass \`include_deleted: true\` on \`find_entities\` to include soft-deleted rows.
 - **Source artifacts:** \`list_source_artifacts\`, \`get_source_artifact\`. Writes use \`propose\` with \`capability: "upsert_source_artifact"\`.
 - **Memory:** \`search_memory\` — FTS-ranked search; params: \`q\` (optional; omit or pass \`*\` to list the most recent items by \`updated_at DESC\`, no FTS ranking), \`kinds\` (subset of \`decisions\`, \`commitments\`, \`learnings\`, \`source_artifacts\`), \`limit\`, \`match\` (\`and\` [default] | \`or\` | \`phrase\`). Each result row includes \`source_artifact_id\` (back-pointer to the source artifact, nullable), \`supersedes\` (replaced decision ID, only on \`kind: 'decision'\`), and \`status\` (\`active\`/\`superseded\`/\`reversed\`/\`expired\` for decisions; \`proposed\`/\`confirmed\`/\`fulfilled\`/\`expired\`/\`broken\`/etc. for commitments; \`null\` for learnings and source_artifacts). \`list_memory\` — chronological browse (no FTS); params: \`kinds\`, \`source_artifact_id\` (restrict to rows linked to this artifact; source_artifact rows excluded when set), \`superseded\` (boolean; \`false\` excludes superseded decisions and expired commitments), \`before\` (ISO timestamp keyset cursor from \`next_before\`), \`limit\` (1–100, default 25). Returns \`{ results, next_before }\`.
 
@@ -3974,6 +4086,7 @@ Critical asymmetry: \`record_decision\` auto-approves, but \`record_principle\`,
 | record_principle | approval_required | no | Mutates policy layer |
 | supersede_decision | approval_required | no | Mutates policy layer |
 | retire_principle | approval_required | no | Mutates policy layer |
+| retire_entity | auto | yes | Soft delete: sets deleted_at; hidden from reads unless include_deleted |
 | delete_entity | approval_required | no | Hard delete, not recoverable |
 | merge_entities | approval_required | no | Loser becomes an alias |
 | bulk_revert_actions | approval_required | no | Up to 200 actions; per-action failures collected, not raised |
@@ -4041,12 +4154,14 @@ update_entity
   display_name?: string
   primary_email?: string  (email)
   attrs?: object
+  canonical_keys?: object  (replaces canonical_keys wholesale)
 
 patch_entity
   id: string
   display_name?: string
   primary_email?: string  (email)
   attrs_patch?: object  (RFC 7396 merge-patch; null value removes a key)
+  canonical_keys_patch?: object  (RFC 7396 merge-patch over canonical_keys)
   if_updated_at?: string  (datetime, optimistic concurrency lock)
 
 merge_entities
@@ -4054,9 +4169,15 @@ merge_entities
   winner_id: string
   reason: string
 
+retire_entity
+  id: string
+  reason: string
+  note: soft delete (sets deleted_at); reversible; preferred over delete_entity
+
 delete_entity
   id: string
   reason: string
+  note: hard delete; recorded in entity_removals
 
 upsert_source_artifact
   kind: string
@@ -4138,6 +4259,7 @@ export function getUserDocumentation(topic: DocTopic): string {
       SECTIONS.realtime,
       SECTIONS.integrations,
       SECTIONS.substrate,
+      SECTIONS.office,
     ].join('\n\n');
   }
   return SECTIONS[topic];

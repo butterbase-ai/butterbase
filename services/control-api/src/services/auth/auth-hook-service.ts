@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { cronOriginHeaders } from '../cron-origin.js';
 import { butterbaseRegionToFlyRegion, parseFlyRegionMap } from '@butterbase/shared';
 import { config } from '../../config.js';
 import { resolveAppHomeRegion } from '../region-resolver.js';
@@ -61,11 +62,13 @@ export function fireAuthHook(
       const homeRegion = await resolveAppHomeRegion(controlDb, appId);
       const runtimePool = getRuntimeDbPool(config.runtimeDb, homeRegion);
       const result = await runtimePool.query(
-        'SELECT auth_hook_function FROM apps WHERE id = $1',
+        'SELECT auth_hook_function, paused FROM apps WHERE id = $1',
         [appId],
       );
       const hookFunction = result.rows[0]?.auth_hook_function;
       if (!hookFunction) return;
+      // A paused app runs no code, auth hooks included.
+      if (result.rows[0]?.paused) return;
 
       try {
         const response = await fetch(`${config.runtimeUrl}/execute/${appId}/${hookFunction}`, {
@@ -73,6 +76,7 @@ export function fireAuthHook(
           headers: {
             'Content-Type': 'application/json',
             'x-app-id': appId,
+            ...cronOriginHeaders(appId),
             // Route to the app's home-region runtime — see authHookRegionHeaders.
             ...authHookRegionHeaders(homeRegion),
           },

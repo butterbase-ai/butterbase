@@ -1,45 +1,19 @@
 import type { RouterAdapter, UpstreamModel, ChatCompletionRequest, EmbeddingRequest, DecisionRequest, AdapterResult, AdapterErrorKind, Modality, VideoGenerationRequest, VideoSubmitResult, VideoPollResult, ImageGenerationRequest, ImageSubmitResult, ImagePollResult, ImageSupportedParams } from './types.js';
 import { AdapterError, isUpstreamCreditExhaustionBody } from './types.js';
 import { extractReasoningTokens } from '../reasoning.js';
+import { openrouterImageModel } from './openrouter-image-models.js';
+import { normalizeOpenRouterVideoInputs } from './openrouter-video-inputs.js';
 
 /**
- * OpenRouter has a dedicated OpenAI-Images-compatible endpoint at
+ * OpenRouter has a dedicated image-generation endpoint at
  * POST /api/v1/images/generations. Request shape: { model, prompt, n?, size?,
  * seed? }. Response shape: { created, data: [{ b64_json, media_type }], usage:
  * { cost, ... } } — `response_format` is ignored; base64 is always returned.
  *
- * The endpoint accepts `image`/`mask` inputs for edits, but our validator maps
- * them into `input_images[]` / `mask` (URLs). We forward `input_images` as
- * `image` (single) or the array (multi) iff the model advertises it, and
- * `mask` as `mask`. Support here is conservative — probed live per model.
+ * Reference images use OpenRouter's typed `input_references` array. Translate
+ * Butterbase's `input_images` URLs into image_url parts, including for a single
+ * reference. The OpenAI-style `image` field is silently ignored by Gemini.
  */
-const OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL: ReadonlySet<string> = new Set([
-  'size',
-  'n',
-  'seed',
-  'input_images',
-]);
-const OPENROUTER_IMAGE_SUPPORTED_PROVIDER: ReadonlySet<string> = new Set([]);
-
-/**
- * Canonical IDs OpenRouter serves as image models via /api/v1/images/generations.
- * Each entry was probed live with a real POST — models that failed (e.g.
- * `sourceful/riverflow-v2.5-pro`, which requires aspect_ratio and rejects the
- * OpenAI-Images `size` param) are excluded here AND from
- * CANONICAL_IMAGE_MODEL_ROUTES in select.ts.
- */
-const OPENROUTER_IMAGE_MODELS: ReadonlySet<string> = new Set([
-  'openai/gpt-image-2',
-  'openai/gpt-image-1',
-  'openai/gpt-image-1-mini',
-  'google/gemini-3.1-flash-lite-image',
-  'google/gemini-3.1-flash-image',
-  'google/gemini-3-pro-image',
-  'black-forest-labs/flux.2-pro',
-  'black-forest-labs/flux.2-max',
-  'black-forest-labs/flux.2-flex',
-  'black-forest-labs/flux.2-klein-4b',
-]);
 
 interface OpenRouterConfig {
   apiKey: string;
@@ -385,7 +359,9 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     req: VideoGenerationRequest,
     upstreamId: string,
   ): Promise<VideoSubmitResult> {
-    const body = { ...req, model: upstreamId };
+    const normalized = normalizeOpenRouterVideoInputs(req);
+    if (!normalized.ok) throw new AdapterError('openrouter', 400, 'bad_request', normalized.error);
+    const body = { ...normalized.request, model: upstreamId };
     const res = await fetcher(`${base}/videos`, {
       method: 'POST',
       headers: {
@@ -464,15 +440,16 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
    * recognises this and settles the row inline without polling.
    */
   async function submitImage(req: ImageGenerationRequest, upstreamId: string): Promise<ImageSubmitResult> {
-    // input_images / mask are forwarded as OpenAI-Images-style `image` / `mask`
-    // fields (single image → string, multi → array). OpenRouter's docs show
-    // these accepted on models that advertise edit mode; models that don't
-    // silently ignore. Rejection of unsupported params happens at the route
-    // via getSupportedImageParams — we only include them here if the caller
-    // provided them.
-    const imageParam = req.input_images && req.input_images.length > 0
-      ? (req.input_images.length === 1 ? req.input_images[0] : req.input_images)
-      : undefined;
+    const model = openrouterImageModel(req.model);
+    const invalid = model?.params.validate?.(req);
+    if (invalid) throw new AdapterError('openrouter', 400, 'bad_request', `${invalid.param}: ${invalid.message}`);
+    // https://openrouter.ai/docs/api/api-reference/images/generate-an-image
+    // Both single and multiple references use the same typed array. Keep the
+    // caller's ordering so prompts can refer to images by their position.
+    const inputReferences = req.input_images?.map(url => ({
+      type: 'image_url' as const,
+      image_url: { url },
+    }));
 
     const body = {
       model: upstreamId,
@@ -480,11 +457,14 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
       ...(req.n != null ? { n: req.n } : {}),
       ...(req.size ? { size: req.size } : {}),
       ...(req.seed != null ? { seed: req.seed } : {}),
-      ...(imageParam !== undefined ? { image: imageParam } : {}),
+      ...(inputReferences?.length ? { input_references: inputReferences } : {}),
       ...(req.mask ? { mask: req.mask } : {}),
+      ...(model?.params.topLevel.has('aspect_ratio') && req.aspect_ratio !== undefined ? { aspect_ratio: req.aspect_ratio } : {}),
+      ...Object.fromEntries([...(model?.params.provider ?? [])]
+        .filter(key => req.provider?.[key] !== undefined).map(key => [key, req.provider![key]])),
     };
 
-    const res = await fetcher(`${base}/images/generations`, {
+    const res = await fetcher(`${base}/${model?.endpoint ?? 'images/generations'}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -511,25 +491,26 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
     throwIfUpstreamCreditExhaustion('openrouter', res.status, json);
 
     const first = json.data?.[0];
-    if (!first || typeof first.b64_json !== 'string' || first.b64_json.length === 0) {
+    if (!first || !json.data!.every(item => typeof item.b64_json === 'string' && item.b64_json.length > 0)) {
       // Deliberate: return failed rather than throw so the job row settles cleanly
       // (no lease refund; upstream cost was presumably $0 in this case).
       return {
         upstreamJobId: `or-img-${crypto.randomUUID()}`,
         pollingUrl: '',
         status: 'failed',
-        error: 'OpenRouter images endpoint returned no b64_json in data[0]',
+        error: 'OpenRouter images endpoint returned incomplete image data',
+        providerCostUsd: pickProviderCost(json.usage) ?? undefined,
       };
     }
 
     const contentType = first.media_type ?? 'image/png';
-    const dataUri = `data:${contentType};base64,${first.b64_json}`;
+    const dataUris = json.data!.map(item => `data:${item.media_type ?? 'image/png'};base64,${item.b64_json}`);
 
     return {
       upstreamJobId: `or-img-${crypto.randomUUID()}`,
       pollingUrl: '',  // sync-inline; route settles without polling
       status: 'completed',
-      unsignedUrls: [dataUri],
+      unsignedUrls: dataUris,
       providerCostUsd: pickProviderCost(json.usage) ?? undefined,
       contentType,
     };
@@ -552,11 +533,7 @@ export function openrouterAdapter(cfg: OpenRouterConfig): RouterAdapter {
   }
 
   function getSupportedImageParams(canonicalId: string): ImageSupportedParams | null {
-    if (!OPENROUTER_IMAGE_MODELS.has(canonicalId)) return null;
-    return {
-      topLevel: OPENROUTER_IMAGE_SUPPORTED_TOPLEVEL,
-      provider: OPENROUTER_IMAGE_SUPPORTED_PROVIDER,
-    };
+    return openrouterImageModel(canonicalId)?.params ?? null;
   }
 
   return {

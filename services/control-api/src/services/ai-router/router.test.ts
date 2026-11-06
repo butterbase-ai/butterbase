@@ -1337,3 +1337,142 @@ describe('wrapStreamForSettlement', () => {
     expect(cost).toBe(0.005);
   });
 });
+
+describe('param_unsupported fallback and model parameter policy', () => {
+  function stubRedis(catalogEntry: any, routers: any[]) {
+    return {
+      get: vi.fn(async (key: string) => {
+        if (key === `ai_catalog:model:${catalogEntry.canonicalId}`) return JSON.stringify(catalogEntry);
+        if (key === 'ai_catalog:routers') return JSON.stringify(routers);
+        return null;
+      }),
+      mget: vi.fn(async (..._keys: string[]) => [null, null, null, null, null]),
+      set: vi.fn(async () => 'OK'),
+    } as any;
+  }
+
+  function makeCtx(redis: any, adapters: Map<string, RouterAdapter>) {
+    return {
+      platformPool: makePoolStub(),
+      runtimePool: makePoolStub(),
+      redis,
+      adapters,
+      markupPct: 0, markupSource: 'global', appId: 'a', userId: 'u', region: 'r',
+    } as any;
+  }
+
+  function chatAdapter(name: string, fn: RouterAdapter['chatCompletion']): RouterAdapter {
+    return {
+      name: name as any,
+      toUpstreamId: () => 'm',
+      listModels: vi.fn(async () => []),
+      chatCompletion: fn,
+    } as RouterAdapter;
+  }
+
+  function okResult(id: string) {
+    return {
+      status: 200,
+      body: { id, object: 'chat.completion', model: 'm', choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+      usage: { promptTokens: 1, completionTokens: 1, totalCost: null },
+      providerCostUsd: null,
+    };
+  }
+
+  it('falls through when an upstream rejects a parameter it does not support', async () => {
+    const catalogEntry = entryMulti(
+      { name: 'provider-secondary', pp: 1, cp: 1 },
+      { name: 'openrouter', pp: 2, cp: 2 },
+    );
+    const first = chatAdapter('provider-secondary', vi.fn(async () => {
+      throw new AdapterError('provider-secondary' as any, 400, 'param_unsupported', 'unsupported chat completion parameter(s): temperature');
+    }));
+    const second = chatAdapter('openrouter', vi.fn(async () => okResult('r2')));
+    const redis = stubRedis(catalogEntry, [
+      { name: 'provider-secondary', enabled: true },
+      { name: 'openrouter', enabled: true },
+    ]);
+
+    const res = await routeChatCompletion(
+      makeCtx(redis, new Map([['provider-secondary', first], ['openrouter', second]])),
+      { model: 'm', messages: [{ role: 'user', content: 'hi' }] },
+    );
+
+    expect(res.chosen).toBe('openrouter');
+    expect(second.chatCompletion).toHaveBeenCalledTimes(1);
+    // A parameter rejection is caller/request-scoped — it must not cool the slot.
+    expect(redis.set).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a 400 rather than 502 when every candidate rejects the same parameter', async () => {
+    const catalogEntry = entryMulti(
+      { name: 'provider-secondary', pp: 1, cp: 1 },
+      { name: 'openrouter', pp: 2, cp: 2 },
+    );
+    const mk = (name: string) => chatAdapter(name, vi.fn(async () => {
+      throw new AdapterError(name as any, 400, 'param_unsupported', 'unsupported chat completion parameter(s): top_p');
+    }));
+    const redis = stubRedis(catalogEntry, [
+      { name: 'provider-secondary', enabled: true },
+      { name: 'openrouter', enabled: true },
+    ]);
+
+    await expect(routeChatCompletion(
+      makeCtx(redis, new Map([['provider-secondary', mk('provider-secondary')], ['openrouter', mk('openrouter')]])),
+      { model: 'm', messages: [{ role: 'user', content: 'hi' }] },
+    )).rejects.toMatchObject({ name: 'AdapterError', kind: 'param_unsupported', statusCode: 400 });
+  });
+
+  it('strips deprecated sampling params before dispatch for gemini-3.8-flash', async () => {
+    const catalogEntry = {
+      canonicalId: 'google/gemini-3.8-flash',
+      displayName: 'Google: Gemini 3.8 Flash',
+      updatedAt: new Date().toISOString(),
+      routers: [{ name: 'provider-secondary', upstreamId: 'gemini-3.8-flash', promptPricePerMtok: 1, completionPricePerMtok: 1, contextLength: 100 }],
+    };
+    let captured: any = null;
+    const adapter = chatAdapter('provider-secondary', vi.fn(async (req: any) => {
+      captured = req;
+      return okResult('r');
+    }));
+    const redis = stubRedis(catalogEntry, [{ name: 'provider-secondary', enabled: true }]);
+
+    await routeChatCompletion(
+      makeCtx(redis, new Map([['provider-secondary', adapter]])),
+      {
+        model: 'google/gemini-3.8-flash',
+        messages: [{ role: 'user', content: 'hi' }],
+        temperature: 0.7,
+        top_p: 0.9,
+        max_tokens: 16,
+      } as any,
+    );
+
+    expect(captured.temperature).toBeUndefined();
+    expect(captured.top_p).toBeUndefined();
+    expect(captured.max_tokens).toBe(16);
+    expect(captured.messages).toEqual([{ role: 'user', content: 'hi' }]);
+  });
+
+  it('keeps sampling params for a model that still accepts them', async () => {
+    const catalogEntry = {
+      canonicalId: 'google/gemini-3.5-flash',
+      displayName: 'Google: Gemini 3.5 Flash',
+      updatedAt: new Date().toISOString(),
+      routers: [{ name: 'provider-secondary', upstreamId: 'gemini-3.5-flash', promptPricePerMtok: 1, completionPricePerMtok: 1, contextLength: 100 }],
+    };
+    let captured: any = null;
+    const adapter = chatAdapter('provider-secondary', vi.fn(async (req: any) => {
+      captured = req;
+      return okResult('r');
+    }));
+    const redis = stubRedis(catalogEntry, [{ name: 'provider-secondary', enabled: true }]);
+
+    await routeChatCompletion(
+      makeCtx(redis, new Map([['provider-secondary', adapter]])),
+      { model: 'google/gemini-3.5-flash', messages: [{ role: 'user', content: 'hi' }], temperature: 0.7 } as any,
+    );
+
+    expect(captured.temperature).toBe(0.7);
+  });
+});

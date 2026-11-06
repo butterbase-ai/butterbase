@@ -89,3 +89,14 @@ describe('executeCopyRuntime', () => {
     expect(stateOrderBy).toBeDefined();
   });
 });
+
+describe('preparation tables before migration', () => {
+  it('skips absent source tables without copying or archiving', async () => {
+    const source = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+    const dest = { query: vi.fn() };
+    const ctx: any = { runtimePoolFor: (r: string) => r === 'source' ? source : dest, log: { info: vi.fn() } };
+    await executeCopyRuntime(ctx, { id: 'mig',app_id: 'app',source_region: 'source',dest_region: 'dest',dest_resources: {} } as any);
+    expect(dest.query).not.toHaveBeenCalled();
+    expect(source.query.mock.calls.every(([sql]) => String(sql).includes('information_schema'))).toBe(true);
+  });
+});

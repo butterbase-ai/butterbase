@@ -29,6 +29,13 @@ export type DeployDeps = {
   onDeploymentProgress(evt: DeploymentProgressEvent): void
   pollIntervalMs?: number
   maxWaitMs?: number
+  /**
+   * Bound for the R2 PUT. A black-holed upload otherwise holds the approval
+   * request open until the proxy times out, and the build is never started —
+   * the owner sees a blank 502 and a PENDING job. Injectable so tests can
+   * prove the deadline without waiting 30 seconds.
+   */
+  uploadTimeoutMs?: number
 }
 
 export function createDeployer(deps: DeployDeps) {
@@ -55,6 +62,7 @@ export function createDeployer(deps: DeployDeps) {
    * a build that genuinely died.
    */
   const maxMs = deps.maxWaitMs ?? 15 * 60 * 1000
+  const uploadTimeoutMs = deps.uploadTimeoutMs ?? 30_000
 
   /**
    * Never throws. Every failure is `{ ok: false, error }`, because the
@@ -107,7 +115,31 @@ export function createDeployer(deps: DeployDeps) {
         )
       }
 
-      const put = await fetch(upload_url, { method: 'PUT', body: zipBuf as BodyInit, headers: { 'Content-Type': 'application/zip' } })
+      const uploadSignal = AbortSignal.timeout(uploadTimeoutMs)
+      let put: Response
+      try {
+        put = await fetch(upload_url, {
+          method: 'PUT',
+          body: zipBuf as BodyInit,
+          headers: { 'Content-Type': 'application/zip' },
+          signal: uploadSignal,
+        })
+      } catch (err) {
+        // The signal is aborted BEFORE fetch rejects, so this tells OUR
+        // deadline apart from a connection reset or DNS failure.
+        if (uploadSignal.aborted) {
+          return {
+            ok: false as const,
+            error:
+              `upload timed out after ${uploadTimeoutMs}ms; the build was not started ` +
+              `and the approval can be retried`,
+          }
+        }
+        return {
+          ok: false as const,
+          error: `upload failed: ${err instanceof Error ? err.message : String(err)}`,
+        }
+      }
       if (!put.ok) return { ok: false as const, error: `upload failed: ${put.status}` }
 
       await deps.mcp.call('manage_frontend', {

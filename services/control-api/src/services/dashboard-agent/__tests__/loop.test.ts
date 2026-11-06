@@ -11,6 +11,17 @@
 import { describe, it, expect, vi, beforeEach, type MockedFunction } from 'vitest';
 import type pg from 'pg';
 
+/**
+ * The tool-call cap is UNLIMITED by default since builder mode landed
+ * ("builder-mode chains 20+ tool calls per turn routinely" — see
+ * TOOL_CALL_LIMIT). This suite pins the CAP's behaviour, so it must supply one,
+ * and it must do so before loop.ts reads the env at import time — hence
+ * `vi.hoisted` rather than a statement in `beforeEach`.
+ */
+vi.hoisted(() => {
+  process.env.DASHBOARD_AGENT_TOOL_CALL_LIMIT = '8';
+});
+
 // ---------------------------------------------------------------------------
 // Module mocks — must be declared before any dynamic imports
 // ---------------------------------------------------------------------------
@@ -33,7 +44,22 @@ vi.mock('../approvals-store.js', () => ({
   checkTrust: vi.fn(),
 }));
 
+// The public tool names are literal here because operator-policy.ts
+// (imported by the loop since the Office floor landed) reads them at module
+// scope. `vi.importActual` inside this factory hangs the Windows test worker
+// during collection, so the values are copied instead — they are stable public
+// tool names, and loop-operator-policy.test.ts exercises the real module.
 vi.mock('../tool-catalog.js', () => ({
+  PROPOSE_ACTION_TOOL: 'propose_action',
+  OPERATOR_SCRATCHPAD_TOOL: 'update_operator_scratchpad',
+  READ_OPERATOR_SCRATCHPAD_TOOL: 'read_operator_scratchpad',
+  OPERATOR_SANDBOX_CODE_TOOL: 'run_sandbox_code',
+  OPERATOR_BUILD_TOOL: 'build_app',
+  OPERATOR_PENDING_DECISIONS_TOOL: 'list_pending_decisions',
+  READ_TOOL_RESULT_TOOL: 'read_tool_result',
+  isReadToolResultTool: (name: string) => name === 'read_tool_result',
+  SKILL_CREATOR_TOOL: 'skill_creator',
+  RUN_SKILL_SCRIPT_TOOL: 'run_skill_script',
   getToolCatalog: vi.fn().mockReturnValue([
     {
       name: 'manage_app',
@@ -80,6 +106,12 @@ vi.mock('../tool-catalog.js', () => ({
     name === 'write_file' || name === 'read_file' || name === 'list_files' || name === 'delete_file',
   isDeployTool: (name: string) => name === 'deploy_frontend',
   isDeployFunctionTool: (name: string) => name === 'deploy_function_from_workspace',
+  // Loop-internal operator tools the loop asks about by predicate (the same
+  // import-chain fix as the constants above — see the comment there).
+  isOperatorScratchpadTool: (name: string) => name === 'update_operator_scratchpad',
+  isRunSandboxCodeTool: (name: string) => name === 'run_sandbox_code',
+  isBuildAppTool: (name: string) => name === 'build_app',
+  isListPendingDecisionsTool: (name: string) => name === 'list_pending_decisions',
   sensitivityFor: (name: string, args: any) => {
     const action = args && typeof args === 'object' ? (args as Record<string, unknown>).action : null;
     if (name === 'manage_app' && (action === 'delete' || action === 'pause')) return 'destructive';
@@ -98,6 +130,7 @@ import * as storeModule from '../store.js';
 import * as mcpClientModule from '../mcp-client.js';
 import * as approvalsStoreModule from '../approvals-store.js';
 import { runAgentTurn, type LoopEvent } from '../loop.js';
+import { createOfficeActivityProjector, projectOfficeConversationActivity } from '../office-activity.js';
 
 // ---------------------------------------------------------------------------
 // Typed helpers to keep tests clean
@@ -289,8 +322,10 @@ describe('runAgentTurn — one tool call', () => {
       { type: 'done' },
     ]);
 
-    // MCP called with flat args
-    expect(mockCallMcpTool).toHaveBeenCalledWith('manage_app', { action: 'list' }, 'test-jwt');
+    // MCP called with flat args. The trailing org/trace/trigger-context
+    // arguments are undefined on a dashboard turn; slice past them so this
+    // assertion stays about the call itself.
+    expect(mockCallMcpTool.mock.calls[0].slice(0, 3)).toEqual(['manage_app', { action: 'list' }, 'test-jwt']);
 
     // 4 persisted rows: user, assistant+tool_call, tool_result, final assistant
     expect(mockAppendMessage).toHaveBeenCalledTimes(4);
@@ -599,8 +634,8 @@ describe('runAgentTurn — two tool calls in one pass (Fix 1)', () => {
 
     // Two MCP calls with the correct arguments
     expect(mockCallMcpTool).toHaveBeenCalledTimes(2);
-    expect(mockCallMcpTool).toHaveBeenNthCalledWith(1, 'manage_app', { action: 'list' }, 'test-jwt');
-    expect(mockCallMcpTool).toHaveBeenNthCalledWith(2, 'manage_app', { action: 'get_config', id: 'app_x' }, 'test-jwt');
+    expect(mockCallMcpTool.mock.calls[0].slice(0, 3)).toEqual(['manage_app', { action: 'list' }, 'test-jwt']);
+    expect(mockCallMcpTool.mock.calls[1].slice(0, 3)).toEqual(['manage_app', { action: 'get_config', id: 'app_x' }, 'test-jwt']);
 
     // Persistence: 1 user + 2 assistant (one per tool_call) + 2 tool + 1 final assistant = 6
     expect(mockAppendMessage).toHaveBeenCalledTimes(6);
@@ -1286,7 +1321,7 @@ describe('runAgentTurn — conversation auto-titling (Plan 3e Task 2)', () => {
       ]),
     );
 
-    mockGetConversation.mockResolvedValueOnce(stubConversation);
+    mockGetConversation.mockResolvedValue(stubConversation);
     const gatewayChatSpy = vi.fn().mockResolvedValue('Todo App Setup');
     const snapshotTitleGatewayFactory = vi.fn().mockReturnValue({ chat: gatewayChatSpy });
     mockUpdateConversationTitle.mockResolvedValueOnce({ ...stubConversation, title: 'Todo App Setup' });
@@ -1323,7 +1358,7 @@ describe('runAgentTurn — conversation auto-titling (Plan 3e Task 2)', () => {
       ]),
     );
 
-    mockGetConversation.mockResolvedValueOnce({ ...stubConversation, title: 'Renamed by user' });
+    mockGetConversation.mockResolvedValue({ ...stubConversation, title: 'Renamed by user' });
     const gatewayChatSpy = vi.fn();
     const snapshotTitleGatewayFactory = vi.fn().mockReturnValue({ chat: gatewayChatSpy });
 
@@ -1344,7 +1379,7 @@ describe('runAgentTurn — conversation auto-titling (Plan 3e Task 2)', () => {
       ]),
     );
 
-    mockGetConversation.mockResolvedValueOnce(stubConversation);
+    mockGetConversation.mockResolvedValue(stubConversation);
     const gatewayChatSpy = vi.fn().mockRejectedValue(new Error('timeout'));
     const snapshotTitleGatewayFactory = vi.fn().mockReturnValue({ chat: gatewayChatSpy });
 
@@ -1377,7 +1412,9 @@ function toolCallPassFor(callId: string, name: string, argsJson: string) {
 }
 
 describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
-  it('gates an untrusted destructive call: creates an approval, emits approval_required, never dispatches MCP, and terminates the turn without done', async () => {
+  it.each([false, true])('gates an untrusted destructive call without done (record evidence %s)', async recordOfficeActivity => {
+    const evidenceQuery = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+    stubPool.query = evidenceQuery as any;
     global.fetch = vi.fn().mockResolvedValueOnce(
       toolCallPassFor('call-del', 'manage_app', '{"action":"delete","id":"app_1"}'),
     );
@@ -1397,7 +1434,7 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
       resolvedAt: null,
     });
 
-    const events = await collect(runAgentTurn(baseInput));
+    const events = await collect(runAgentTurn({ ...baseInput, recordOfficeActivity }));
 
     expect(mockCheckTrust).toHaveBeenCalledWith(stubPool, 'conv-1', 'manage_app');
     expect(mockCreateApproval).toHaveBeenCalledWith(
@@ -1420,6 +1457,9 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
       },
     ]);
 
+    if (recordOfficeActivity) expect(evidenceQuery.mock.calls.filter(([sql]) => String(sql).includes('dashboard_agent_office_turns')).at(-1)?.[1]).toEqual(['conv-1', 'msg-stub', 'awaiting_approval', null, 'approval-1']);
+    else expect(evidenceQuery.mock.calls.some(([sql]) => String(sql).includes('dashboard_agent_office_turns'))).toBe(false);
+
     // Never reaches MCP dispatch.
     expect(mockCallMcpTool).not.toHaveBeenCalled();
     // Turn is paused, not completed.
@@ -1431,6 +1471,16 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
     );
     expect(pausedRow).toBeDefined();
     expect((pausedRow![2] as { pendingApprovalId?: string }).pendingApprovalId).toBe('approval-1');
+    const live = createOfficeActivityProjector().observe(events[0]);
+    const call = { ...pausedRow![2], id: 'paused-row', role: 'assistant' };
+    const pending = projectOfficeConversationActivity([{ id: 'user-row', role: 'user' }, call]);
+    expect(live?.id).toBe('call-del');
+    expect(pending[0].steps[0].id).toBe(live?.id);
+    const resolved = projectOfficeConversationActivity([{ id: 'user-row', role: 'user' }, { ...call, pendingApprovalId: null },
+      { id: 'resolved-row', role: 'tool', toolCallId: 'call-del', toolResult: { ok: false, error: 'User denied. Reason: SECRET' } }]);
+    expect(resolved[0].steps).toMatchObject([{ id: 'call-del', status: 'denied' }]);
+    expect(JSON.stringify(events[0])).toEqual(JSON.stringify({ type: 'approval_required', approval_id: 'approval-1', tool_name: 'manage_app', args: { action: 'delete', id: 'app_1' }, sensitivity: 'destructive' }));
+
   });
 
   it('leaves a safe tool call unaffected (no trust check, no approval, dispatches MCP normally)', async () => {
@@ -1447,7 +1497,7 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
 
     expect(mockCheckTrust).not.toHaveBeenCalled();
     expect(mockCreateApproval).not.toHaveBeenCalled();
-    expect(mockCallMcpTool).toHaveBeenCalledWith('manage_app', { action: 'list' }, 'test-jwt');
+    expect(mockCallMcpTool.mock.calls[0].slice(0, 3)).toEqual(['manage_app', { action: 'list' }, 'test-jwt']);
     expect(events.find((e) => e.type === 'approval_required')).toBeUndefined();
     expect(events.find((e) => e.type === 'done')).toBeDefined();
   });
@@ -1467,8 +1517,68 @@ describe('runAgentTurn — sensitivity gate (Plan 3b Task 2)', () => {
 
     expect(mockCheckTrust).toHaveBeenCalledWith(stubPool, 'conv-1', 'manage_app');
     expect(mockCreateApproval).not.toHaveBeenCalled();
-    expect(mockCallMcpTool).toHaveBeenCalledWith('manage_app', { action: 'delete', id: 'app_1' }, 'test-jwt');
+    expect(mockCallMcpTool.mock.calls[0].slice(0, 3)).toEqual(['manage_app', { action: 'delete', id: 'app_1' }, 'test-jwt']);
     expect(events.find((e) => e.type === 'approval_required')).toBeUndefined();
     expect(events.find((e) => e.type === 'done')).toBeDefined();
   });
+});
+
+
+it('records exact final assistant identity only at authoritative successful completion', async () => {
+  const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+  mockAppendMessage.mockResolvedValueOnce({ ...stubMessage, id: 'user-evidence' }).mockResolvedValueOnce({ ...stubMessage, id: 'final-evidence', role: 'assistant' });
+  global.fetch = vi.fn().mockResolvedValueOnce(gatewayResponse([{ choices: [{ delta: { content: 'Final answer' }, finish_reason: 'stop' }] }]));
+  const events = await collect(runAgentTurn({ ...baseInput, pool: { query } as unknown as pg.Pool, recordOfficeActivity: true }));
+  expect(events.at(-1)?.type).toBe('done');
+  expect(query.mock.calls.some(([sql, values]) => String(sql).includes('dashboard_agent_office_turns') && values.includes('completed') && values.includes('final-evidence'))).toBe(true);
+});
+
+
+it('persists failed evidence when the real model reader fails after partial text', async () => {
+  const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+  const read = vi.fn().mockResolvedValueOnce({ done: false, value: new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Partial answer"}}]}\n\n') }).mockRejectedValueOnce(new Error('model stream failed'));
+  global.fetch = vi.fn().mockResolvedValueOnce({ ok: true, body: { getReader: () => ({ read }) } });
+  const events = await collect(runAgentTurn({ ...baseInput, pool: { query } as unknown as pg.Pool, recordOfficeActivity: true }));
+  expect(events.map(event => event.type)).toEqual(['token', 'error']);
+  expect(mockAppendMessage).toHaveBeenCalledWith(expect.anything(), 'conv-1', expect.objectContaining({ role: 'assistant', content: 'Partial answer' }));
+  expect(query.mock.calls.filter(([sql]) => String(sql).includes('dashboard_agent_office_turns')).at(-1)?.[1]).toEqual(['conv-1', 'msg-stub', 'failed', null, null]);
+});
+
+it('keeps evidence running after actual tool success and intermediate prose until final persistence', async () => {
+  const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+  global.fetch = vi.fn().mockResolvedValueOnce(gatewayResponse([
+    { choices: [{ delta: { content: 'Checking that now', tool_calls: [{ index: 0, id: 'call', function: { name: 'manage_app', arguments: '{"action":"list"}' } }] }, finish_reason: 'tool_calls' }] },
+  ])).mockResolvedValueOnce(gatewayResponse([{ choices: [{ delta: { content: 'Finished answer' }, finish_reason: 'stop' }] }]));
+  mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: { apps: [] } });
+  const source = runAgentTurn({ ...baseInput, pool: { query } as unknown as pg.Pool, recordOfficeActivity: true });
+  for (;;) { const event = await source.next(); if (event.value?.type === 'tool_result') break; if (event.done) throw new Error('Tool result missing'); }
+  expect(mockAppendMessage).toHaveBeenCalledWith(expect.anything(), 'conv-1', expect.objectContaining({ role: 'assistant', content: 'Checking that now', toolCallId: 'call' }));
+  expect(query.mock.calls.filter(([sql]) => String(sql).includes('dashboard_agent_office_turns'))).toHaveLength(1);
+  expect(query.mock.calls[0][0]).toContain("'running'");
+  await collect(source);
+  expect(query.mock.calls.filter(([sql]) => String(sql).includes('dashboard_agent_office_turns')).at(-1)?.[1]?.[2]).toBe('completed');
+});
+
+it('captures real Office loop calls before delivery without changing provider IDs or executing again', async () => {
+  const { readOfficeActivityObservation } = await import('../office-activity-details-recorder.js');
+  mockGetConversation.mockResolvedValue({ id: 'conv-1', userId: 'user-1', title: 'Existing thread', origin: 'office', organizationId: '11111111-1111-4111-8111-111111111111' } as any);
+  const query = vi.fn(async (sql: string) => ({ rows: sql.includes("role='user'") ? [{ id: 'msg-stub' }] : [], rowCount: 1 }));
+  const client = { query, release: vi.fn() };
+  const pool = { query, connect: async () => client } as unknown as pg.Pool;
+  global.fetch = vi.fn()
+    .mockResolvedValueOnce(toolCallPassFor('provider-reused', 'manage_app', '{"action":"list"}'))
+    .mockResolvedValueOnce(gatewayResponse([{ choices: [{ delta: { content: 'Finished' }, finish_reason: 'stop' }] }]));
+  mockCallMcpTool.mockResolvedValueOnce({ ok: true, result: { apps: [] } });
+  const events = await collect(runAgentTurn({ ...baseInput, pool }));
+  const toolCall = events.find(event => event.type === 'tool_call')!;
+  const toolResult = events.find(event => event.type === 'tool_result')!;
+  const started = readOfficeActivityObservation(toolCall), ended = readOfficeActivityObservation(toolResult);
+  expect(started?.step.detail_ref).toBe(started?.invocationId);
+  expect(started?.invocationId).toMatch(/^[0-9a-f-]{36}$/);
+  expect(ended?.invocationId).toBe(started?.invocationId);
+  expect(ended?.step.status).toBe('completed');
+  expect(toolCall).toMatchObject({ id: 'provider-reused' });
+  expect(JSON.stringify(toolCall)).not.toContain('detail_ref');
+  expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+  expect(events.at(-1)?.type).toBe('done');
 });

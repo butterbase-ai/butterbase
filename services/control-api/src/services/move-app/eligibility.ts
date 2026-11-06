@@ -1,4 +1,5 @@
 import type pg from 'pg';
+import { hasBlockingPreparationWork } from '../ai-router/video-preparations.js';
 import { getEnvironmentLink, getLinkByStagingApp } from '../app-environments.js';
 
 export type EligibilityResult = { ok: true } | { ok: false; reason: string };
@@ -60,6 +61,12 @@ export async function checkMoveAppEligibility(
   // Checked last: it is the only check that needs a second database, and the
   // cheap disqualifiers above should short-circuit before we pay for it.
   if (opts.runtimeDb) {
+    // Migration058 repeats the gate atomically under the app-row lock when
+    // blocking_writes begins. This read provides an early actionable response.
+    const registry = await opts.runtimeDb.query("SELECT to_regclass('ai_video_preparations') IS NOT NULL AS installed");
+    if (registry.rows[0]?.installed && await hasBlockingPreparationWork(opts.runtimeDb, appId)) {
+      return { ok: false, reason: 'Video reference work or provider cleanup is retained. Wait for completion and cleanup before moving this app.' };
+    }
     const asProduction = await getEnvironmentLink(opts.runtimeDb, appId);
     if (asProduction) {
       return {

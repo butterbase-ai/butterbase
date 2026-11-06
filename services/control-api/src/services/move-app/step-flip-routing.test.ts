@@ -1,12 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { executeFlipRouting } from './step-flip-routing.js';
+vi.mock('../app-state-lock.js', () => ({ withAppStateLocks: async (pool: unknown, ids: string[], work: Function) =>
+  work(ids.map(app_id=>({ app_id,region:'us-east-1',organization_id:null })),pool) }));
 
 describe('executeFlipRouting', () => {
-  it('updates apps.region, index, KV, invalidates cache, marks dest ready', async () => {
-    const sourcePool = { query: vi.fn() };
+  it.each([[false], [true]])('updates apps.region, index, KV, invalidates cache, marks dest ready (paused=%s)', async (paused) => {
+    const sourcePool = { query: vi.fn().mockResolvedValue({ rows:[{ paused }] }) };
     const destPool = {
       query: vi.fn().mockImplementation(async (sql: string) => {
-        if (sql.includes('subdomain')) return { rows: [{ subdomain: 'demo' }] };
+        if (sql.includes('subdomain')) return { rows: [{ subdomain: 'demo', paused }] };
         return { rows: [] };
       }),
     };
@@ -27,9 +29,9 @@ describe('executeFlipRouting', () => {
     const m: any = { id: 'mig-1', app_id: 'app-x', source_region: 'us-east-1', dest_region: 'eu-west-1', current_step: 'flipping_routing', dest_resources: {} };
     const res = await executeFlipRouting(ctx, m);
     expect(res.next).toBe('setting_up_reverse_replication');
-    expect(updateOrgAppIndexRegion).toHaveBeenCalledWith(platform, 'app-x', 'eu-west-1');
-    expect(writeSubdomainMapping).toHaveBeenCalledWith('demo', 'app-x', 'eu-west-1');
-    expect(writeDomainMapping).toHaveBeenCalledWith('a.example.com', 'app-x', 'eu-west-1');
+    expect(platform.query).toHaveBeenCalledWith(expect.stringContaining('UPDATE org_app_index'), ['app-x','eu-west-1']);
+    expect(writeSubdomainMapping).toHaveBeenCalledWith('demo', 'app-x', 'eu-west-1', paused);
+    expect(writeDomainMapping).toHaveBeenCalledWith('a.example.com', 'app-x', 'eu-west-1', paused);
     expect(invalidateCacheAllRegions).toHaveBeenCalledWith('app-x');
   });
 });

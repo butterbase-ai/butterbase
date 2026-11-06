@@ -1,3 +1,4 @@
+import { AuthorizationError } from '../services/api-errors.js';
 import type { FastifyInstance } from 'fastify';
 import { ApiKeyService, ScopeValidationError } from '../services/api-key-service.js';
 import { requireUserId } from '../utils/require-auth.js';
@@ -8,6 +9,12 @@ import { logFromRequest } from '../services/audit/with-audit.js';
 const PLATFORM_APP_ID = '_platform';
 
 export async function apiKeyRoutes(app: FastifyInstance) {
+  app.addHook('preHandler', async (request) => {
+    if (request.auth?.organizationLocked) {
+      // Minting an ordinary key delegates the owner's cross-org authority.
+      throw new AuthorizationError('Managed keys cannot manage account credentials', 'AUTH_ORG_FORBIDDEN');
+    }
+  });
   // POST /api-keys — Generate new API key
   // body.scope='substrate' mints a bb_sub_ key bound to the caller's
   // substrate_organization_id; otherwise (default) mints a regular bb_sk_ app key.

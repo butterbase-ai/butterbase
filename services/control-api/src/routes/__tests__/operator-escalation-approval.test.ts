@@ -45,11 +45,13 @@ import * as mcpClientModule from '../../services/dashboard-agent/mcp-client.js';
 import { resolveOperatorApproval } from '../dashboard-agent.js';
 import { getOrCreateOperatorConversation } from '../../services/dashboard-agent/operator-store.js';
 import {
+  createApproval,
   createSubstrateEscalationApproval,
   getApprovalForOrg,
   listPendingByOrg,
 } from '../../services/dashboard-agent/approvals-store.js';
 import { appendMessage, listMessages, type Message } from '../../services/dashboard-agent/store.js';
+import { requestApprovalReview } from '../../services/dashboard-agent/request-proposal-review.js';
 
 const mockCallMcpTool = mcpClientModule.callMcpTool as MockedFunction<typeof mcpClientModule.callMcpTool>;
 
@@ -225,7 +227,8 @@ describe('fix E — the escalated approval reaches the operator feed and resolve
 
   it('approve: calls substrate approve ONCE, never re-proposes, and completes the history', async () => {
     const { conversationId, toolCallId, approval } = await escalate();
-    mockCallMcpTool.mockResolvedValue(mcpEnvelope({ action_id: ACTION_ID, status: 'executed' }) as never);
+    // approveAction confirms a committed effect with executed:true.
+    mockCallMcpTool.mockResolvedValue(mcpEnvelope({ executed: true, result: { action_id: ACTION_ID } }) as never);
 
     // Pre-state: the history is invalid until the resolution answers the call.
     expect(unansweredToolCalls(await listMessages(pool, conversationId))).toEqual([toolCallId]);
@@ -256,7 +259,7 @@ describe('fix E — the escalated approval reaches the operator feed and resolve
     // The MCP envelope, as resume.ts persists it for every other approval kind.
     expect(toolRow.toolResult).toEqual({
       isError: false,
-      content: [{ type: 'text', text: JSON.stringify({ action_id: ACTION_ID, status: 'executed' }) }],
+      content: [{ type: 'text', text: JSON.stringify({ executed: true, result: { action_id: ACTION_ID } }) }],
     });
     expect(messages.every((m) => m.pendingApprovalId === null)).toBe(true);
 
@@ -379,7 +382,7 @@ describe('fix E — the escalated approval reaches the operator feed and resolve
 
   it('a retried approve does not fire substrate approve twice', async () => {
     const { approval } = await escalate();
-    mockCallMcpTool.mockResolvedValue(mcpEnvelope({ status: 'executed' }) as never);
+    mockCallMcpTool.mockResolvedValue(mcpEnvelope({ executed: true, result: { action_id: ACTION_ID } }) as never);
 
     const first = await resolveOperatorApproval(pool, {
       approvalId: approval!.id, orgId: ORG, jwt: 'jwt', userId: USER, resolution: { status: 'approved' },
@@ -391,5 +394,49 @@ describe('fix E — the escalated approval reaches the operator feed and resolve
     expect(first).toEqual({ ok: true });
     expect(second.ok).toBe(false);
     expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not complete history or repeat an approve when substrate omits execution confirmation', async () => {
+    const { conversationId, toolCallId, approval } = await escalate();
+    mockCallMcpTool.mockResolvedValue(mcpEnvelope({ action_id: ACTION_ID, status: 'executed' }) as never);
+    const input = {
+      approvalId: approval!.id, orgId: ORG, jwt: 'jwt', userId: USER,
+      resolution: { status: 'approved' as const },
+    };
+
+    expect(await resolveOperatorApproval(pool, input)).toMatchObject({ ok: false, code: 502 });
+    expect(await resolveOperatorApproval(pool, input)).toMatchObject({ ok: false });
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    expect((await getApprovalForOrg(pool, approval!.id, ORG))?.status).toBe('pending');
+    expect(unansweredToolCalls(await listMessages(pool, conversationId))).toEqual([toolCallId]);
+  });
+
+  it('does not replace a legacy approval with a fresh review after an uncertain attempt', async () => {
+    const conversationId = await getOrCreateOperatorConversation(pool, ORG, 'claude-sonnet-4-5');
+    const assistant = await appendMessage(pool, conversationId, {
+      role: 'assistant', content: 'Update the fixture setting.', toolCallId: 'call_legacy_uncertain',
+      toolName: 'manage_app', toolArgs: { action: 'update_env', app_id: 'app_fixture', env: { KEY: 'v' } },
+      toolResult: null, modelUsed: 'claude-sonnet-4-5',
+    });
+    const approval = await createApproval(pool, {
+      conversationId, turnMessageId: assistant.id, toolName: assistant.toolName!, toolArgs: assistant.toolArgs!, sensitivity: 'destructive',
+    });
+    await pool.query('UPDATE dashboard_agent_messages SET pending_approval_id=$2 WHERE id=$1', [assistant.id, approval.id]);
+    mockCallMcpTool.mockResolvedValue({ ok: false, code: 'execution_unconfirmed', error: 'The response was lost after dispatch.' });
+
+    expect(await resolveOperatorApproval(pool, {
+      approvalId: approval.id, orgId: ORG, jwt: 'jwt', userId: USER, resolution: { status: 'approved' },
+    })).toMatchObject({ ok: false, code: 502 });
+    expect(await requestApprovalReview(pool, { approval, organizationId: ORG, actorUserId: USER, mayRun: true })).toEqual({ ok: false });
+    const current = await getApprovalForOrg(pool, approval.id, ORG);
+    expect(current).toMatchObject({ status: 'pending', executionOutcome: { state: 'unconfirmed' } });
+    expect(current?.proposalDetails).toBeNull();
+    expect(unansweredToolCalls(await listMessages(pool, conversationId))).toEqual(['call_legacy_uncertain']);
+    expect(mockCallMcpTool).toHaveBeenCalledTimes(1);
+    // The authoritative uncertainty receipt must survive interrupted outcome
+    // projection/bookkeeping too; it cannot be refreshed into another effect.
+    await pool.query('UPDATE dashboard_agent_approvals SET execution_outcome=NULL WHERE id=$1', [approval.id]);
+    expect(await requestApprovalReview(pool, { approval, organizationId: ORG, actorUserId: USER, mayRun: true })).toEqual({ ok: false });
+    expect((await getApprovalForOrg(pool, approval.id, ORG))?.status).toBe('pending');
   });
 });

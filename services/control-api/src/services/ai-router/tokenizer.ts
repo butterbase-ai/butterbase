@@ -2,6 +2,10 @@
 import { Tiktoken, getEncoding } from 'js-tiktoken';
 
 type Encoding = 'cl100k_base' | 'o200k_base';
+/** Exact encoding count for small, already bounded prompt sections. */
+export function countTextTokens(text: string, canonicalModelId: string): number {
+  return getEnc(pickEncodingForModel(canonicalModelId)).encode(text).length;
+}
 
 let cl100k: Tiktoken | null = null;
 let o200k: Tiktoken | null = null;

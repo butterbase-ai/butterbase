@@ -116,3 +116,34 @@ describe('manage_app: template update actions', () => {
     expect(JSON.parse(result.content[0].text).job_id).toBe('cj_1');
   });
 });
+
+describe('manage_app: pause and resume', () => {
+  let server: McpServer;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    server = new McpServer({ name: 'test', version: '0.0.0' });
+    registerManageApp(server);
+  });
+
+  it('action="resume" PATCHes config/pause with paused=false', async () => {
+    vi.mocked(apiClient.apiPatch).mockResolvedValue({ app_id: 'app_abc', paused: false, paused_by: null });
+    const handler = getHandler(server, 'manage_app');
+    const result = await handler({ action: 'resume', app_id: 'app_abc' });
+    expect(apiClient.apiPatch).toHaveBeenCalledWith('/v1/app_abc/config/pause', { paused: false });
+    expect(JSON.parse(result.content[0].text).paused).toBe(false);
+  });
+
+  it('action="resume" without app_id returns isError', async () => {
+    const handler = getHandler(server, 'manage_app');
+    const result = await handler({ action: 'resume' });
+    expect(result.isError).toBe(true);
+    expect(apiClient.apiPatch).not.toHaveBeenCalled();
+  });
+
+  it('action="pause" with paused=false still resumes (backward compatible)', async () => {
+    vi.mocked(apiClient.apiPatch).mockResolvedValue({ paused: false });
+    const handler = getHandler(server, 'manage_app');
+    await handler({ action: 'pause', app_id: 'app_abc', paused: false });
+    expect(apiClient.apiPatch).toHaveBeenCalledWith('/v1/app_abc/config/pause', { paused: false, reason: undefined });
+  });
+});

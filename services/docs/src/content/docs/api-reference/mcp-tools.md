@@ -5,7 +5,17 @@ sidebar:
   order: 8
 ---
 
-The open-source MCP server exposes 38 tools; the hosted platform adds `manage_substrate`. Most areas are consolidated into a single `manage_*` tool that takes an `action` argument (for example `manage_schema` with `action: "apply"`).
+Most areas are consolidated into a single `manage_*` tool that takes an `action` argument (for example `manage_schema` with `action: "apply"`). The hosted platform adds `manage_substrate`, `manage_organizations` and `manage_office` when their cloud overlays are installed.
+
+## Office
+
+`manage_office` has 44 actions, all requiring an explicit `org_id`. It forwards the current platform credential; no app ID is required. Enable, pause, resume and approval return a browser confirmation receipt for the initiating owner. Ask is bounded and returns exact conversation/turn IDs for observation; it never silently submits again to poll. The contract also covers curated agent memories, routines, governed rule changes, cadence settings and bounded record pages.
+
+```json
+{"action":"ask","org_id":"<organization UUID>","message":"What needs follow-up?","idempotency_key":"<unique request ID>","wait_ms":15000}
+```
+
+Use `status` with `confirmation_id` to inspect a receipt, or `get_conversation` with `conversation_id` and `turn_id` to inspect a running question. The [Office client reference](/core-concepts/office-clients/) lists every action and its CLI/SDK equivalent, native memory payloads, access rules and retry behavior. This facade is excluded from the Office agent's own model catalog and cannot authorize its protected controls.
 
 These tools are available when connected via MCP. See [MCP Setup](/getting-started/mcp-setup) for connection instructions.
 
@@ -23,7 +33,8 @@ These tools are available when connected via MCP. See [MCP Setup](/getting-start
 |--------|-------------|
 | `list` | List all apps with metadata. |
 | `delete` | Permanently delete an app. Irreversible. |
-| `pause` | Kill-switch — pause/resume all data-plane traffic. Returns 503 (`APP_PAUSED`) on data-plane endpoints while paused. |
+| `pause` | Kill-switch — pause/resume all data-plane traffic. While paused, the app's owners keep management and data access (functions, KV and realtime are blocked for everyone, owners included); every other caller gets 503 (`APP_PAUSED`) on every app-scoped API. |
+| `resume` | Resume a paused app. Equivalent to `pause` with `paused: false`. An automatic idle pause on a free plan returns 402 (`APP_RESUME_REQUIRES_UPGRADE`); upgrading the plan resumes it. Pause/resume can return retryable 409 (`APP_STATE_BUSY`) during a concurrent state change or region cutover. |
 | `get_config` | Read app configuration (CORS, JWT, storage limits). |
 | `secure` | Set `access_mode = "authenticated"` and create user-isolation RLS policies on the listed `tables` in one call. |
 | `update_cors` | Set allowed CORS origins. |
@@ -274,7 +285,7 @@ For the full HTTP request/response shapes and end-to-end video example, see the 
 | `list_available` | List curated toolkits or search the full catalog. |
 | `list_connected` | List all users with connected accounts for an app. |
 | `list_tools` | List executable tools for a connected toolkit. |
-| `execute_action` | Execute a tool on behalf of a user. |
+| `execute_action` | Execute a tool on behalf of a user. Pass the tool as `tool_name`; the alias `tool_slug` is still accepted (precedence: `tool_name`). `execute_read` is Office-only. |
 
 ## Agents
 
@@ -392,8 +403,10 @@ Costs vary by which provider the operator routes the action to. Numbers below ar
 | `exists` | Check if a key exists |
 | `ttl` | Get remaining TTL of a key in seconds |
 | `expire` | Set a TTL on an existing key |
-| `mget` | Get values of multiple keys at once |
+| `mget` | Get values of multiple keys at once. Results are returned per key (`{ key, value }` or `{ key, error }`), in the order requested |
 | `mset` | Set multiple key-value pairs at once |
+
+`get` and `mget` accept `raw: true` to return the stored JSON text without decoding it. Writes (`set`, `setnx`, `setex`, `mset`) reject `raw: true` with `raw_unsupported_for_write`.
 
 ### manage_kv example
 
@@ -432,8 +445,10 @@ Action ledger.
 
 | Action | Description |
 |--------|-------------|
-| `list_actions` | List ledger rows. Optional `status` (`proposed` \| `executed` \| `rejected`), `capability`, `source_app_id`, `source_rule_id`, `limit` (1–500, default 100), `before` (ISO timestamp). |
+| `list_actions` | List ledger rows. Optional `status` (`proposed` \| `approved` \| `rejected` \| `executing` \| `executed` \| `failed` \| `reverted`), `capability`, `source_app_id`, `source_rule_id`, `limit` (API clamps to 1–100, default 25), `before` (ISO timestamp). |
 | `get_action` | Fetch one action by `action_id`. |
+
+For ledger reads, `pending` is accepted as an alias for `proposed`. An empty or unknown status is an argument-validation error, rather than an empty result. This alias does not change action writes or the separate outbox status vocabulary.
 
 Entities.
 

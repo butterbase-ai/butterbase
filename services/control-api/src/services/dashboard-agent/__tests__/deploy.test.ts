@@ -97,6 +97,53 @@ describe('deploy_frontend', () => {
  * in `deploy.ts` must catch this before `fetch` and report which field is
  * missing instead.
  */
+/**
+ * The R2 PUT is the one leg with no server-side timeout of its own. A hung
+ * upload holds the approval request open until the proxy fails it with a blank
+ * 502, and the build job is never started. Bound it and say what timed out;
+ * the approval remains pending, so the owner can retry once the transport is
+ * healthy.
+ */
+describe('deploy_frontend — a hung upload is a structured, retryable error', () => {
+  it('aborts the R2 PUT at the upload timeout and never starts the build', async () => {
+    const cache = new WorkingTreeCache()
+    cache.write(CONV, APP, 'package.json', '{}')
+
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn((_url: any, init: any) => new Promise<Response>((_resolve, reject) => {
+      const signal = (init as RequestInit).signal
+      if (!signal) return
+      signal.addEventListener(
+        'abort',
+        () => reject(new DOMException('This operation was aborted', 'AbortError')),
+        { once: true },
+      )
+    })) as any
+
+    const mcp = makeMcp({
+      create_from_source: () => ({ deployment_id: 'dep_hung', upload_url: 'https://s3/put' }),
+    })
+
+    try {
+      const d = createDeployer({
+        cache, mcp, onDeploymentProgress: () => {}, uploadTimeoutMs: 20,
+      })
+      const r = await d.deploy({ convId: CONV, appId: APP, jwt: JWT })
+
+      expect(r).toMatchObject({ ok: false })
+      expect((r as { error: string }).error).toMatch(/upload timed out after 20ms/)
+      // The build must not be started: a retry re-runs the whole deploy.
+      expect(mcp.call).not.toHaveBeenCalledWith(
+        'manage_frontend',
+        expect.objectContaining({ action: 'start_from_source' }),
+        JWT,
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
 describe('deploy_frontend — missing upload_url is a structured error, not a fetch TypeError', () => {
   it('reports the missing field instead of calling fetch(undefined, ...)', async () => {
     const cache = new WorkingTreeCache()
