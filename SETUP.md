@@ -1,5 +1,7 @@
 # Butterbase self-host and local development
 
+[English](./SETUP.md) · [日本語](./SETUP.ja.md)
+
 This guide covers running the OSS stack on your machine with `docker-compose.local.yml`. It matches what ships in this repo today (no managed dashboard UI in-tree).
 
 ## Prerequisites

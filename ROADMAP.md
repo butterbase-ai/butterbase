@@ -1,5 +1,7 @@
 # Roadmap
 
+[English](./ROADMAP.md) · [日本語](./ROADMAP.ja.md)
+
 Butterbase is open source under Apache-2.0. This roadmap is a living sketch of
 where the project is heading — not a contract. Priorities shift as we hear from
 the community.
