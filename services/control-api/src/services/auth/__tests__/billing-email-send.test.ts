@@ -79,6 +79,23 @@ describe('sendBillingEmail', () => {
     expect(cmd.input.Message.Body.Html.Data).toContain('<!DOCTYPE html>');
   });
 
+  it('sends to every comma-separated recipient', async () => {
+    await sendBillingEmail('a@example.com, b@example.com', 'credits_exhausted', {});
+    const cmd = mockSend.mock.calls[0][0];
+    expect(cmd.input.Destination.ToAddresses).toEqual(['a@example.com', 'b@example.com']);
+  });
+
+  it('writes every comma-separated recipient into the raw MIME To header', async () => {
+    const token = 't'.repeat(43);
+    await sendBillingEmail('a@example.com, b@example.com', 'function_failed', {
+      appId: 'app_1', appName: 'Pantry', functionName: 'f', errorMessage: 'boom', streakLen: '3',
+    }, { actionTokens: { unsubscribeTemplate: token } });
+    const cmd = mockSend.mock.calls[0][0];
+    expect(cmd.input.Destinations).toEqual(['a@example.com', 'b@example.com']);
+    const raw = Buffer.from(cmd.input.RawMessage.Data).toString('utf8');
+    expect(raw).toContain('To: a@example.com, b@example.com');
+  });
+
   it("returns 'failed' (never throws) when SES rejects outside development", async () => {
     mockSend.mockRejectedValueOnce(new Error('SES down'));
     await expect(sendBillingEmail('a@example.com', 'credits_exhausted', {})).resolves.toBe('failed');

@@ -1668,13 +1668,17 @@ export async function sendBillingEmail(
   data: Record<string, string> = {},
   opts: BillingEmailOptions = {},
 ): Promise<BillingEmailResult> {
+  // Ops settings such as OPS_ALERT_EMAIL carry a comma-separated list. SES
+  // needs one address per array entry; a single comma-joined string is rejected.
+  const recipients = to.split(',').map((address) => address.trim()).filter(Boolean);
+  const recipientLabel = recipients.join(', ');
   // Silence gate. Opt-in: callers that pass userId + controlPool get the
   // user's snoozes and unsubscribes applied. Existing callers that don't
   // pass these (most billing paths) keep current always-send behavior.
   if (opts.controlPool && opts.userId) {
     const silenced = await isSilenced(opts.controlPool, opts.userId, template, opts.scope);
     if (silenced) {
-      console.log(`[EMAIL] Skipped ${template} for ${to} (user has active silence)`);
+      console.log(`[EMAIL] Skipped ${template} for ${recipientLabel} (user has active silence)`);
       return 'silenced';
     }
   }
@@ -1699,7 +1703,7 @@ export async function sendBillingEmail(
     if (unsubscribeToken) {
       const raw = buildRawMimeMessage({
         from: source,
-        to,
+        to: recipientLabel,
         subject,
         text: body,
         html,
@@ -1710,13 +1714,13 @@ export async function sendBillingEmail(
       });
       await sesClient.send(new SendRawEmailCommand(withConfigurationSet({
         Source: source,
-        Destinations: [to],
+        Destinations: recipients,
         RawMessage: { Data: Buffer.from(raw, 'utf8') },
       })));
     } else {
       await sesClient.send(new SendEmailCommand(withConfigurationSet({
         Source: source,
-        Destination: { ToAddresses: [to] },
+        Destination: { ToAddresses: recipients },
         Message: {
           Subject: { Data: subject, Charset: 'UTF-8' },
           // Dual-body when an HTML variant exists — clients that prefer text
@@ -1728,14 +1732,14 @@ export async function sendBillingEmail(
         },
       })));
     }
-    console.log(`[EMAIL] Billing email (${template}) sent to ${to}`);
+    console.log(`[EMAIL] Billing email (${template}) sent to ${recipientLabel}`);
     return 'sent';
   } catch (error) {
     if (config.ses.devConsoleFallback) {
-      console.log(`[EMAIL] Billing email (${template}) for ${to}:\n${body}`);
+      console.log(`[EMAIL] Billing email (${template}) for ${recipientLabel}:\n${body}`);
       return 'logged';
     }
-    console.error(`Failed to send billing email (${template}) to ${to}:`, error);
+    console.error(`Failed to send billing email (${template}) to ${recipientLabel}:`, error);
     // Don't throw — billing emails should not block webhook processing.
     return 'failed';
   }
