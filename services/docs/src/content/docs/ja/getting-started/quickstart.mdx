@@ -1,0 +1,144 @@
+---
+title: クイックスタート
+description: 最初のButterbaseアプリを5分で作る。
+---
+
+import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+アプリの作成、スキーマ定義、データ追加、認証設定を順に進めます。AIアシスタントのMCPツール、CLI、REST APIのいずれでも操作できます。
+
+<Steps>
+
+1. **アプリを作る**
+
+   <Tabs>
+     <TabItem label="MCP">
+     ```
+     Use the init_app tool with name: "my-app"
+     ```
+     </TabItem>
+     <TabItem label="CLI">
+     ```bash
+     butterbase apps create my-app
+     butterbase apps use <app_id>
+     ```
+     </TabItem>
+     <TabItem label="REST API">
+     ```bash
+     curl -X POST https://api.butterbase.ai/init \
+       -H "Authorization: Bearer bb_sk_..." \
+       -H "Content-Type: application/json" \
+       -d '{"name": "my-app"}'
+     ```
+     </TabItem>
+   </Tabs>
+
+   `app_id` とAPIのベースURLが返ります。以降の操作に必要なので控えてください。
+
+   リージョンを選ぶ場合は、MCPの `region: "us-west-2"` またはRESTのJSONに `"region": "us-west-2"` を渡します。選択肢は [リージョン](/ja/core-concepts/regions/)で確認できます。
+
+2. **スキーマを定義する**
+
+   JSONでテーブルの構成を宣言します。
+
+   ```json
+   {
+     "schema": {
+       "tables": {
+         "posts": {
+           "columns": {
+             "id": { "type": "uuid", "primary": true, "default": "gen_random_uuid()" },
+             "title": { "type": "text", "nullable": false },
+             "body": { "type": "text" },
+             "user_id": { "type": "uuid", "nullable": false },
+             "published": { "type": "boolean", "default": "false" },
+             "created_at": { "type": "timestamptz", "default": "now()" }
+           }
+         }
+       }
+     },
+     "name": "create posts table"
+   }
+   ```
+
+   先に `dry_run: true` で変更を確認してから適用します。
+
+3. **行レベルセキュリティを有効にする**
+
+   各ユーザーが自分の投稿だけを読めるように制限します。
+
+   <Tabs>
+     <TabItem label="MCP">
+     ```
+     Use manage_rls with action: "create_user_isolation", table_name: "posts", user_column: "user_id"
+     ```
+     </TabItem>
+     <TabItem label="REST API">
+     ```bash
+     curl -X POST https://api.butterbase.ai/v1/{app_id}/rls \
+       -H "Authorization: Bearer bb_sk_..." \
+       -H "Content-Type: application/json" \
+       -d '{"table_name": "posts", "user_column": "user_id"}'
+     ```
+     </TabItem>
+   </Tabs>
+
+4. **データを追加・検索する**
+
+   <Tabs>
+     <TabItem label="SDK">
+     ```typescript
+     import { createClient } from '@butterbase/sdk';
+
+     const butterbase = createClient({
+       appId: 'app_abc123',
+       apiUrl: 'https://api.butterbase.ai',
+     });
+
+     // Insert a row
+     const { data } = await butterbase
+       .from('posts')
+       .insert({ title: 'Hello World', body: 'My first post' });
+
+     // Query rows
+     const { data: posts } = await butterbase
+       .from('posts')
+       .select('*')
+       .eq('published', true)
+       .order('created_at', { ascending: false });
+     ```
+     </TabItem>
+     <TabItem label="REST API">
+     ```bash
+     # Insert
+     curl -X POST https://api.butterbase.ai/v1/{app_id}/posts \
+       -H "Authorization: Bearer {user_jwt}" \
+       -H "Content-Type: application/json" \
+       -d '{"title": "Hello World", "body": "My first post"}'
+
+     # Query
+     curl "https://api.butterbase.ai/v1/{app_id}/posts?published=eq.true&order=created_at.desc"
+     ```
+     </TabItem>
+   </Tabs>
+
+5. **フロントエンドを配信する**
+
+   フロントエンドをビルドし、出力をZIPにしてデプロイします。
+
+   ```bash
+   npm run build
+   # Zip the dist/ folder (use archiver or Git Bash zip)
+   ```
+
+   続いてMCPの `create_frontend_deployment` と `manage_frontend`（`start_deployment`）またはREST APIを使います。
+
+</Steps>
+
+<span id="next-steps"></span>
+
+## 次に読む
+
+- [DBとスキーマ](/ja/core-concepts/database)：スキーマDSLを詳しく読む
+- [認証](/ja/core-concepts/authentication)：利用者のログインを設定する
+- [TypeScript SDK](/ja/sdks-and-tools/typescript-sdk)：フロントエンドからSDKを使う

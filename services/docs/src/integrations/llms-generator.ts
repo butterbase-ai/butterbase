@@ -1,15 +1,16 @@
 // services/docs/src/integrations/llms-generator.ts
 import type { AstroIntegration } from 'astro';
-import { existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { load } from 'js-yaml';
+import { existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type SidebarItem = { label: string; slug: string };
+type SidebarItem = { label: string; slug: string; translations?: Record<string, string> };
 type SidebarGroup =
-  | { label: string; items: SidebarItem[] }
-  | { label: string; autogenerate: { directory: string } };
+  | { label: string; translations?: Record<string, string>; items: SidebarItem[] }
+  | { label: string; translations?: Record<string, string>; autogenerate: { directory: string } };
 
 export type Sidebar = SidebarGroup[];
 
@@ -22,22 +23,23 @@ interface ResolvedItem {
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 
-/** Strip the leading ---...--- frontmatter block from markdown content. */
-export function stripFrontmatter(content: string): string {
-  if (!content.startsWith('---')) return content;
-  const end = content.indexOf('---', 3);
-  if (end === -1) return content; // malformed — return as-is
-  return content.slice(end + 3).trimStart();
+/** Read frontmatter as YAML so publication checks match Astro's schema. */
+function frontmatter(content: string): { data: Record<string, unknown>; body: string } {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match) return { data: {}, body: content };
+  const parsed = load(match[1]);
+  return {
+    data: parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {},
+    body: content.slice(match[0].length).trimStart(),
+  };
 }
 
-/** Read the `title:` field from a frontmatter block. Returns null if not found. */
-function parseFrontmatterTitle(content: string): string | null {
-  if (!content.startsWith('---')) return null;
-  const end = content.indexOf('---', 3);
-  if (end === -1) return null;
-  const frontmatter = content.slice(3, end);
-  const match = frontmatter.match(/^title:\s*(.+)$/m);
-  return match ? match[1].trim() : null;
+export function stripFrontmatter(content: string): string {
+  return frontmatter(content).body;
+}
+
+function isPublished(filePath: string): boolean {
+  return frontmatter(readFileSync(filePath, 'utf8')).data.draft !== true;
 }
 
 /**
@@ -65,7 +67,9 @@ export function resolveSidebarItems(sidebar: Sidebar, docsDir: string): Resolved
           );
         }
 
-        items.push({ group: group.label, label: item.label, slug: item.slug, filePath });
+        if (isPublished(filePath)) {
+          items.push({ group: group.label, label: item.label, slug: item.slug, filePath });
+        }
       }
     } else if ('autogenerate' in group) {
       const dir = join(docsDir, group.autogenerate.directory);
@@ -87,13 +91,9 @@ export function resolveSidebarItems(sidebar: Sidebar, docsDir: string): Resolved
         const filePath = join(dir, file);
         const raw = readFileSync(filePath, 'utf-8');
 
-        // Skip draft pages
-        const frontmatterEnd = raw.indexOf('---', 3);
-        const isDraft = frontmatterEnd !== -1 && /^draft:\s*true\s*$/m.test(raw.slice(3, frontmatterEnd));
-        if (isDraft) continue;
-
-        // Use the frontmatter title for accuracy (handles acronyms like "AI API", "MCP Tools")
-        const label = parseFrontmatterTitle(raw) ?? file.replace(/\.mdx?$/, '');
+        const data = frontmatter(raw).data;
+        if (data.draft === true) continue;
+        const label = typeof data.title === 'string' ? data.title : file.replace(/\.mdx?$/, '');
         const slug = `${group.autogenerate.directory}/${file.replace(/\.mdx?$/, '')}`;
         items.push({ group: group.label, label, slug, filePath });
       }
@@ -103,17 +103,34 @@ export function resolveSidebarItems(sidebar: Sidebar, docsDir: string): Resolved
   return items;
 }
 
+/** Resolve only genuinely translated pages; never label English fallback as Japanese. */
+export function localizeSidebar(sidebar: Sidebar, docsDir: string, locale: string): Sidebar {
+  return sidebar.flatMap<SidebarGroup>(group => {
+    const label = group.translations?.[locale] ?? group.label;
+    if ('items' in group) {
+      const items = group.items.flatMap(item => {
+        const slug = `${locale}/${item.slug}`;
+        if (!existsSync(join(docsDir, `${slug}.md`)) && !existsSync(join(docsDir, `${slug}.mdx`))) return [];
+        return [{ label: item.translations?.[locale] ?? item.label, slug }];
+      });
+      return items.length ? [{ label, items }] : [];
+    }
+    const directory = `${locale}/${group.autogenerate.directory}`;
+    return existsSync(join(docsDir, directory)) ? [{ label, autogenerate: { directory } }] : [];
+  });
+}
+
 // ── File generators ──────────────────────────────────────────────────────────
 
-export function generateLlmsFullTxt(items: ResolvedItem[], siteUrl: string): string {
+export function generateLlmsFullTxt(items: ResolvedItem[], siteUrl: string, locale?: string): string {
   const today = new Date().toISOString().slice(0, 10);
 
   const header = [
-    '# Butterbase Documentation — Full Content',
+    locale === 'ja' ? '# Butterbase 日本語ドキュメント' : '# Butterbase Documentation — Full Content',
     '',
-    '> Complete documentation for Butterbase, concatenated for LLM consumption.',
-    `> Source: ${siteUrl} | Generated: ${today}`,
-    '> For the index of links, see /llms.txt',
+    locale === 'ja' ? '> 日本語で提供しているButterbaseの文書を、LLMが読める形でまとめています。' : '> Complete documentation for Butterbase, concatenated for LLM consumption.',
+    locale === 'ja' ? `> 出典：${siteUrl}/ja/ | 生成日：${today}` : `> Source: ${siteUrl} | Generated: ${today}`,
+    locale === 'ja' ? '> リンクの一覧は /ja/llms.txt を参照してください。' : '> For the index of links, see /llms.txt',
   ].join('\n');
 
   const sections = items.map(({ group, label, filePath }) => {
@@ -132,7 +149,7 @@ export function generateLlmsFullTxt(items: ResolvedItem[], siteUrl: string): str
   return [header, ...sections].join('\n\n---\n\n');
 }
 
-export function generateLlmsTxt(items: ResolvedItem[], siteUrl: string): string {
+export function generateLlmsTxt(items: ResolvedItem[], siteUrl: string, locale?: string): string {
   // Group items by sidebar group, preserving order
   const groups = new Map<string, ResolvedItem[]>();
   for (const item of items) {
@@ -141,14 +158,14 @@ export function generateLlmsTxt(items: ResolvedItem[], siteUrl: string): string 
   }
 
   const preamble = [
-    '# Butterbase Docs',
+    locale === 'ja' ? '# Butterbase 日本語ドキュメント' : '# Butterbase Docs',
     '',
-    '> Butterbase is an AI-native backend platform for building full-stack apps quickly.',
-    '> This file helps LLM/AI agents discover canonical documentation for accurate answers.',
+    locale === 'ja' ? '> Butterbaseは、AIを使うアプリのためのバックエンドです。' : '> Butterbase is an AI-native backend platform for building full-stack apps quickly.',
+    locale === 'ja' ? '> AIエージェントが正しい文書を見つけるための一覧です。' : '> This file helps LLM/AI agents discover canonical documentation for accurate answers.',
     '',
-    '## Canonical URLs',
+    locale === 'ja' ? '## 文書のURL' : '## Canonical URLs',
     '',
-    `- Docs home: ${siteUrl}/`,
+    locale === 'ja' ? `- 文書の入口：${siteUrl}/ja/` : `- Docs home: ${siteUrl}/`,
     `- Sitemap: ${siteUrl}/sitemap.xml`,
     `- Robots: ${siteUrl}/robots.txt`,
   ].join('\n');
@@ -161,10 +178,10 @@ export function generateLlmsTxt(items: ResolvedItem[], siteUrl: string): string 
   });
 
   const footer = [
-    '## Agent Guidance',
+    locale === 'ja' ? '## エージェント向けの案内' : '## Agent Guidance',
     '',
-    '- For tool usage and product behavior, prefer docs pages above over assumptions.',
-    '- For latest coverage, crawl the sitemap before answering broad product questions.',
+    locale === 'ja' ? '- ツールの使い方や製品の挙動は、上記の文書で確認してください。' : '- For tool usage and product behavior, prefer docs pages above over assumptions.',
+    locale === 'ja' ? '- 製品全体の質問に答える前に、サイトマップで文書の範囲を確認してください。' : '- For latest coverage, crawl the sitemap before answering broad product questions.',
   ].join('\n');
 
   return [preamble, ...sections, footer].join('\n\n');
@@ -172,7 +189,7 @@ export function generateLlmsTxt(items: ResolvedItem[], siteUrl: string): string 
 
 // ── Astro integration ────────────────────────────────────────────────────────
 
-export function llmsGenerator(options: { sidebar: Sidebar }): AstroIntegration {
+export function llmsGenerator(options: { sidebar: Sidebar; locales?: string[] }): AstroIntegration {
   return {
     name: 'llms-generator',
     hooks: {
@@ -192,6 +209,14 @@ export function llmsGenerator(options: { sidebar: Sidebar }): AstroIntegration {
         writeFileSync(join(publicDir, 'llms.txt'), llmsTxt, 'utf-8');
 
         logger.info(`Generated llms-full.txt (${items.length} sections) and llms.txt`);
+        for (const locale of options.locales ?? []) {
+          const translated = resolveSidebarItems(localizeSidebar(options.sidebar, docsDir, locale), docsDir);
+          const outputDir = join(publicDir, locale);
+          mkdirSync(outputDir, { recursive: true });
+          writeFileSync(join(outputDir, 'llms.txt'), generateLlmsTxt(translated, siteUrl, locale), 'utf8');
+          writeFileSync(join(outputDir, 'llms-full.txt'), generateLlmsFullTxt(translated, siteUrl, locale), 'utf8');
+          logger.info(`Generated ${locale} LLM documentation (${translated.length} translated sections)`);
+        }
       },
     },
   };
