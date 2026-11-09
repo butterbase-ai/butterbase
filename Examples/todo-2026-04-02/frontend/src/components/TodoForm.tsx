@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+import { useLocale, text, errorMessage } from '../i18n';
 import { useState, type FormEvent } from 'react';
 import { ImageUpload } from './ImageUpload';
 import { uploadImage } from '../services/storage';
@@ -10,11 +12,12 @@ interface TodoFormProps {
 }
 
 export function TodoForm({ onTodoCreated }: TodoFormProps) {
+  useLocale();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ReactNode>('');
   const { token } = useAuth();
 
   const handleSubmit = async (e: FormEvent) => {
@@ -49,8 +52,8 @@ export function TodoForm({ onTodoCreated }: TodoFormProps) {
       setDescription('');
       setImageFile(null);
       onTodoCreated();
-    } catch (err: any) {
-      setError(err.message || 'Failed to create todo');
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to create todo"));
     } finally {
       setLoading(false);
     }
@@ -58,11 +61,9 @@ export function TodoForm({ onTodoCreated }: TodoFormProps) {
 
   return (
     <form onSubmit={handleSubmit} style={{ marginBottom: '30px', padding: '20px', border: '1px solid #ccc' }}>
-      <h2>Create New Todo</h2>
+      <h2>{text("Create New Todo")}</h2>
       <div style={{ marginBottom: '15px' }}>
-        <label htmlFor="title" style={{ display: 'block', marginBottom: '5px' }}>
-          Title *
-        </label>
+        <label htmlFor="title" style={{ display: 'block', marginBottom: '5px' }}>{text("Title *")}</label>
         <input
           id="title"
           type="text"
@@ -73,9 +74,7 @@ export function TodoForm({ onTodoCreated }: TodoFormProps) {
         />
       </div>
       <div style={{ marginBottom: '15px' }}>
-        <label htmlFor="description" style={{ display: 'block', marginBottom: '5px' }}>
-          Description
-        </label>
+        <label htmlFor="description" style={{ display: 'block', marginBottom: '5px' }}>{text("Description")}</label>
         <textarea
           id="description"
           value={description}
@@ -93,7 +92,7 @@ export function TodoForm({ onTodoCreated }: TodoFormProps) {
         disabled={loading}
         style={{ padding: '10px 20px', cursor: loading ? 'not-allowed' : 'pointer' }}
       >
-        {loading ? 'Creating...' : 'Create Todo'}
+        {loading ? text("Creating...") : text("Create Todo")}
       </button>
     </form>
   );

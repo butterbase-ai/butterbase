@@ -1,15 +1,16 @@
+import { UiError } from '../i18n';
 import { butterbase } from '../lib/butterbase';
 import type { User } from '../types';
 
 export async function signup(email: string, password: string) {
   const { data, error } = await butterbase.auth.signUp({ email, password });
-  if (error || !data) throw error || new Error('Signup failed');
+  if (error || !data) throw error || new UiError("Signup failed");
   return data; // { user, message }
 }
 
 export async function login(email: string, password: string) {
   const { data, error } = await butterbase.auth.signIn({ email, password });
-  if (error || !data) throw error || new Error('Login failed');
+  if (error || !data) throw error || new UiError("Login failed");
 
   // Set token on client for subsequent requests
   butterbase.setAccessToken(data.access_token);
@@ -19,7 +20,7 @@ export async function login(email: string, password: string) {
 export async function getCurrentUser(token: string): Promise<User> {
   butterbase.setAccessToken(token);
   const { data, error } = await butterbase.auth.getUser();
-  if (error || !data) throw error || new Error('Failed to get user');
+  if (error || !data) throw error || new UiError("Failed to get user");
   return data;
 }
 

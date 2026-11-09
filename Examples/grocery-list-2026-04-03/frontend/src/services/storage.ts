@@ -1,3 +1,4 @@
+import { UiError } from '../i18n';
 import { butterbase } from '../lib/butterbase';
 import type { PresignedUploadResponse, PresignedDownloadResponse } from '../types';
 
@@ -7,7 +8,7 @@ export async function uploadImage(
 ): Promise<PresignedUploadResponse> {
   butterbase.setAccessToken(token);
   const { data, error } = await butterbase.storage.upload(file);
-  if (error || !data) throw error || new Error('Failed to upload image');
+  if (error || !data) throw error || new UiError("Failed to upload image");
 
   // Return format matching existing type
   return {
@@ -24,7 +25,7 @@ export async function getDownloadUrl(
 ): Promise<PresignedDownloadResponse> {
   butterbase.setAccessToken(token);
   const { data, error } = await butterbase.storage.getDownloadUrl(objectId);
-  if (error || !data) throw error || new Error('Failed to get download URL');
+  if (error || !data) throw error || new UiError("Failed to get download URL");
 
   // Return format matching existing type
   return {

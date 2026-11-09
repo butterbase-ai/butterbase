@@ -1,5 +1,7 @@
 # Grocery list example
 
+English | [日本語](README.ja.md)
+
 An example app that uses Butterbase as the backend: email/password auth, row-level security, Auto-API CRUD for list items, optional product photos via presigned storage uploads, and a **recipe assistant** chat powered by a serverless function and OpenAI (same broad integration pattern as the [todo example](../todo-2026-04-02/README.md)).
 
 ## What this demonstrates
