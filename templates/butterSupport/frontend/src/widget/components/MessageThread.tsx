@@ -1,8 +1,10 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { WidgetMessage } from '../lib';
 
 export function MessageThread({ messages, aiTyping }: { messages: WidgetMessage[]; aiTyping?: boolean }) {
+  useUiLocale();
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
@@ -26,11 +28,9 @@ export function MessageThread({ messages, aiTyping }: { messages: WidgetMessage[
             <span className="text-lg">▲</span>
           </div>
           <div className="bs-display text-[17px] tracking-tight text-[#2A1C0A]">
-            How can we help?
-          </div>
+            {uiText("How can we help?")}</div>
           <div className="mt-1 text-[12px] text-[#7A6F5C] leading-relaxed max-w-[260px]">
-            Send a message and we'll get back to you — fast and freshly baked.
-          </div>
+            {uiText("Send a message and we'll get back to you — fast and freshly baked.")}</div>
         </div>
       )}
       {messages.map((m) => {
@@ -112,11 +112,12 @@ export function MessageThread({ messages, aiTyping }: { messages: WidgetMessage[
 }
 
 function TypingIndicator() {
+  useUiLocale();
   return (
     <div className="mr-auto max-w-[88%]">
       <div
         className="inline-flex items-center gap-1 rounded-2xl rounded-bl-md bg-white px-3.5 py-3 border border-[#2A1C0A]/[0.06]"
-        aria-label="Assistant is typing"
+        aria-label={uiText("Assistant is typing")}
       >
         <Dot delay="0ms" />
         <Dot delay="160ms" />
@@ -127,6 +128,7 @@ function TypingIndicator() {
 }
 
 function Dot({ delay }: { delay: string }) {
+  useUiLocale();
   return (
     <span
       className="inline-block h-1.5 w-1.5 rounded-full bg-[#C9A53A]"

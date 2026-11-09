@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../../i18n";
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/console/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/console/components/ui/card';
@@ -38,6 +39,7 @@ function fmtUsd(n: unknown): string {
 }
 
 export function AISettings() {
+  useUiLocale();
   const { data, isLoading, error } = useQuery<AiUsage>({
     queryKey: ['ai-usage'],
     queryFn: async () => api.fetchAiUsage(),
@@ -55,30 +57,30 @@ export function AISettings() {
 
   return (
     <SettingsPage
-      label="AI Models"
-      title={<>AI <em>usage</em></>}
-      description="Token spend, requests, and cost across your models — last 30 days."
+      label={uiText("AI Models")}
+      title={<>{uiText("AI ")}<em>{uiText("usage")}</em></>}
+      description={uiText("Token spend, requests, and cost across your models — last 30 days.")}
     >
       {isLoading && (
-        <Card><CardContent className="p-6 text-sm text-muted-foreground">Loading…</CardContent></Card>
+        <Card><CardContent className="p-6 text-sm text-muted-foreground">{uiText("Loading…")}</CardContent></Card>
       )}
       {error && (
-        <Card><CardContent className="p-6 text-sm text-destructive">{(error as any).message || 'Failed to load'}</CardContent></Card>
+        <Card><CardContent className="p-6 text-sm text-destructive">{(error as any).message || uiText('Failed to load')}</CardContent></Card>
       )}
 
       {data && !isLoading && !error && (
         <>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            <Stat label="Total tokens" value={fmtNum(data.totalTokens)} />
-            <Stat label="Estimated cost" value={fmtUsd(data.totalCost)} />
-            <Stat label="Requests" value={fmtNum(totalRequests)} />
+            <Stat label={uiText("Total tokens")} value={fmtNum(data.totalTokens)} />
+            <Stat label={uiText("Estimated cost")} value={fmtUsd(data.totalCost)} />
+            <Stat label={uiText("Requests")} value={fmtNum(totalRequests)} />
           </div>
 
           <Card>
-            <CardHeader><CardTitle>By model</CardTitle></CardHeader>
+            <CardHeader><CardTitle>{uiText("By model")}</CardTitle></CardHeader>
             <CardContent>
               {models.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No model usage in this period.</p>
+                <p className="text-sm text-muted-foreground">{uiText("No model usage in this period.")}</p>
               ) : (
                 <div className="space-y-4">
                   {models.map((m) => {
@@ -88,7 +90,7 @@ export function AISettings() {
                         <div className="flex items-baseline justify-between gap-3 text-sm">
                           <span className="font-mono text-xs text-caramel/90 truncate">{m.name}</span>
                           <span className="shrink-0 tabular-nums font-mono text-[11px] text-muted-foreground">
-                            {fmtNum(m.tokens)} tok · {fmtNum(m.requests)} req · {fmtUsd(m.cost)}
+                            {fmtNum(m.tokens)} {uiText(" tok · ")}{fmtNum(m.requests)} {uiText(" req · ")}{fmtUsd(m.cost)}
                           </span>
                         </div>
                         <div className="h-2 rounded-full bg-paper-warm overflow-hidden">
@@ -104,7 +106,7 @@ export function AISettings() {
 
           {meetings.length > 0 && (
             <Card>
-              <CardHeader><CardTitle>Daily activity</CardTitle></CardHeader>
+              <CardHeader><CardTitle>{uiText("Daily activity")}</CardTitle></CardHeader>
               <CardContent>
                 <div className="space-y-2">
                   {meetings.map((d, i) => {
@@ -115,7 +117,7 @@ export function AISettings() {
                         <div className="flex-1 h-1.5 rounded-full bg-paper-warm overflow-hidden">
                           <div className="h-full bg-caramel/80" style={{ width: `${pct}%` }} />
                         </div>
-                        <div className="w-24 shrink-0 text-right tabular-nums font-mono">{fmtNum(d.tokens)} tok</div>
+                        <div className="w-24 shrink-0 text-right tabular-nums font-mono">{fmtNum(d.tokens)} {uiText(" tok")}</div>
                         <div className="w-20 shrink-0 text-right tabular-nums font-mono text-muted-foreground">{fmtUsd(d.cost)}</div>
                       </div>
                     );
@@ -131,6 +133,7 @@ export function AISettings() {
 }
 
 function Stat({ label, value }: { label: string; value: any }) {
+  useUiLocale();
   return (
     <div className="grain rounded-2xl border border-rule-soft bg-paper-soft/60 p-4">
       <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">{label}</div>

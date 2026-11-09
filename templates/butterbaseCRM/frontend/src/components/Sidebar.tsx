@@ -1,18 +1,20 @@
+import { uiText, useUiLocale } from "../i18n";
 import { NavLink } from 'react-router-dom';
 import { Building2, Users, Calendar, Settings, Mail, Megaphone, Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const items = [
-  { to: '/companies', label: 'Companies',   icon: Building2 },
-  { to: '/people',    label: 'People',      icon: Users },
-  { to: '/leads',     label: 'Lead Finder', icon: Search },
-  { to: '/meetings',  label: 'Meetings',    icon: Calendar },
-  { to: '/campaigns', label: 'Campaigns',   icon: Mail },
-  { to: '/social',    label: 'Social',      icon: Megaphone },
-  { to: '/settings',  label: 'Settings',    icon: Settings },
+  { to: '/companies', get label() { return uiText('Companies'); },   icon: Building2 },
+  { to: '/people',    get label() { return uiText('People'); },      icon: Users },
+  { to: '/leads',     get label() { return uiText('Lead Finder'); }, icon: Search },
+  { to: '/meetings',  get label() { return uiText('Meetings'); },    icon: Calendar },
+  { to: '/campaigns', get label() { return uiText('Campaigns'); },   icon: Mail },
+  { to: '/social',    get label() { return uiText('Social'); },      icon: Megaphone },
+  { to: '/settings',  get label() { return uiText('Settings'); },    icon: Settings },
 ];
 
 export function Sidebar() {
+  useUiLocale();
   return (
     <aside className="hidden md:flex w-64 shrink-0 flex-col bg-background">
       {/* Wordmark */}
@@ -22,21 +24,19 @@ export function Sidebar() {
             className="font-display text-[28px] leading-none text-foreground"
             style={{ fontVariationSettings: "'opsz' 144, 'SOFT' 50, 'wght' 500" }}
           >
-            butter
-          </span>
+            {uiText("butter")}</span>
           <span className="font-editorial italic text-[28px] leading-none text-butter">
-            base
-          </span>
+            {uiText("base")}</span>
         </div>
         <div className="mt-1.5 flex items-center gap-2">
           <span className="h-px w-6 bg-foreground/40" />
-          <span className="eyebrow !text-[9.5px]">customer&nbsp;ledger</span>
+          <span className="eyebrow !text-[9.5px]">{uiText("customer ledger")}</span>
         </div>
       </div>
 
       {/* Nav */}
       <nav className="flex flex-col gap-0.5 px-3">
-        <div className="px-3 pb-2 eyebrow !text-[9.5px]">Workspace</div>
+        <div className="px-3 pb-2 eyebrow !text-[9.5px]">{uiText("Workspace")}</div>
         {items.map((it) => (
           <NavLink
             key={it.to}
@@ -78,9 +78,8 @@ export function Sidebar() {
       <div className="px-6 pb-6">
         <div className="rule-dotted mb-4" />
         <p className="font-editorial italic text-[13px] leading-snug text-muted-foreground">
-          “The work is in the relationships.”
-        </p>
-        <p className="mt-2 eyebrow !text-[9px]">v2 · paper edition</p>
+          {uiText("“The work is in the relationships.”")}</p>
+        <p className="mt-2 eyebrow !text-[9px]">{uiText("v2 · paper edition")}</p>
       </div>
     </aside>
   );

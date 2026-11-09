@@ -1,3 +1,4 @@
+import { uiText } from "../i18n";
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { LauncherButton } from './components/LauncherButton';
 import { WidgetPanel } from './components/WidgetPanel';
@@ -91,7 +92,7 @@ export function Widget({ appId }: WidgetProps) {
         setTicketStatus(null);
       }
     } catch (e: any) {
-      setError(e?.message || 'Failed to load history');
+      setError(e?.message || uiText('Failed to load history'));
     } finally {
       setLoading(false);
     }
@@ -134,7 +135,7 @@ export function Widget({ appId }: WidgetProps) {
         );
       }
     } catch (e: any) {
-      setError(e?.message || 'Failed to send');
+      setError(e?.message || uiText('Failed to send'));
     }
   }
 

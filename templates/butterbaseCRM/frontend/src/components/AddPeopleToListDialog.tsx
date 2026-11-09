@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 // frontend/src/components/AddPeopleToListDialog.tsx
 //
 // Add already-existing CRM people (substrate person entity ids) to a
@@ -30,6 +31,7 @@ interface Props {
 }
 
 export function AddPeopleToListDialog({ open, onClose, people }: Props) {
+  useUiLocale();
   const workspaceId = useCurrentWorkspaceId();
   const qc = useQueryClient();
   const [target, setTarget] = useState<Target>('new');
@@ -65,7 +67,7 @@ export function AddPeopleToListDialog({ open, onClose, people }: Props) {
 
   async function save() {
     if (!valid()) {
-      setError(target === 'existing' ? 'Pick a list.' : 'Enter a list name.');
+      setError(target === 'existing' ? uiText('Pick a list.') : uiText('Enter a list name.'));
       return;
     }
     setSaving(true);
@@ -98,7 +100,7 @@ export function AddPeopleToListDialog({ open, onClose, people }: Props) {
         body,
       );
       if (e) throw e;
-      if (!data) throw new Error('create-campaign-list returned no data');
+      if (!data) throw new Error(uiText('create-campaign-list returned no data'));
 
       qc.invalidateQueries({ queryKey: qk.campaignLists(workspaceId) });
 
@@ -109,15 +111,15 @@ export function AddPeopleToListDialog({ open, onClose, people }: Props) {
       const description = dupes > 0 ? `${dupes} skipped (already in list)` : undefined;
 
       if (added === 0) {
-        toast.error('No one added', { description: 'Everyone selected is already in the list.' });
+        toast.error(uiText('No one added'), { description: uiText('Everyone selected is already in the list.') });
       } else {
-        toast.success(`Added ${added} to "${listName2}"`, { description });
+        toast.success(uiMessage`Added ${added} to "${listName2}"`, { description });
       }
       onClose();
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setError(msg);
-      toast.error('Failed to add to list', { description: msg });
+      toast.error(uiText('Failed to add to list'), { description: msg });
     } finally {
       setSaving(false);
     }
@@ -128,8 +130,7 @@ export function AddPeopleToListDialog({ open, onClose, people }: Props) {
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            Add {people.length} {people.length === 1 ? 'person' : 'people'} to a list
-          </DialogTitle>
+            {uiText("Add ")}{people.length} {people.length === 1 ? uiText('person') : uiText('people')} {uiText(" to a list")}</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 py-2">
@@ -144,7 +145,7 @@ export function AddPeopleToListDialog({ open, onClose, people }: Props) {
               disabled={saving || lists.length === 0}
             />
             <div className="flex-1">
-              <div className="text-sm font-medium">Add to existing list</div>
+              <div className="text-sm font-medium">{uiText("Add to existing list")}</div>
               <select
                 value={existingListId}
                 onChange={(e) => setExistingListId(e.target.value)}
@@ -152,7 +153,7 @@ export function AddPeopleToListDialog({ open, onClose, people }: Props) {
                 disabled={saving || lists.length === 0}
                 className="mt-1 w-full rounded-md border bg-background px-2 py-1 text-sm disabled:opacity-50"
               >
-                <option value="">{loading ? 'Loading…' : lists.length === 0 ? 'No lists yet' : 'Pick a list…'}</option>
+                <option value="">{loading ? uiText('Loading…') : lists.length === 0 ? uiText('No lists yet') : uiText('Pick a list…')}</option>
                 {lists.map((l) => (
                   <option key={l.id} value={l.id}>
                     {l.name} ({l.member_count})
@@ -173,12 +174,12 @@ export function AddPeopleToListDialog({ open, onClose, people }: Props) {
               disabled={saving}
             />
             <div className="flex-1">
-              <div className="text-sm font-medium">Create new list</div>
+              <div className="text-sm font-medium">{uiText("Create new list")}</div>
               <Input
                 value={listName}
                 onChange={(e) => setListName(e.target.value)}
                 onFocus={() => setTarget('new')}
-                placeholder="e.g. Q3 warm leads"
+                placeholder={uiText("e.g. Q3 warm leads")}
                 className="mt-1"
                 disabled={saving}
               />
@@ -189,9 +190,9 @@ export function AddPeopleToListDialog({ open, onClose, people }: Props) {
         </div>
 
         <DialogFooter className="gap-2">
-          <Button variant="ghost" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>{uiText("Cancel")}</Button>
           <Button onClick={save} disabled={saving || !valid()}>
-            {saving ? 'Adding…' : 'Add to list'}
+            {saving ? uiText('Adding…') : uiText('Add to list')}
           </Button>
         </DialogFooter>
       </DialogContent>

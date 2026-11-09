@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 // frontend/src/components/LeadResultsTable.tsx
 import { ExternalLink } from 'lucide-react';
 import type { SearchResult } from '@/lib/leadFinder';
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export function LeadResultsTable({ results, selectedIds, onToggle, onToggleAll }: Props) {
+  useUiLocale();
   const allSelected = results.length > 0 && results.every((r) => selectedIds.has(r.external_id));
   const someSelected = !allSelected && results.some((r) => selectedIds.has(r.external_id));
 
@@ -21,18 +23,18 @@ export function LeadResultsTable({ results, selectedIds, onToggle, onToggleAll }
             <th className="px-3 py-2 w-8">
               <input
                 type="checkbox"
-                aria-label="Select all"
+                aria-label={uiText("Select all")}
                 checked={allSelected}
                 ref={(el) => { if (el) el.indeterminate = someSelected; }}
                 onChange={onToggleAll}
                 disabled={results.length === 0}
               />
             </th>
-            <th className="px-3 py-2">Name</th>
-            <th className="px-3 py-2">Title</th>
-            <th className="px-3 py-2">Company</th>
-            <th className="px-3 py-2">Email</th>
-            <th className="px-3 py-2 w-12">LinkedIn</th>
+            <th className="px-3 py-2">{uiText("Name")}</th>
+            <th className="px-3 py-2">{uiText("Title", "Job title")}</th>
+            <th className="px-3 py-2">{uiText("Company")}</th>
+            <th className="px-3 py-2">{uiText("Email")}</th>
+            <th className="px-3 py-2 w-12">{uiText("LinkedIn")}</th>
           </tr>
         </thead>
         <tbody>
@@ -47,7 +49,7 @@ export function LeadResultsTable({ results, selectedIds, onToggle, onToggleAll }
                 <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                   <input
                     type="checkbox"
-                    aria-label={`Select ${r.full_name}`}
+                    aria-label={uiMessage`Select ${r.full_name}`}
                     checked={checked}
                     onChange={() => onToggle(r.external_id)}
                   />
@@ -69,7 +71,7 @@ export function LeadResultsTable({ results, selectedIds, onToggle, onToggleAll }
             );
           })}
           {results.length === 0 && (
-            <tr><td colSpan={6} className="px-3 py-8 text-center text-muted-foreground text-sm">No results yet — run a search.</td></tr>
+            <tr><td colSpan={6} className="px-3 py-8 text-center text-muted-foreground text-sm">{uiText("No results yet — run a search.")}</td></tr>
           )}
         </tbody>
       </table>

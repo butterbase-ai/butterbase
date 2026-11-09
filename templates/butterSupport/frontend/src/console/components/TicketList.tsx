@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -19,6 +20,7 @@ const statusVariant: Record<TicketStatus, 'default' | 'amber' | 'red' | 'green' 
 };
 
 function TicketRowMenu({ ticketId }: { ticketId: string }) {
+  useUiLocale();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -37,7 +39,7 @@ function TicketRowMenu({ ticketId }: { ticketId: string }) {
     <div ref={wrapRef} className="relative" onClick={(e) => e.stopPropagation()}>
       <button
         type="button"
-        aria-label="Ticket options"
+        aria-label={uiText("Ticket options")}
         onClick={(e) => {
           e.stopPropagation();
           setOpen((o) => !o);
@@ -61,7 +63,7 @@ function TicketRowMenu({ ticketId }: { ticketId: string }) {
                   qc.invalidateQueries({ queryKey: ['ticket', ticketId] });
                 }
               } catch (err: any) {
-                toast.error(err?.message || 'Failed to retitle');
+                toast.error(err?.message || uiText('Failed to retitle'));
               } finally {
                 setBusy(false);
                 setOpen(false);
@@ -70,7 +72,7 @@ function TicketRowMenu({ ticketId }: { ticketId: string }) {
             className="flex w-full items-center gap-2 px-3.5 py-2 text-left text-foreground/90 hover:bg-butter-100 disabled:opacity-50"
           >
             <Sparkles className="h-3.5 w-3.5 text-caramel" />
-            {busy ? 'Retitling…' : 'Retitle with AI'}
+            {busy ? uiText('Retitling…') : uiText('Retitle with AI')}
           </button>
         </div>
       )}
@@ -79,6 +81,7 @@ function TicketRowMenu({ ticketId }: { ticketId: string }) {
 }
 
 export function TicketList({ tickets }: { tickets: SupportTicket[] }) {
+  useUiLocale();
   const navigate = useNavigate();
   if (tickets.length === 0) return null;
   return (
@@ -100,18 +103,18 @@ export function TicketList({ tickets }: { tickets: SupportTicket[] }) {
 
           <div className="min-w-0">
             <div className="text-sm font-medium truncate text-foreground group-hover:text-caramel-deep transition-colors">
-              {t.subject || <span className="italic text-muted-foreground">(no subject)</span>}
+              {t.subject || <span className="italic text-muted-foreground">{uiText("(no subject)")}</span>}
             </div>
             <div className="mt-0.5 text-xs text-muted-foreground truncate">
               {t.customer_name
                 ? t.customer_email ? `${t.customer_name} · ${t.customer_email}` : t.customer_name
-                : t.customer_email || 'Anonymous visitor'}
+                : t.customer_email || uiText('Anonymous visitor')}
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             {(t.pending_proposal_count ?? 0) > 0 && (
-              <Badge variant="amber">{t.pending_proposal_count} pending</Badge>
+              <Badge variant="amber">{t.pending_proposal_count} {uiText(" pending")}</Badge>
             )}
             {t.priority && t.priority !== 'normal' && (
               <Badge variant="outline">{t.priority}</Badge>

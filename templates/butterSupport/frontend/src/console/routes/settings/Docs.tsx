@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../../i18n";
 import { useState, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { bb } from '@/console/lib/bb';
@@ -13,6 +14,7 @@ import { toast } from '@/console/components/ui/toast';
 import { confirm } from '@/console/components/ui/confirm';
 
 export function DocsSettings() {
+  useUiLocale();
   const qc = useQueryClient();
   const [url, setUrl] = useState('');
   const [name, setName] = useState('');
@@ -35,9 +37,9 @@ export function DocsSettings() {
       await api.ingestDocs({ url: normalized, source_kind: 'web', display_name: name || normalized });
       setUrl(''); setName('');
       qc.invalidateQueries({ queryKey: ['docs_sources'] });
-      toast.success('Ingest started');
+      toast.success(uiText('Ingest started'));
     } catch (e: any) {
-      toast.error(e?.message || 'Ingest failed');
+      toast.error(e?.message || uiText('Ingest failed'));
     } finally {
       setBusy(false);
     }
@@ -54,9 +56,9 @@ export function DocsSettings() {
       await fetch(u.upload_url, { method: 'PUT', body: file, headers: { 'Content-Type': file.type || 'application/octet-stream' } });
       await api.ingestDocs({ source_kind: 'file', display_name: file.name, object_id: u.object_id });
       qc.invalidateQueries({ queryKey: ['docs_sources'] });
-      toast.success('File uploaded and queued for ingest');
+      toast.success(uiText('File uploaded and queued for ingest'));
     } catch (e: any) {
-      toast.error(e?.message || 'Upload failed');
+      toast.error(e?.message || uiText('Upload failed'));
     } finally {
       setBusy(false);
       if (fileRef.current) fileRef.current.value = '';
@@ -64,33 +66,33 @@ export function DocsSettings() {
   }
 
   async function remove(source_id: string) {
-    if (!(await confirm({ title: 'Delete docs source?', description: 'The source and all of its embeddings will be removed permanently.', confirmLabel: 'Delete', variant: 'destructive' }))) return;
+    if (!(await confirm({ title: uiText('Delete docs source?'), description: uiText('The source and all of its embeddings will be removed permanently.'), confirmLabel: uiText('Delete'), variant: 'destructive' }))) return;
     try {
       await api.deleteDocsSource({ source_id });
       qc.invalidateQueries({ queryKey: ['docs_sources'] });
-      toast.success('Docs source deleted');
+      toast.success(uiText('Docs source deleted'));
     } catch (e: any) {
-      toast.error(e?.message || 'Delete failed');
+      toast.error(e?.message || uiText('Delete failed'));
     }
   }
 
   return (
     <SettingsPage
-      label="Knowledge"
-      title={<>Feed the agent your <em>docs</em></>}
-      description="Crawl URLs or upload files. The agent uses these for grounded, cited answers."
+      label={uiText("Knowledge")}
+      title={<>{uiText("Feed the agent your ")}<em>{uiText("docs")}</em></>}
+      description={uiText("Crawl URLs or upload files. The agent uses these for grounded, cited answers.")}
     >
       <Card>
-        <CardHeader><CardTitle>Add a URL</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{uiText("Add a URL")}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
-          <Input placeholder="Display name (optional)" value={name} onChange={(e) => setName(e.target.value)} />
-          <Input placeholder="https://docs.yourcompany.com" value={url} onChange={(e) => setUrl(e.target.value)} />
-          <Button onClick={ingestUrl} disabled={!url || busy}>{busy ? 'Ingesting…' : 'Ingest URL'}</Button>
+          <Input placeholder={uiText("Display name (optional)")} value={name} onChange={(e) => setName(e.target.value)} />
+          <Input placeholder={uiText("https://docs.yourcompany.com")} value={url} onChange={(e) => setUrl(e.target.value)} />
+          <Button onClick={ingestUrl} disabled={!url || busy}>{busy ? uiText('Ingesting…') : uiText('Ingest URL')}</Button>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle>Upload a file</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{uiText("Upload a file")}</CardTitle></CardHeader>
         <CardContent>
           <label className="flex items-center justify-center gap-3 rounded-xl border border-dashed border-rule bg-paper-warm px-6 py-8 cursor-pointer hover:border-butter-300/60 hover:bg-butter-50 transition-colors">
             <input
@@ -102,33 +104,32 @@ export function DocsSettings() {
               disabled={busy}
             />
             <div className="text-center">
-              <div className="font-display text-base">Drop a file</div>
+              <div className="font-display text-base">{uiText("Drop a file")}</div>
               <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                pdf · md · csv · docx · xlsx · pptx · html
-              </div>
+                {uiText("pdf · md · csv · docx · xlsx · pptx · html")}</div>
             </div>
           </label>
         </CardContent>
       </Card>
 
       <div>
-        <div className="section-label mb-3">Sources · {sources.length}</div>
+        <div className="section-label mb-3">{uiText("Sources · ")}{sources.length}</div>
         <div className="rounded-2xl border border-rule-soft bg-paper-soft divide-y divide-[rgb(244_236_221/0.06)]">
           {sources.map((s) => (
             <div key={s.id} className="flex items-center gap-3 px-4 py-3">
               <div className="flex-1 text-sm min-w-0">
                 <div className="font-medium truncate text-foreground">{s.display_name}</div>
                 <div className="font-mono text-[10px] text-muted-foreground truncate">
-                  {s.source_kind} · added {timeAgo(s.created_at)}
+                  {s.source_kind} {uiText(" · added ")}{timeAgo(s.created_at)}
                 </div>
               </div>
               <Badge variant={s.last_crawl_status === 'ready' ? 'green' : s.last_crawl_status === 'failed' ? 'red' : 'amber'}>
-                {s.last_crawl_status || 'pending'}
+                {s.last_crawl_status || uiText('pending')}
               </Badge>
-              <Button size="sm" variant="ghost" onClick={() => remove(s.id)}>Delete</Button>
+              <Button size="sm" variant="ghost" onClick={() => remove(s.id)}>{uiText("Delete")}</Button>
             </div>
           ))}
-          {sources.length === 0 && <div className="p-4 text-sm text-muted-foreground">No sources yet.</div>}
+          {sources.length === 0 && <div className="p-4 text-sm text-muted-foreground">{uiText("No sources yet.")}</div>}
         </div>
       </div>
     </SettingsPage>

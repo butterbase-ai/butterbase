@@ -1,3 +1,4 @@
+import { DocumentLanguage } from '../i18n';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthGate } from './components/AuthGate';
 import { AppLayout } from './components/AppLayout';
@@ -19,6 +20,8 @@ import { AISettings } from './routes/settings/AI';
 
 export default function App() {
   return (
+    <>
+      <DocumentLanguage />
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/no-access" element={<NoAccess />} />
@@ -49,5 +52,6 @@ export default function App() {
         }
       />
     </Routes>
+    </>
   );
 }

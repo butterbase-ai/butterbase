@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useMemo, useState } from 'react'
 import { formatDistanceToNowStrict } from 'date-fns'
 import { ExternalLink, MessageSquare, Inbox } from 'lucide-react'
@@ -36,6 +37,7 @@ function statusDot(status: string) {
 }
 
 export default function SocialPosts() {
+  useUiLocale();
   const [view, setView] = useState<View>('posts')
   const [search, setSearch] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -84,7 +86,7 @@ export default function SocialPosts() {
       <div className={`flex-1 flex flex-col ${selected ? 'border-r border-gray-200' : ''}`}>
         {/* Toolbar */}
         <div className="flex items-center gap-3 border-b border-gray-200 px-6 py-4">
-          <h1 className="font-display text-xl tracking-tight flex-1">Social</h1>
+          <h1 className="font-display text-xl tracking-tight flex-1">{uiText("Social")}</h1>
 
           {/* View toggle */}
           <div className="flex rounded-md border border-gray-200 bg-gray-50 p-0.5 text-xs">
@@ -105,7 +107,7 @@ export default function SocialPosts() {
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search…"
+            placeholder={uiText("Search…")}
             className="w-48 h-9"
           />
           {view === 'comments' ? (
@@ -113,21 +115,19 @@ export default function SocialPosts() {
               <NewSocialCommentDialog />
               <Button size="sm" variant="outline" className="h-9 gap-1.5" onClick={() => setCampaignOpen(true)}>
                 <MessageSquare className="h-3.5 w-3.5" />
-                New campaign
-              </Button>
+                {uiText("New campaign")}</Button>
             </div>
           ) : view === 'inbox' ? (
             <div className="flex items-center gap-1.5 text-xs text-gray-500">
               <Inbox className="h-3.5 w-3.5" />
-              Reddit replies
-            </div>
+              {uiText("Reddit replies")}</div>
           ) : <NewSocialPostDialog />}
         </div>
 
         {/* Filter chips */}
         <div className="flex items-center gap-2 border-b border-gray-200 px-6 py-2.5">
           {view === 'inbox' ? (
-            <span className="text-xs text-gray-400">Showing replies to your Reddit posts from the last 30 days</span>
+            <span className="text-xs text-gray-400">{uiText("Showing replies to your Reddit posts from the last 30 days")}</span>
           ) : view === 'posts' ? (
             <>
               {STATUS_FILTERS.map((s) => (
@@ -197,19 +197,19 @@ export default function SocialPosts() {
         <div className="flex-1 overflow-auto">
           {view === 'posts' ? (
             postsLoading ? (
-              <div className="px-6 py-10 text-sm text-gray-500">Loading…</div>
+              <div className="px-6 py-10 text-sm text-gray-500">{uiText("Loading…")}</div>
             ) : filteredPosts.length === 0 ? (
               <div className="px-6 py-10 text-sm text-gray-500">
-                {posts.length === 0 ? 'No posts yet. Click "New post" to get started.' : 'No posts match these filters.'}
+                {posts.length === 0 ? uiText('No posts yet. Click "New post" to get started.') : uiText('No posts match these filters.')}
               </div>
             ) : (
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-200">
-                    <th className="px-6 py-2 font-semibold">Post</th>
-                    <th className="px-2 py-2 font-semibold">Channels</th>
-                    <th className="px-2 py-2 font-semibold">When</th>
-                    <th className="px-2 py-2 font-semibold">Status</th>
+                    <th className="px-6 py-2 font-semibold">{uiText("Post")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("Channels")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("When")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("Status")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -226,20 +226,19 @@ export default function SocialPosts() {
             )
           ) : view === 'inbox' ? (
             inboxLoading ? (
-              <div className="px-6 py-10 text-sm text-gray-500">Loading…</div>
+              <div className="px-6 py-10 text-sm text-gray-500">{uiText("Loading…")}</div>
             ) : inboxItems.length === 0 ? (
               <div className="px-6 py-10 text-sm text-gray-500">
-                No replies yet. Replies to your Reddit posts will appear here automatically.
-              </div>
+                {uiText("No replies yet. Replies to your Reddit posts will appear here automatically.")}</div>
             ) : (
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-200">
-                    <th className="px-6 py-2 font-semibold">Reply</th>
-                    <th className="px-2 py-2 font-semibold">From</th>
-                    <th className="px-2 py-2 font-semibold">Score</th>
-                    <th className="px-2 py-2 font-semibold">When</th>
-                    <th className="px-2 py-2 font-semibold">Status</th>
+                    <th className="px-6 py-2 font-semibold">{uiText("Reply")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("From")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("Score")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("When")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("Status")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -256,20 +255,20 @@ export default function SocialPosts() {
             )
           ) : (
             commentsLoading ? (
-              <div className="px-6 py-10 text-sm text-gray-500">Loading…</div>
+              <div className="px-6 py-10 text-sm text-gray-500">{uiText("Loading…")}</div>
             ) : filteredComments.length === 0 ? (
               <div className="px-6 py-10 text-sm text-gray-500">
-                {comments.length === 0 ? 'No comments yet. Click "New comment" to get started.' : 'No comments match these filters.'}
+                {comments.length === 0 ? uiText('No comments yet. Click "New comment" to get started.') : uiText('No comments match these filters.')}
               </div>
             ) : (
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-200">
-                    <th className="px-6 py-2 font-semibold">Comment</th>
-                    <th className="px-2 py-2 font-semibold">Channel</th>
-                    <th className="px-2 py-2 font-semibold">When</th>
-                    <th className="px-2 py-2 font-semibold">Status</th>
-                    <th className="px-2 py-2 font-semibold">Link</th>
+                    <th className="px-6 py-2 font-semibold">{uiText("Comment")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("Channel")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("When")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("Status")}</th>
+                    <th className="px-2 py-2 font-semibold">{uiText("Link")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -307,6 +306,7 @@ export default function SocialPosts() {
 }
 
 function PostRow({ post, selected, onClick }: { post: SocialPostWithSends; selected: boolean; onClick: () => void }) {
+  useUiLocale();
   const when = post.published_at
     ? formatDistanceToNowStrict(new Date(post.published_at), { addSuffix: true })
     : post.scheduled_at
@@ -341,6 +341,7 @@ function PostRow({ post, selected, onClick }: { post: SocialPostWithSends; selec
 }
 
 function InboxRow({ item, selected, onClick }: { item: ReplyInboxItem; selected: boolean; onClick: () => void }) {
+  useUiLocale();
   const when = formatDistanceToNowStrict(new Date(item.created_at), { addSuffix: true })
 
   return (
@@ -357,12 +358,10 @@ function InboxRow({ item, selected, onClick }: { item: ReplyInboxItem; selected:
       <td className="px-2 py-3 text-xs">
         {item.replied_at ? (
           <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-green-700 font-medium">
-            Replied
-          </span>
+            {uiText("Replied")}</span>
         ) : (
           <span className="inline-flex items-center gap-1 rounded-full bg-yellow-50 px-2 py-0.5 text-yellow-700">
-            Pending
-          </span>
+            {uiText("Pending")}</span>
         )}
       </td>
     </tr>
@@ -370,6 +369,7 @@ function InboxRow({ item, selected, onClick }: { item: ReplyInboxItem; selected:
 }
 
 function InboxDetailPanel({ item, onClose }: { item: ReplyInboxItem; onClose: () => void }) {
+  useUiLocale();
   const [replyText, setReplyText] = useState('')
   const replyMutation = useReplyToInboxItem()
 
@@ -382,7 +382,7 @@ function InboxDetailPanel({ item, onClose }: { item: ReplyInboxItem; onClose: ()
   return (
     <div className="flex h-full flex-col border-l border-gray-200 bg-white">
       <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
-        <span className="text-sm font-medium">Reply</span>
+        <span className="text-sm font-medium">{uiText("Reply")}</span>
         <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none">×</button>
       </div>
       <div className="flex-1 overflow-auto p-4 space-y-3">
@@ -390,7 +390,7 @@ function InboxDetailPanel({ item, onClose }: { item: ReplyInboxItem; onClose: ()
         <div className="flex items-center gap-2 text-xs text-gray-400">
           {item.author_name && <span>u/{item.author_name}</span>}
           <span>·</span>
-          <span>{item.score} pts</span>
+          <span>{item.score} {uiText(" pts")}</span>
           {item.external_url && (
             <>
               <span>·</span>
@@ -400,7 +400,7 @@ function InboxDetailPanel({ item, onClose }: { item: ReplyInboxItem; onClose: ()
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-0.5 text-blue-500 hover:underline"
               >
-                View on Reddit <ExternalLink className="h-3 w-3" />
+                {uiText("View on Reddit ")}<ExternalLink className="h-3 w-3" />
               </a>
             </>
           )}
@@ -408,13 +408,13 @@ function InboxDetailPanel({ item, onClose }: { item: ReplyInboxItem; onClose: ()
       </div>
       <div className="border-t border-gray-200 p-4 space-y-2">
         {item.replied_at ? (
-          <p className="text-xs text-green-600">Replied {formatDistanceToNowStrict(new Date(item.replied_at), { addSuffix: true })}</p>
+          <p className="text-xs text-green-600">{uiText("Replied ")}{formatDistanceToNowStrict(new Date(item.replied_at), { addSuffix: true })}</p>
         ) : (
           <>
             <Textarea
               value={replyText}
               onChange={(e) => setReplyText(e.target.value)}
-              placeholder="Write your reply…"
+              placeholder={uiText("Write your reply…")}
               className="text-sm resize-none"
               rows={4}
             />
@@ -427,7 +427,7 @@ function InboxDetailPanel({ item, onClose }: { item: ReplyInboxItem; onClose: ()
               disabled={!replyText.trim() || replyMutation.isPending}
               onClick={handleReply}
             >
-              {replyMutation.isPending ? 'Posting…' : 'Post reply'}
+              {replyMutation.isPending ? uiText('Posting…') : uiText('Post reply')}
             </Button>
           </>
         )}
@@ -437,6 +437,7 @@ function InboxDetailPanel({ item, onClose }: { item: ReplyInboxItem; onClose: ()
 }
 
 function CommentRow({ comment, selected, onClick }: { comment: SocialComment; selected: boolean; onClick: () => void }) {
+  useUiLocale();
   const when = formatDistanceToNowStrict(new Date(comment.created_at), { addSuffix: true })
   const Icon = SOCIAL_ICONS[comment.channel as SocialChannel]
 
@@ -474,7 +475,7 @@ function CommentRow({ comment, selected, onClick }: { comment: SocialComment; se
             className="inline-flex items-center gap-1 text-blue-500 hover:underline"
             onClick={(e) => e.stopPropagation()}
           >
-            View <ExternalLink className="h-3 w-3" />
+            {uiText("View ")}<ExternalLink className="h-3 w-3" />
           </a>
         ) : '—'}
       </td>

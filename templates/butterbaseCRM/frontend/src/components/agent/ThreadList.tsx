@@ -1,13 +1,15 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useAgentThreads } from '@/hooks/useAgentThreads';
 import { useAgentUIStore } from '@/lib/agent';
 import { useWorkspaceStore } from '@/lib/workspace';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import { History } from 'lucide-react';
-import { formatDistanceToNow } from 'date-fns';
+import { formatDistanceToNow } from '@/i18n/date';
 import { useState } from 'react';
 
 export function ThreadList() {
+  useUiLocale();
   const wsId = useWorkspaceStore((s) => s.workspaceId);
   const { data: threads } = useAgentThreads(wsId);
   const setThread = useAgentUIStore((s) => s.setThread);
@@ -16,7 +18,7 @@ export function ThreadList() {
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="icon" className="h-7 w-7" title="Recent threads">
+        <Button variant="ghost" size="icon" className="h-7 w-7" title={uiText("Recent threads")}>
           <History className="h-3.5 w-3.5" />
         </Button>
       </PopoverTrigger>
@@ -28,7 +30,7 @@ export function ThreadList() {
                 onClick={() => { setThread(t.id); setOpen(false); }}
                 className="block w-full text-left px-2 py-1.5 hover:bg-foreground/[0.04] rounded"
               >
-                <p className="text-[12.5px] truncate">{t.title ?? 'Untitled'}</p>
+                <p className="text-[12.5px] truncate">{t.title ?? uiText('Untitled')}</p>
                 <p className="text-[10.5px] text-muted-foreground font-mono">
                   {formatDistanceToNow(new Date(t.last_message_at), { addSuffix: true })} · {t.mode}
                 </p>
@@ -36,7 +38,7 @@ export function ThreadList() {
             </li>
           ))}
           {(threads ?? []).length === 0 && (
-            <p className="p-3 text-[12px] text-muted-foreground font-editorial italic">No threads yet.</p>
+            <p className="p-3 text-[12px] text-muted-foreground font-editorial italic">{uiText("No threads yet.")}</p>
           )}
         </ul>
       </PopoverContent>

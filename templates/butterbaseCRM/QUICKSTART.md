@@ -1,5 +1,7 @@
 # butterbaseCRM — Quickstart
 
+[English](QUICKSTART.md) | [日本語](QUICKSTART.ja.md)
+
 A collaborative sales CRM (companies, people, deals, notes, meetings, activities) built on the [Butterbase](https://butterbase.ai) platform.
 
 **About "cloning" in this guide:** every time we say *clone*, we mean a **Butterbase app clone** — done either through the Butterbase MCP tool (`manage_app` action `clone`) or the CLI (`butterbase clone`). A Butterbase clone forks the live backend (schema, RLS policies, function code, auth/storage/realtime/AI configs, repo snapshot) into a brand-new `app_<id>` that *you* own, with its own URL, its own database, and its own API key. The source app is untouched. It also pulls the code snapshot into your local folder, so you have something to run.

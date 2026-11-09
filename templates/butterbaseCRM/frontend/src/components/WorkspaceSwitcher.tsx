@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useQueryClient } from '@tanstack/react-query';
 import {
   DropdownMenu,
@@ -14,6 +15,7 @@ import { useWorkspaces } from '@/hooks/useWorkspaces';
 import { useWorkspaceStore } from '@/lib/workspace';
 
 export function WorkspaceSwitcher() {
+  useUiLocale();
   const qc = useQueryClient();
   const navigate = useNavigate();
   const workspaceId = useWorkspaceStore((s) => s.workspaceId);
@@ -36,7 +38,7 @@ export function WorkspaceSwitcher() {
             {(current?.name ?? 'B').slice(0, 1).toUpperCase()}
           </span>
           <span className="max-w-[12rem] truncate font-display text-[15px] tracking-tight text-foreground">
-            {current?.name ?? 'Select workspace'}
+            {current?.name ?? uiText('Select workspace')}
           </span>
           <ChevronDown className="h-3.5 w-3.5 opacity-50 group-hover:opacity-80 transition-opacity" />
         </Button>
@@ -61,8 +63,7 @@ export function WorkspaceSwitcher() {
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={() => navigate('/onboard')}>
           <Plus className="mr-2 h-4 w-4" />
-          Create workspace
-        </DropdownMenuItem>
+          {uiText("Create workspace")}</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

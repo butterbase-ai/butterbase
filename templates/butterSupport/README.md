@@ -1,5 +1,7 @@
 # Butter Support
 
+[English](README.md) | [日本語](README.ja.md)
+
 **An open-source, Butterbase-native AI support agent that diagnoses against your real product data — not just your docs.**
 
 [![Clone on Butterbase](https://img.shields.io/badge/clone%20on-butterbase-F5C24C?style=flat-square)](https://docs.butterbase.ai/templates)

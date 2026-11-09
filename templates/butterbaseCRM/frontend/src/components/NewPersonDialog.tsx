@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -38,6 +39,7 @@ function parsePersonInput(raw: string): Parsed | null {
 interface Props { defaultCompanyId?: string | null }
 
 export function NewPersonDialog({ defaultCompanyId }: Props = {}) {
+  useUiLocale();
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -57,11 +59,11 @@ export function NewPersonDialog({ defaultCompanyId }: Props = {}) {
         title: null,
         linkedin_url: null,
       });
-      toast.success('Person added');
+      toast.success(uiText('Person added'));
       setValue('');
       setOpen(false);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to add person');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to add person'));
     } finally {
       setSubmitting(false);
     }
@@ -70,14 +72,14 @@ export function NewPersonDialog({ defaultCompanyId }: Props = {}) {
   return (
     <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) setValue(''); }}>
       <DialogTrigger asChild>
-        <Button><Plus className="mr-2 h-4 w-4" />Add Person</Button>
+        <Button><Plus className="mr-2 h-4 w-4" />{uiText("Add Person")}</Button>
       </DialogTrigger>
       <DialogContent>
-        <DialogHeader><DialogTitle>Add Person</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{uiText("Add Person")}</DialogTitle></DialogHeader>
         <div className="space-y-2">
-          <label className="text-sm font-medium">Email or name</label>
+          <label className="text-sm font-medium">{uiText("Email or name")}</label>
           <Input
-            placeholder="jane@acme.com or Jane Doe"
+            placeholder={uiText("jane@acme.com or Jane Doe")}
             value={value}
             autoFocus
             onChange={(e) => setValue(e.target.value)}
@@ -91,7 +93,7 @@ export function NewPersonDialog({ defaultCompanyId }: Props = {}) {
               className="flex w-full items-center gap-2 rounded-md border bg-card px-3 py-2 text-left text-sm hover:bg-accent disabled:opacity-50"
             >
               {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-              <span>Add <span className="font-medium">"{value.trim()}"</span></span>
+              <span>{uiText("Add ")}<span className="font-medium">"{value.trim()}"</span></span>
             </button>
           )}
         </div>
