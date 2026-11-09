@@ -1,5 +1,7 @@
 # Contributing
 
+[English](./CONTRIBUTING.md) · [日本語](./CONTRIBUTING.ja.md)
+
 Thanks for your interest in Butterbase! This document covers how to set up a dev environment, the scope of what belongs in this repo vs. the managed offering, and the PR workflow.
 
 ## Code of conduct
