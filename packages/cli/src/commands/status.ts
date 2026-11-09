@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import { getAppConfig, getSchema, listFunctions, listDeployments, getFrontendEnv } from '../lib/api-client.js';
@@ -7,8 +8,8 @@ async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
   const currentAppId = await getCurrentAppId();
   if (!currentAppId) {
-    console.log(chalk.red('No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.log(chalk.red(text('No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
   return currentAppId;
@@ -16,7 +17,7 @@ async function requireAppId(appId?: string): Promise<string> {
 
 export async function statusCommand(options: { app?: string; json?: boolean }) {
   const appId = await requireAppId(options.app);
-  const spinner = ora('Fetching app status...').start();
+  const spinner = ora(text('Fetching app status...')).start();
 
   try {
     const [config, schema, funcs, deploys, env] = await Promise.all([
@@ -38,17 +39,17 @@ export async function statusCommand(options: { app?: string; json?: boolean }) {
     const name = (config as any)?.name || appId;
     const region = (config as any)?.region || 'unknown';
     console.log(chalk.white.bold(`${name}`) + chalk.gray(` (${appId})`));
-    console.log(chalk.gray(`Region: ${region}\n`));
+    console.log(chalk.gray(msg`Region: ${region}\n`));
 
     // Database
     const tables = (schema as any)?.schema?.tables;
     if (tables) {
       const tableNames = Object.keys(tables);
-      console.log(chalk.blue('Database:'));
+      console.log(chalk.blue(text('Database:')));
       if (tableNames.length === 0) {
-        console.log(chalk.gray('  No tables'));
+        console.log(chalk.gray(text('  No tables')));
       } else {
-        console.log(`  Tables: ${tableNames.join(', ')} ${chalk.gray(`(${tableNames.length})`)}`);
+        console.log(msg`  Tables: ${tableNames.join(', ')} ${chalk.gray(`(${tableNames.length})`)}`);
       }
       console.log('');
     }
@@ -56,27 +57,27 @@ export async function statusCommand(options: { app?: string; json?: boolean }) {
     // Frontend
     const deployList = (deploys as any)?.deployments || [];
     const latest = deployList[0];
-    console.log(chalk.blue('Frontend:'));
+    console.log(chalk.blue(text('Frontend:')));
     if (latest) {
       const statusColor = latest.status === 'READY' ? chalk.green : latest.status === 'ERROR' ? chalk.red : chalk.yellow;
-      console.log(`  URL: ${chalk.white(latest.url || 'n/a')}`);
-      console.log(`  Last deploy: ${statusColor(latest.status)} ${chalk.gray(latest.createdAt?.slice(0, 10) || '')}`);
+      console.log(msg`  URL: ${chalk.white(latest.url || 'n/a')}`);
+      console.log(msg`  Last deploy: ${statusColor(latest.status)} ${chalk.gray(latest.createdAt?.slice(0, 10) || '')}`);
     } else {
-      console.log(chalk.gray('  No deployments'));
+      console.log(chalk.gray(text('  No deployments')));
     }
 
     // Env vars
     const envVars = (env as any)?.envVars || [];
     if (envVars.length > 0) {
-      console.log(`  Env vars: ${envVars.map((e: any) => e.key).join(', ')}`);
+      console.log(msg`  Env vars: ${envVars.map((e: any) => e.key).join(', ')}`);
     }
     console.log('');
 
     // Functions
     const funcList = (funcs as any)?.functions || [];
-    console.log(chalk.blue('Functions:'));
+    console.log(chalk.blue(text('Functions:')));
     if (funcList.length === 0) {
-      console.log(chalk.gray('  None deployed'));
+      console.log(chalk.gray(text('  None deployed')));
     } else {
       for (const f of funcList) {
         // After the function_triggers cutover the API returns a `triggers`
@@ -93,14 +94,14 @@ export async function statusCommand(options: { app?: string; json?: boolean }) {
 
     // CORS
     const origins = (config as any)?.allowed_origins || [];
-    console.log(chalk.blue('CORS:'));
+    console.log(chalk.blue(text('CORS:')));
     if (origins.length === 0) {
-      console.log(chalk.gray('  No origins configured'));
+      console.log(chalk.gray(text('  No origins configured')));
     } else {
       for (const o of origins) console.log(`  ${o}`);
     }
   } catch (error) {
-    spinner.fail('Failed to fetch app status');
+    spinner.fail(text('Failed to fetch app status'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }

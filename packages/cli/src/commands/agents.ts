@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import fs from 'fs-extra';
@@ -10,8 +11,8 @@ async function requireAppId(appId?: string): Promise<string> {
 
   const currentAppId = await getCurrentAppId();
   if (!currentAppId) {
-    console.log(chalk.red('✗ No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.log(chalk.red(text('✗ No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
 
@@ -20,7 +21,7 @@ async function requireAppId(appId?: string): Promise<string> {
 
 async function readSpecFile(filePath: string): Promise<Record<string, unknown>> {
   if (!await fs.pathExists(filePath)) {
-    console.log(chalk.red(`✗ File not found: ${filePath}`));
+    console.log(chalk.red(msg`✗ File not found: ${filePath}`));
     process.exit(1);
   }
 
@@ -28,7 +29,7 @@ async function readSpecFile(filePath: string): Promise<Record<string, unknown>> 
   try {
     raw = await fs.readFile(filePath, 'utf-8');
   } catch (err) {
-    console.log(chalk.red(`✗ Failed to read file: ${filePath}`));
+    console.log(chalk.red(msg`✗ Failed to read file: ${filePath}`));
     process.exit(1);
   }
 
@@ -36,12 +37,12 @@ async function readSpecFile(filePath: string): Promise<Record<string, unknown>> 
   try {
     parsed = JSON.parse(raw!);
   } catch {
-    console.log(chalk.red(`✗ File is not valid JSON: ${filePath}`));
+    console.log(chalk.red(msg`✗ File is not valid JSON: ${filePath}`));
     process.exit(1);
   }
 
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    console.log(chalk.red(`✗ Spec file must be a JSON object: ${filePath}`));
+    console.log(chalk.red(msg`✗ Spec file must be a JSON object: ${filePath}`));
     process.exit(1);
   }
 
@@ -50,7 +51,7 @@ async function readSpecFile(filePath: string): Promise<Record<string, unknown>> 
 
 export async function agentsListCommand(app: string) {
   const appId = await requireAppId(app);
-  const spinner = ora('Fetching agents...').start();
+  const spinner = ora(text('Fetching agents...')).start();
 
   try {
     const response: any = await listAgents(appId);
@@ -58,29 +59,29 @@ export async function agentsListCommand(app: string) {
 
     const agents = response.agents || [];
     if (agents.length === 0) {
-      console.log(chalk.yellow('No agents found'));
+      console.log(chalk.yellow(text('No agents found')));
       return;
     }
 
-    console.log(chalk.blue('\nAgents:\n'));
+    console.log(chalk.blue(text('\nAgents:\n')));
     for (const agent of agents) {
       console.log(chalk.bold(agent.name));
       if (agent.display_name) {
-        console.log(chalk.gray(`  Display name: ${agent.display_name}`));
+        console.log(chalk.gray(msg`  Display name: ${agent.display_name}`));
       }
       if (agent.description) {
-        console.log(chalk.gray(`  Description:  ${agent.description}`));
+        console.log(chalk.gray(msg`  Description:  ${agent.description}`));
       }
       if (agent.visibility) {
-        console.log(chalk.gray(`  Visibility:   ${agent.visibility}`));
+        console.log(chalk.gray(msg`  Visibility:   ${agent.visibility}`));
       }
       if (agent.default_model) {
-        console.log(chalk.gray(`  Model:        ${agent.default_model}`));
+        console.log(chalk.gray(msg`  Model:        ${agent.default_model}`));
       }
       console.log();
     }
   } catch (error) {
-    spinner.fail('Failed to fetch agents');
+    spinner.fail(text('Failed to fetch agents'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
@@ -88,7 +89,7 @@ export async function agentsListCommand(app: string) {
 
 export async function agentsGetCommand(app: string, name: string) {
   const appId = await requireAppId(app);
-  const spinner = ora(`Fetching agent "${name}"...`).start();
+  const spinner = ora(msg`Fetching agent "${name}"...`).start();
 
   try {
     const response: any = await getAgent(appId, name);
@@ -96,20 +97,20 @@ export async function agentsGetCommand(app: string, name: string) {
 
     const agent = response.agent ?? response;
 
-    console.log(chalk.blue(`\nAgent: ${chalk.bold(agent.name)}\n`));
-    if (agent.display_name) console.log(chalk.gray(`  Display name:              ${agent.display_name}`));
-    if (agent.description)  console.log(chalk.gray(`  Description:               ${agent.description}`));
-    if (agent.visibility)   console.log(chalk.gray(`  Visibility:                ${agent.visibility}`));
-    if (agent.default_model) console.log(chalk.gray(`  Default model:             ${agent.default_model}`));
-    if (agent.max_runs_per_user_per_hour != null) console.log(chalk.gray(`  Max runs/user/hour:        ${agent.max_runs_per_user_per_hour}`));
-    if (agent.max_runs_per_ip_per_hour != null)   console.log(chalk.gray(`  Max runs/IP/hour:          ${agent.max_runs_per_ip_per_hour}`));
-    if (agent.max_runs_per_app_per_hour != null)  console.log(chalk.gray(`  Max runs/app/hour:         ${agent.max_runs_per_app_per_hour}`));
-    if (agent.daily_budget_usd != null)           console.log(chalk.gray(`  Daily budget (USD):        ${agent.daily_budget_usd}`));
-    if (agent.max_concurrent_runs != null)        console.log(chalk.gray(`  Max concurrent runs:       ${agent.max_concurrent_runs}`));
-    if (agent.graph_spec)   console.log(chalk.gray(`  Graph spec:                ${JSON.stringify(agent.graph_spec)}`));
+    console.log(chalk.blue(msg`\nAgent: ${chalk.bold(agent.name)}\n`));
+    if (agent.display_name) console.log(chalk.gray(msg`  Display name:              ${agent.display_name}`));
+    if (agent.description)  console.log(chalk.gray(msg`  Description:               ${agent.description}`));
+    if (agent.visibility)   console.log(chalk.gray(msg`  Visibility:                ${agent.visibility}`));
+    if (agent.default_model) console.log(chalk.gray(msg`  Default model:             ${agent.default_model}`));
+    if (agent.max_runs_per_user_per_hour != null) console.log(chalk.gray(msg`  Max runs/user/hour:        ${agent.max_runs_per_user_per_hour}`));
+    if (agent.max_runs_per_ip_per_hour != null)   console.log(chalk.gray(msg`  Max runs/IP/hour:          ${agent.max_runs_per_ip_per_hour}`));
+    if (agent.max_runs_per_app_per_hour != null)  console.log(chalk.gray(msg`  Max runs/app/hour:         ${agent.max_runs_per_app_per_hour}`));
+    if (agent.daily_budget_usd != null)           console.log(chalk.gray(msg`  Daily budget (USD):        ${agent.daily_budget_usd}`));
+    if (agent.max_concurrent_runs != null)        console.log(chalk.gray(msg`  Max concurrent runs:       ${agent.max_concurrent_runs}`));
+    if (agent.graph_spec)   console.log(chalk.gray(msg`  Graph spec:                ${JSON.stringify(agent.graph_spec)}`));
     console.log();
   } catch (error) {
-    spinner.fail(`Failed to fetch agent "${name}"`);
+    spinner.fail(msg`Failed to fetch agent "${name}"`);
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
@@ -119,29 +120,29 @@ export async function agentsCreateCommand(app: string, options: { file: string }
   const appId = await requireAppId(app);
 
   if (!options.file) {
-    console.log(chalk.red('✗ --file is required'));
-    console.log(chalk.gray('Usage: butterbase agents create <app> --file path/to/spec.json'));
+    console.log(chalk.red(text('✗ --file is required')));
+    console.log(chalk.gray(text('Usage: butterbase agents create <app> --file path/to/spec.json')));
     process.exit(1);
   }
 
   const spec = await readSpecFile(options.file);
 
   if (!spec.name || typeof spec.name !== 'string') {
-    console.log(chalk.red('✗ Spec file must include a top-level "name" field'));
+    console.log(chalk.red(text('✗ Spec file must include a top-level "name" field')));
     process.exit(1);
   }
 
   const agentName = spec.name as string;
-  const spinner = ora(`Creating agent "${agentName}"...`).start();
+  const spinner = ora(msg`Creating agent "${agentName}"...`).start();
 
   try {
     const response: any = await createAgent(appId, spec);
-    spinner.succeed(`Created agent "${agentName}"`);
-    console.log(chalk.green('\n✓ Agent created successfully!'));
+    spinner.succeed(msg`Created agent "${agentName}"`);
+    console.log(chalk.green(text('\n✓ Agent created successfully!')));
     const agent = response.agent ?? response;
-    if (agent.name) console.log(chalk.gray(`  Name: ${agent.name}`));
+    if (agent.name) console.log(chalk.gray(msg`  Name: ${agent.name}`));
   } catch (error) {
-    spinner.fail(`Failed to create agent "${agentName}"`);
+    spinner.fail(msg`Failed to create agent "${agentName}"`);
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
@@ -151,8 +152,8 @@ export async function agentsUpdateCommand(app: string, name: string, options: { 
   const appId = await requireAppId(app);
 
   if (!options.file) {
-    console.log(chalk.red('✗ --file is required'));
-    console.log(chalk.gray('Usage: butterbase agents update <app> <name> --file path/to/spec.json'));
+    console.log(chalk.red(text('✗ --file is required')));
+    console.log(chalk.gray(text('Usage: butterbase agents update <app> <name> --file path/to/spec.json')));
     process.exit(1);
   }
 
@@ -161,14 +162,14 @@ export async function agentsUpdateCommand(app: string, name: string, options: { 
   // Remove name from body — the URL carries the identity
   const { name: _name, ...body } = spec;
 
-  const spinner = ora(`Updating agent "${name}"...`).start();
+  const spinner = ora(msg`Updating agent "${name}"...`).start();
 
   try {
     await updateAgent(appId, name, body);
-    spinner.succeed(`Updated agent "${name}"`);
-    console.log(chalk.green('\n✓ Agent updated successfully!'));
+    spinner.succeed(msg`Updated agent "${name}"`);
+    console.log(chalk.green(text('\n✓ Agent updated successfully!')));
   } catch (error) {
-    spinner.fail(`Failed to update agent "${name}"`);
+    spinner.fail(msg`Failed to update agent "${name}"`);
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
@@ -181,24 +182,24 @@ export async function agentsDeleteCommand(app: string, name: string, options: { 
     const { confirm } = await prompts({
       type: 'confirm',
       name: 'confirm',
-      message: `Are you sure you want to delete agent "${name}"? This cannot be undone.`,
+      message: msg`Are you sure you want to delete agent "${name}"? This cannot be undone.`,
       initial: false,
     });
 
     if (!confirm) {
-      console.log(chalk.yellow('Cancelled'));
+      console.log(chalk.yellow(text('Cancelled')));
       return;
     }
   }
 
-  const spinner = ora(`Deleting agent "${name}"...`).start();
+  const spinner = ora(msg`Deleting agent "${name}"...`).start();
 
   try {
     await deleteAgent(appId, name);
-    spinner.succeed(`Deleted agent "${name}"`);
-    console.log(chalk.green('\n✓ Agent deleted successfully!'));
+    spinner.succeed(msg`Deleted agent "${name}"`);
+    console.log(chalk.green(text('\n✓ Agent deleted successfully!')));
   } catch (error) {
-    spinner.fail(`Failed to delete agent "${name}"`);
+    spinner.fail(msg`Failed to delete agent "${name}"`);
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }

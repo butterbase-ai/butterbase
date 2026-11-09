@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import fs from 'fs-extra';
@@ -11,7 +12,7 @@ const POLL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Poll a clone job until it reaches a terminal status.
  *  Returns the completed CloneJob on success, or undefined when process.exit(1) was called. */
 async function pollCloneJob(jobId: string): Promise<CloneJob | undefined> {
-  const pollSpin = ora('Waiting for clone to complete…').start();
+  const pollSpin = ora(text('Waiting for clone to complete…')).start();
   const start = Date.now();
   let final: CloneJob | undefined;
   while (Date.now() - start < POLL_TIMEOUT_MS) {
@@ -29,16 +30,16 @@ async function pollCloneJob(jobId: string): Promise<CloneJob | undefined> {
       pollSpin.stop();
       break;
     }
-    pollSpin.text = `Waiting for clone to complete… (${cur.status})`;
+    pollSpin.text = msg`Waiting for clone to complete… (${cur.status})`;
   }
   if (!final) {
-    ora().fail('Timed out waiting for clone job');
+    ora().fail(text('Timed out waiting for clone job'));
     process.exit(1);
     return undefined;
   }
   if (final.status === 'failed') {
-    ora().fail(`Clone failed: ${final.error_message ?? '(no message)'}`);
-    console.log(chalk.gray(`Retry with: butterbase clone --retry ${final.job_id}`));
+    ora().fail(msg`Clone failed: ${final.error_message ?? text('(no message)')}`);
+    console.log(chalk.gray(msg`Retry with: butterbase clone --retry ${final.job_id}`));
     process.exit(1);
     return undefined;
   }
@@ -50,7 +51,7 @@ export async function cloneCommand(
   targetDir: string | undefined,
   opts: { name?: string; region?: string; json?: boolean },
 ) {
-  const createSpin = ora(`Creating clone job for ${sourceAppId}…`).start();
+  const createSpin = ora(msg`Creating clone job for ${sourceAppId}…`).start();
   let job;
   try {
     const body: { name?: string; region?: string } = {};
@@ -62,15 +63,15 @@ export async function cloneCommand(
     process.exit(1);
     return;
   }
-  createSpin.succeed(`Clone job ${job.job_id} pending`);
+  createSpin.succeed(msg`Clone job ${job.job_id} pending`);
 
   const final = await pollCloneJob(job.job_id);
   if (!final) return;
 
-  ora().succeed(`Cloned to app ${final.dest_app_id}`);
+  ora().succeed(msg`Cloned to app ${final.dest_app_id}`);
   if (final.warnings?.length) {
     for (const w of final.warnings) {
-      console.log(chalk.yellow(`warning: ${w}`));
+      console.log(chalk.yellow(msg`warning: ${w}`));
     }
   }
 
@@ -89,7 +90,7 @@ export async function cloneCommand(
   if (opts.json) {
     console.log(JSON.stringify({ job_id: final.job_id, dest_app_id: final.dest_app_id, target_dir: path.resolve(dir), warnings: final.warnings }, null, 2));
   } else {
-    console.log(chalk.green(`✓ Cloned ${sourceAppId} → ${final.dest_app_id} into ${path.resolve(dir)}`));
+    console.log(chalk.green(msg`✓ Cloned ${sourceAppId} → ${final.dest_app_id} into ${path.resolve(dir)}`));
   }
 }
 
@@ -98,7 +99,7 @@ export async function cloneRetryCommand(
   targetDir: string | undefined,
   opts: { json?: boolean },
 ) {
-  const retrySpin = ora(`Retrying clone job ${jobId}…`).start();
+  const retrySpin = ora(msg`Retrying clone job ${jobId}…`).start();
   let job;
   try {
     job = await cloneApi.retry(jobId);
@@ -107,15 +108,15 @@ export async function cloneRetryCommand(
     process.exit(1);
     return;
   }
-  retrySpin.succeed(`Clone job ${job.job_id} re-queued`);
+  retrySpin.succeed(msg`Clone job ${job.job_id} re-queued`);
 
   const final = await pollCloneJob(job.job_id);
   if (!final) return;
 
-  ora().succeed(`Cloned to app ${final.dest_app_id}`);
+  ora().succeed(msg`Cloned to app ${final.dest_app_id}`);
   if (final.warnings?.length) {
     for (const w of final.warnings) {
-      console.log(chalk.yellow(`warning: ${w}`));
+      console.log(chalk.yellow(msg`warning: ${w}`));
     }
   }
 
@@ -134,6 +135,6 @@ export async function cloneRetryCommand(
   if (opts.json) {
     console.log(JSON.stringify({ job_id: final.job_id, dest_app_id: final.dest_app_id, target_dir: path.resolve(dir), warnings: final.warnings }, null, 2));
   } else {
-    console.log(chalk.green(`✓ Retried clone job ${jobId} → ${final.dest_app_id} into ${path.resolve(dir)}`));
+    console.log(chalk.green(msg`✓ Retried clone job ${jobId} → ${final.dest_app_id} into ${path.resolve(dir)}`));
   }
 }

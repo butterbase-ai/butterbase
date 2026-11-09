@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import { spawn } from 'node:child_process';
 import chalk from 'chalk';
 
@@ -36,13 +37,13 @@ export async function mcpInstallCommand(options: McpInstallOptions): Promise<voi
   }
   if (options.yes !== false) args.push('-y');
 
-  console.log(chalk.dim(`Running: npx ${args.join(' ')}`));
+  console.log(chalk.dim(msg`Running: npx ${args.join(' ')}`));
   console.log();
 
   const exitCode = await runChild('npx', args);
 
   if (exitCode !== 0) {
-    console.error(chalk.red(`\nadd-mcp exited with status ${exitCode}`));
+    console.error(chalk.red(msg`\nadd-mcp exited with status ${exitCode}`));
     process.exit(exitCode ?? 1);
   }
 
@@ -54,7 +55,7 @@ function runChild(cmd: string, args: string[]): Promise<number | null> {
     const child = spawn(cmd, args, { stdio: 'inherit' });
     child.on('close', (code) => resolve(code));
     child.on('error', (err) => {
-      console.error(chalk.red(`Failed to spawn ${cmd}: ${err.message}`));
+      console.error(chalk.red(msg`Failed to spawn ${cmd}: ${err.message}`));
       resolve(1);
     });
   });
@@ -67,23 +68,23 @@ function printNextSteps({ name, url }: { name: string; url: string }): void {
     : `${DASHBOARD_URL}/oauth/consent`;
 
   console.log();
-  console.log(chalk.bold.green('  Butterbase MCP installed.'));
+  console.log(chalk.bold.green(text('  Butterbase MCP installed.')));
   console.log(
-    chalk.dim(`  Server: ${name}  •  URL: ${url}`),
+    chalk.dim(msg`  Server: ${name}  •  URL: ${url}`),
   );
   console.log();
-  console.log(chalk.bold('  Next: each client needs a one-time browser sign-in.'));
+  console.log(chalk.bold(text('  Next: each client needs a one-time browser sign-in.')));
   console.log();
 
   const rows: Array<[string, string]> = [
-    ['Claude Code',     `restart, then run /mcp  (or: claude mcp login ${name})`],
-    ['Cursor',          `Settings → MCP → toggle ${chalk.cyan(name)} → click "Needs Login"`],
-    ['VS Code',         `⌘⇧P → "MCP: List Servers" → ${chalk.cyan(name)} → Authenticate`],
-    ['Visual Studio',   `Open .mcp.json → click the CodeLens "Auth" link above ${chalk.cyan(name)}`],
-    ['JetBrains/Xcode/Eclipse', 'Approve the "wants to authenticate" popup on next chat'],
-    ['Codex / Gemini CLI',  'Open a new session, invoke any butterbase_* tool — browser opens automatically'],
-    ['Cline / Goose / Copilot CLI', 'Same as Codex — first tool call triggers the OAuth flow'],
-    ['OpenCode / Windsurf / Zed / Antigravity', 'Same — invoke any butterbase_* tool to trigger auth'],
+    ['Claude Code',     msg`restart, then run /mcp  (or: claude mcp login ${name})`],
+    ['Cursor',          msg`Settings → MCP → toggle ${chalk.cyan(name)} → click "Needs Login"`],
+    ['VS Code',         msg`⌘⇧P → "MCP: List Servers" → ${chalk.cyan(name)} → Authenticate`],
+    ['Visual Studio',   msg`Open .mcp.json → click the CodeLens "Auth" link above ${chalk.cyan(name)}`],
+    ['JetBrains/Xcode/Eclipse', text('Approve the "wants to authenticate" popup on next chat')],
+    ['Codex / Gemini CLI',  text('Open a new session, invoke any butterbase_* tool — browser opens automatically')],
+    ['Cline / Goose / Copilot CLI', text('Same as Codex — first tool call triggers the OAuth flow')],
+    ['OpenCode / Windsurf / Zed / Antigravity', text('Same — invoke any butterbase_* tool to trigger auth')],
   ];
 
   const labelWidth = Math.max(...rows.map(([l]) => l.length));
@@ -92,7 +93,7 @@ function printNextSteps({ name, url }: { name: string; url: string }): void {
   }
 
   console.log();
-  console.log(chalk.dim(`  Consent URL (opens automatically): ${consentUrl}`));
-  console.log(chalk.dim(`  Troubleshooting: https://docs.butterbase.ai/mcp/auth`));
+  console.log(chalk.dim(msg`  Consent URL (opens automatically): ${consentUrl}`));
+  console.log(chalk.dim(text(`  Troubleshooting: https://docs.butterbase.ai/mcp/auth`)));
   console.log();
 }

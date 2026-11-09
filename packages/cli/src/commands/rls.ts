@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import {
@@ -14,8 +15,8 @@ async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
   const current = await getCurrentAppId();
   if (!current) {
-    console.log(chalk.red('No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.log(chalk.red(text('No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
   return current;
@@ -23,7 +24,7 @@ async function requireAppId(appId?: string): Promise<string> {
 
 export async function rlsListCommand(options: { app?: string; json?: boolean }) {
   const appId = await requireAppId(options.app);
-  const spinner = ora('Fetching RLS policies...').start();
+  const spinner = ora(text('Fetching RLS policies...')).start();
   try {
     const result: any = await listRlsPolicies(appId);
     spinner.stop();
@@ -33,7 +34,7 @@ export async function rlsListCommand(options: { app?: string; json?: boolean }) 
     }
     const policies = result.policies ?? result ?? [];
     if (!Array.isArray(policies) || policies.length === 0) {
-      console.log(chalk.gray('No RLS policies found.'));
+      console.log(chalk.gray(text('No RLS policies found.')));
       return;
     }
     console.log('');
@@ -42,7 +43,7 @@ export async function rlsListCommand(options: { app?: string; json?: boolean }) 
     }
     console.log('');
   } catch (err) {
-    spinner.fail('Failed to fetch RLS policies');
+    spinner.fail(text('Failed to fetch RLS policies'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }
@@ -65,16 +66,16 @@ export async function rlsCreateCommand(options: {
   const appId = await requireAppId(options.app);
 
   if (!options.table) {
-    console.error(chalk.red('--table is required'));
+    console.error(chalk.red(text('--table is required')));
     process.exit(1);
   }
 
-  const spinner = ora('Creating RLS policy...').start();
+  const spinner = ora(text('Creating RLS policy...')).start();
   try {
     let result: any;
     if (options.userIsolation) {
       if (!options.userColumn) {
-        spinner.fail('--user-column is required with --user-isolation');
+        spinner.fail(text('--user-column is required with --user-isolation'));
         process.exit(1);
       }
       result = await createUserIsolationPolicy(appId, {
@@ -84,7 +85,7 @@ export async function rlsCreateCommand(options: {
       });
     } else {
       if (!options.policyName) {
-        spinner.fail('--policy-name is required for custom policies');
+        spinner.fail(text('--policy-name is required for custom policies'));
         process.exit(1);
       }
       result = await createRlsPolicy(appId, {
@@ -98,17 +99,17 @@ export async function rlsCreateCommand(options: {
         user_column: options.userColumn,
       });
     }
-    spinner.succeed('RLS policy created');
+    spinner.succeed(text('RLS policy created'));
     if (options.json) {
       console.log(JSON.stringify(result, null, 2));
       return;
     }
     console.log('');
-    console.log(`  Table:  ${chalk.cyan(options.table)}`);
-    if (options.policyName) console.log(`  Policy: ${chalk.bold(options.policyName)}`);
+    console.log(msg`  Table:  ${chalk.cyan(options.table)}`);
+    if (options.policyName) console.log(msg`  Policy: ${chalk.bold(options.policyName)}`);
     console.log('');
   } catch (err) {
-    spinner.fail('Failed to create RLS policy');
+    spinner.fail(text('Failed to create RLS policy'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }
@@ -116,12 +117,12 @@ export async function rlsCreateCommand(options: {
 
 export async function rlsEnableCommand(table: string, options: { app?: string }) {
   const appId = await requireAppId(options.app);
-  const spinner = ora(`Enabling RLS on ${table}...`).start();
+  const spinner = ora(msg`Enabling RLS on ${table}...`).start();
   try {
     await enableRls(appId, table);
-    spinner.succeed(`RLS enabled on ${chalk.cyan(table)}`);
+    spinner.succeed(msg`RLS enabled on ${chalk.cyan(table)}`);
   } catch (err) {
-    spinner.fail('Failed to enable RLS');
+    spinner.fail(text('Failed to enable RLS'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }
@@ -129,17 +130,17 @@ export async function rlsEnableCommand(table: string, options: { app?: string })
 
 export async function rlsDeleteCommand(table: string, options: { app?: string; policy?: string }) {
   const appId = await requireAppId(options.app);
-  const spinner = ora(options.policy ? `Deleting policy ${options.policy} on ${table}...` : `Deleting all policies on ${table}...`).start();
+  const spinner = ora(options.policy ? msg`Deleting policy ${options.policy} on ${table}...` : msg`Deleting all policies on ${table}...`).start();
   try {
     if (options.policy) {
       await deleteRlsPolicy(appId, table, options.policy);
-      spinner.succeed(`Deleted policy ${chalk.cyan(options.policy)} on ${chalk.cyan(table)}`);
+      spinner.succeed(msg`Deleted policy ${chalk.cyan(options.policy)} on ${chalk.cyan(table)}`);
     } else {
       await deleteRlsTablePolicies(appId, table);
-      spinner.succeed(`Deleted all RLS policies on ${chalk.cyan(table)}`);
+      spinner.succeed(msg`Deleted all RLS policies on ${chalk.cyan(table)}`);
     }
   } catch (err) {
-    spinner.fail('Failed to delete RLS policy');
+    spinner.fail(text('Failed to delete RLS policy'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }
