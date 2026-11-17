@@ -137,6 +137,7 @@ Errors are returned in OpenAI-compatible shape:
 | 402 | `billing_error` | `insufficient_credits` | Account balance is too low for the requested call. |
 | 404 | `invalid_request_error` | `model_not_found` | Requested model id isn't available. |
 | 400 | `invalid_request_error` | `invalid_request` | Request body failed validation. |
+| 400 | `invalid_request_error` | `param_unsupported` | The selected model does not support one or more request parameters (for example sampling parameters on recent Gemini models), and no upstream can serve the request. |
 | 5xx | `api_error` | (varies) | Temporary upstream issue. Retry with backoff. |
 
 ## Chat completions
