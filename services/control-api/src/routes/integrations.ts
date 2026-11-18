@@ -388,6 +388,9 @@ export async function integrationRoutes(app: FastifyInstance) {
         }));
       }
 
+      if (auth?.authMethod === 'api_key') {
+        await AppResolver.resolveApp(app.controlDb, appId, auth.userId!, auth.organizationId ?? null);
+      }
       try {
         const result = await initiateConnection(
           app.controlDb, appId, userId, body.toolkit, body.redirectUrl,
@@ -493,7 +496,7 @@ export async function integrationRoutes(app: FastifyInstance) {
         const connections = await listConnectedAccounts(app.controlDb, appId, claims.sub);
         return reply.send({ connections });
       } else if (auth?.authMethod === 'api_key') {
-        // Admin: list all connections
+        await AppResolver.resolveApp(app.controlDb, appId, auth.userId!, auth.organizationId ?? null);
         const connections = await listAllConnectedAccounts(app.controlDb, appId);
         return reply.send({ connections });
       }
@@ -524,6 +527,9 @@ export async function integrationRoutes(app: FastifyInstance) {
         }));
       }
 
+      if (auth?.authMethod === 'api_key') {
+        await AppResolver.resolveApp(app.controlDb, appId, auth.userId!, auth.organizationId ?? null);
+      }
       await disconnectAccount(app.controlDb, appId, userId, id);
 
       await logAuditEventFromControlDb(app.controlDb, {
@@ -558,6 +564,9 @@ export async function integrationRoutes(app: FastifyInstance) {
         }));
       }
 
+      if (auth?.authMethod === 'api_key') {
+        await AppResolver.resolveApp(app.controlDb, appId, auth.userId!, auth.organizationId ?? null);
+      }
       const tools = await getToolsForUser(app.controlDb, appId, userId, request.query.toolkit);
       return reply.send({ tools });
     }
@@ -584,6 +593,9 @@ export async function integrationRoutes(app: FastifyInstance) {
         }));
       }
 
+      if (auth?.authMethod === 'api_key') {
+        await AppResolver.resolveApp(app.controlDb, appId, auth.userId!, auth.organizationId ?? null);
+      }
       let result: Awaited<ReturnType<typeof executeTool>>;
       try {
         result = await executeTool(

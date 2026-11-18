@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { databasePlugin } from '../plugins/database.js';
@@ -9,6 +9,7 @@ import { initRoutes } from '../routes/init.js';
 import { integrationRoutes } from '../routes/integrations.js';
 import { config } from '../config.js';
 import { KvCredentialsService } from '../services/kv-credentials.js';
+import { AppResolver, AppNotFoundError } from '../services/app-resolver.js';
 
 const app = Fastify();
 let appId: string;
@@ -244,5 +245,134 @@ describe('POST /v1/:appId/integrations/execute (function_key auth)', () => {
       payload: { toolName: 'GOOGLESUPER_FIND_EVENT', params: {}, userId: someAppUserId },
     });
     expect(res.statusCode).toBe(401);
+  });
+});
+
+// ─── IDOR security regression ─────────────────────────────────────────────────
+// CWE-862: five end-user-facing routes were missing AppResolver.resolveApp for
+// api_key callers, allowing any API key holder to read/modify another app's
+// integration data. These tests verify the fix and guard against regression.
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe('Cross-tenant IDOR — api_key attacker is blocked on all five integration routes', () => {
+  // The runtime DB is not available in the unit-test environment (only the
+  // control DB on port 5432 runs locally). We use vi.spyOn to simulate the
+  // AppResolver.resolveApp ownership check: attacker throws AppNotFoundError,
+  // owner returns a valid app object. This tests the route-level wiring —
+  // that each route actually calls resolveApp and surfaces the rejection as
+  // a 404 — without needing the full docker stack.
+  const attackerUserId = randomUUID();
+  const proxyUserId = randomUUID();
+  const fakeApp = { id: appId, name: 'test', owner_id: config.devOwnerId, db_name: 'test_db', paused: false, paused_reason: null, paused_by: null };
+  let attackerApp: FastifyInstance;
+
+  beforeAll(async () => {
+    attackerApp = Fastify();
+    attackerApp.decorateRequest('auth', null as any);
+    attackerApp.addHook('onRequest', async (request) => {
+      (request as any).auth = {
+        userId: attackerUserId,
+        authMethod: 'api_key',
+        organizationId: null,
+        scopes: ['*'],
+      };
+    });
+    attackerApp.setErrorHandler((error, _request, reply) => {
+      if (error instanceof AppNotFoundError) {
+        return reply.status(404).send({ error: { code: 'RESOURCE_NOT_FOUND', message: error.message } });
+      }
+      return reply.status(500).send({ error: { message: error.message } });
+    });
+    attackerApp.decorate('controlDb', (app as any).controlDb);
+    attackerApp.register(integrationRoutes);
+    await attackerApp.ready();
+  });
+
+  afterAll(async () => { await attackerApp.close(); });
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  const withResolveAppSpy = () => vi.spyOn(AppResolver, 'resolveApp').mockImplementation(
+    async (_pool, reqAppId, userId) => {
+      if (userId === attackerUserId) throw new AppNotFoundError(reqAppId);
+      return fakeApp as any;
+    },
+  );
+
+  it('GET /connections — 404 for cross-tenant api_key caller', async () => {
+    withResolveAppSpy();
+    const res = await attackerApp.inject({ method: 'GET', url: `/v1/${appId}/integrations/connections` });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error?.code).toBe('RESOURCE_NOT_FOUND');
+  });
+
+  it('DELETE /connections/:id — 404 for cross-tenant api_key caller', async () => {
+    withResolveAppSpy();
+    const res = await attackerApp.inject({ method: 'DELETE', url: `/v1/${appId}/integrations/connections/${randomUUID()}` });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('POST /connect — 404 for cross-tenant api_key caller', async () => {
+    withResolveAppSpy();
+    const res = await attackerApp.inject({
+      method: 'POST', url: `/v1/${appId}/integrations/connect`,
+      payload: { toolkit: 'gmail', userId: proxyUserId, redirectUrl: 'https://example.com/cb' },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('GET /tools — 404 for cross-tenant api_key caller', async () => {
+    withResolveAppSpy();
+    const res = await attackerApp.inject({ method: 'GET', url: `/v1/${appId}/integrations/tools` });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('POST /execute — 404 for cross-tenant api_key caller', async () => {
+    withResolveAppSpy();
+    const res = await attackerApp.inject({
+      method: 'POST', url: `/v1/${appId}/integrations/execute`,
+      payload: { toolName: 'GMAIL_FIND_EMAIL', params: {}, userId: proxyUserId },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
+describe('Owner regression — api_key owner retains access on all five integration routes after IDOR fix', () => {
+  // Routes already covered by earlier describe blocks: GET /connections (200/500), GET /config (200/500).
+  // These four cover the routes that were previously untested for owner access.
+  const ownerProxyUserId = randomUUID();
+
+  it('POST /connect — not 404 (owner reaches business logic, fails only on toolkit config)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/${appId}/integrations/connect`,
+      payload: { toolkit: 'gmail', userId: ownerProxyUserId, redirectUrl: 'https://example.com/cb' },
+    });
+    expect(res.statusCode).not.toBe(404);
+  });
+
+  it('DELETE /connections/:id — not 404 (owner reaches business logic)', async () => {
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/${appId}/integrations/connections/${randomUUID()}`,
+    });
+    expect(res.statusCode).not.toBe(404);
+  });
+
+  it('GET /tools — not 404 (owner reaches business logic)', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/${appId}/integrations/tools`,
+    });
+    expect(res.statusCode).not.toBe(404);
+  });
+
+  it('POST /execute — not 404 (owner reaches business logic, fails only on toolkit config)', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v1/${appId}/integrations/execute`,
+      payload: { toolName: 'GMAIL_FIND_EMAIL', params: {}, userId: ownerProxyUserId },
+    });
+    expect(res.statusCode).not.toBe(404);
   });
 });
