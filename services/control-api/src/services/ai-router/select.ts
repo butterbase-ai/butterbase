@@ -67,6 +67,7 @@ const PREFERRED_ROUTER_BY_MODEL: Readonly<Record<string, RouterName>> = {
  */
 export const CANONICAL_IMAGE_MODEL_ROUTES: Readonly<Record<string, RouterName>> = {
   'openai/gpt-image-2':                    'provider-secondary',
+  'openai/gpt-image-2.5-flare':            'provider-secondary',
   'openai/gpt-image-1':                    'openrouter',
   'openai/gpt-image-1-mini':               'openrouter',
   'google/gemini-3-pro-image-preview':     'provider-secondary',
