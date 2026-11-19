@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -24,6 +25,7 @@ function parseCompanyInput(raw: string): { name: string; domain: string | null }
 }
 
 export function NewCompanyDialog() {
+  useUiLocale();
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -36,11 +38,11 @@ export function NewCompanyDialog() {
     setSubmitting(true);
     try {
       await mut.mutateAsync({ name: parsed.name, domain: parsed.domain });
-      toast.success('Company added');
+      toast.success(uiText('Company added'));
       setValue('');
       setOpen(false);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to add company');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to add company'));
     } finally {
       setSubmitting(false);
     }
@@ -49,14 +51,14 @@ export function NewCompanyDialog() {
   return (
     <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) setValue(''); }}>
       <DialogTrigger asChild>
-        <Button><Plus className="mr-2 h-4 w-4" />Add Company</Button>
+        <Button><Plus className="mr-2 h-4 w-4" />{uiText("Add Company")}</Button>
       </DialogTrigger>
       <DialogContent>
-        <DialogHeader><DialogTitle>Add Company</DialogTitle></DialogHeader>
+        <DialogHeader><DialogTitle>{uiText("Add Company")}</DialogTitle></DialogHeader>
         <div className="space-y-2">
-          <label className="text-sm font-medium">Domain or name</label>
+          <label className="text-sm font-medium">{uiText("Domain or name")}</label>
           <Input
-            placeholder="apple.com or Apple"
+            placeholder={uiText("apple.com or Apple")}
             value={value}
             autoFocus
             onChange={(e) => setValue(e.target.value)}
@@ -70,7 +72,7 @@ export function NewCompanyDialog() {
               className="flex w-full items-center gap-2 rounded-md border bg-card px-3 py-2 text-left text-sm hover:bg-accent disabled:opacity-50"
             >
               {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-              <span>Add <span className="font-medium">"{value.trim()}"</span></span>
+              <span>{uiText("Add ")}<span className="font-medium">"{value.trim()}"</span></span>
             </button>
           )}
         </div>

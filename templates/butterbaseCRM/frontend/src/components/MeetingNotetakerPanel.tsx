@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -29,6 +30,7 @@ interface Props {
 }
 
 export function MeetingNotetakerPanel({ meetingId }: Props) {
+  useUiLocale();
   const notesQ = useMeetingNotes(meetingId);
   const startBot = useStartNotetaker();
   const cancelBot = useCancelNotetaker();
@@ -53,7 +55,7 @@ export function MeetingNotetakerPanel({ meetingId }: Props) {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <Bot className="h-3.5 w-3.5 text-muted-foreground" />
-        <p className="eyebrow">Notetaker</p>
+        <p className="eyebrow">{uiText("Notetaker")}</p>
         <StatusPill status={status} />
       </div>
 
@@ -62,9 +64,9 @@ export function MeetingNotetakerPanel({ meetingId }: Props) {
           meetingId={meetingId}
           onStart={() =>
             startBot.mutate(meetingId, {
-              onSuccess: () => toast.success('Notetaker dispatched'),
+              onSuccess: () => toast.success(uiText('Notetaker dispatched')),
               onError: (e) =>
-                toast.error(e instanceof Error ? e.message : 'Could not start notetaker'),
+                toast.error(e instanceof Error ? e.message : uiText('Could not start notetaker')),
             })
           }
           starting={startBot.isPending}
@@ -72,9 +74,9 @@ export function MeetingNotetakerPanel({ meetingId }: Props) {
             ingest.mutate(
               { meeting_id: meetingId, transcript_text: text },
               {
-                onSuccess: () => toast.success('Transcript saved'),
+                onSuccess: () => toast.success(uiText('Transcript saved')),
                 onError: (e) =>
-                  toast.error(e instanceof Error ? e.message : 'Could not save transcript'),
+                  toast.error(e instanceof Error ? e.message : uiText('Could not save transcript')),
               },
             )
           }
@@ -89,18 +91,18 @@ export function MeetingNotetakerPanel({ meetingId }: Props) {
             ingest.mutate(
               { meeting_id: meetingId, transcript_text: text },
               {
-                onSuccess: () => toast.success('Transcript saved'),
+                onSuccess: () => toast.success(uiText('Transcript saved')),
                 onError: (e) =>
-                  toast.error(e instanceof Error ? e.message : 'Could not save transcript'),
+                  toast.error(e instanceof Error ? e.message : uiText('Could not save transcript')),
               },
             )
           }
           ingesting={ingest.isPending}
           onCancel={() =>
             cancelBot.mutate(meetingId, {
-              onSuccess: () => toast.success('Notetaker cancelled'),
+              onSuccess: () => toast.success(uiText('Notetaker cancelled')),
               onError: (e) =>
-                toast.error(e instanceof Error ? e.message : 'Could not cancel notetaker'),
+                toast.error(e instanceof Error ? e.message : uiText('Could not cancel notetaker')),
             })
           }
           cancelling={cancelBot.isPending}
@@ -122,13 +124,14 @@ export function MeetingNotetakerPanel({ meetingId }: Props) {
 /* ─────────────────────────── status pill ─────────────────────────── */
 
 function StatusPill({ status }: { status: NotetakerStatus }) {
+  useUiLocale();
   if (status === 'done')
-    return <span className="stage-pill !bg-sage/15 !text-sage">ready</span>;
+    return <span className="stage-pill !bg-sage/15 !text-sage">{uiText("ready")}</span>;
   if (status === 'pending_transcript')
-    return <span className="stage-pill !bg-butter/15 !text-butter">en route</span>;
+    return <span className="stage-pill !bg-butter/15 !text-butter">{uiText("en route")}</span>;
   if (status === 'failed')
-    return <span className="stage-pill !bg-coral/15 !text-coral">failed</span>;
-  return <span className="stage-pill">not started</span>;
+    return <span className="stage-pill !bg-coral/15 !text-coral">{uiText("failed")}</span>;
+  return <span className="stage-pill">{uiText("not started")}</span>;
 }
 
 /* ─────────────────────────── manual paste affordance ─────────────────────────── */
@@ -142,6 +145,7 @@ function PasteAffordance({
   ingesting: boolean;
   defaultOpen?: boolean;
 }) {
+  useUiLocale();
   const [open, setOpen] = useState(defaultOpen);
   const [text, setText] = useState('');
 
@@ -153,26 +157,24 @@ function PasteAffordance({
         className="flex items-center gap-2 text-[12.5px] text-muted-foreground hover:text-foreground transition-colors"
       >
         {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        Paste transcript manually
-      </button>
+        {uiText("Paste transcript manually")}</button>
       {open && (
         <div className="mt-3 space-y-2">
           <Textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder="Paste the full meeting transcript here…"
+            placeholder={uiText("Paste the full meeting transcript here…")}
             rows={6}
             className="bg-background text-[13px]"
           />
           <div className="flex items-center justify-between">
             <p className="font-editorial italic text-[12px] text-muted-foreground">
-              Notetaker bot is in beta — manual paste also works for testing.
-            </p>
+              {uiText("Notetaker bot is in beta — manual paste also works for testing.")}</p>
             <Button
               size="sm"
               onClick={() => {
                 if (text.trim().length < 10) {
-                  toast.error('Transcript looks too short.');
+                  toast.error(uiText('Transcript looks too short.'));
                   return;
                 }
                 onIngest(text);
@@ -187,8 +189,7 @@ function PasteAffordance({
               ) : (
                 <FileText className="h-3 w-3" />
               )}
-              Save transcript
-            </Button>
+              {uiText("Save transcript")}</Button>
           </div>
         </div>
       )}
@@ -210,6 +211,7 @@ function IdleState({
   onIngest: (text: string) => void;
   ingesting: boolean;
 }) {
+  useUiLocale();
   return (
     <div className="space-y-3">
       <div className="card-flat p-4 flex items-center gap-4">
@@ -217,10 +219,9 @@ function IdleState({
           <Bot className="h-5 w-5" />
         </div>
         <div className="min-w-0 flex-1">
-          <p className="text-[13.5px] text-foreground leading-tight">Send a notetaker to this meeting</p>
+          <p className="text-[13.5px] text-foreground leading-tight">{uiText("Send a notetaker to this meeting")}</p>
           <p className="mt-1 font-editorial italic text-[12.5px] text-muted-foreground">
-            The bot will join, transcribe, and post decisions, commitments, and learnings back here.
-          </p>
+            {uiText("The bot will join, transcribe, and post decisions, commitments, and learnings back here.")}</p>
         </div>
         <Button
           onClick={onStart}
@@ -228,8 +229,7 @@ function IdleState({
           className="gap-2 bg-foreground text-background hover:bg-foreground/85"
         >
           {starting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Bot className="h-3.5 w-3.5" />}
-          Send notetaker
-        </Button>
+          {uiText("Send notetaker")}</Button>
       </div>
       <PasteAffordance onIngest={onIngest} ingesting={ingesting} />
     </div>
@@ -248,15 +248,15 @@ function PendingState({
   onCancel: () => void;
   cancelling: boolean;
 }) {
+  useUiLocale();
   return (
     <div className="space-y-3">
       <div className="card-flat p-4 flex items-center gap-3">
         <Loader2 className="h-4 w-4 animate-spin text-butter shrink-0" />
         <div className="min-w-0 flex-1">
-          <p className="text-[13.5px] text-foreground">Notetaker en route…</p>
+          <p className="text-[13.5px] text-foreground">{uiText("Notetaker en route…")}</p>
           <p className="font-editorial italic text-[12.5px] text-muted-foreground mt-0.5">
-            We’ll show the transcript and structured takeaways as soon as the bot delivers. Stuck? Cancel and try again.
-          </p>
+            {uiText("We’ll show the transcript and structured takeaways as soon as the bot delivers. Stuck? Cancel and try again.")}</p>
         </div>
         <Button
           size="sm"
@@ -266,8 +266,7 @@ function PendingState({
           className="gap-1.5 shrink-0"
         >
           {cancelling ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}
-          Cancel
-        </Button>
+          {uiText("Cancel")}</Button>
       </div>
       <PasteAffordance onIngest={onIngest} ingesting={ingesting} defaultOpen={false} />
     </div>
@@ -275,6 +274,7 @@ function PendingState({
 }
 
 function DoneState({ data }: { data: { artifact?: any; decisions?: any[]; commitments?: any[]; learnings?: any[] } }) {
+  useUiLocale();
   const [showTranscript, setShowTranscript] = useState(false);
   const artifact = data.artifact ?? {};
   const content: string = artifact.content ?? '';
@@ -288,7 +288,7 @@ function DoneState({ data }: { data: { artifact?: any; decisions?: any[]; commit
       {/* Summary */}
       {summary && (
         <div className="card-flat p-4">
-          <p className="eyebrow mb-2">Summary</p>
+          <p className="eyebrow mb-2">{uiText("Summary")}</p>
           <p className="text-[13.5px] text-foreground leading-relaxed">{summary}</p>
         </div>
       )}
@@ -301,7 +301,7 @@ function DoneState({ data }: { data: { artifact?: any; decisions?: any[]; commit
           className="flex items-center gap-2 text-[12.5px] text-muted-foreground hover:text-foreground transition-colors"
         >
           {showTranscript ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-          Transcript {content ? `· ${content.length.toLocaleString()} chars` : ''}
+          {uiText("Transcript ")}{content ? uiMessage`· ${content.length.toLocaleString()} chars` : ''}
         </button>
         {showTranscript && (
           <div className="mt-3 max-h-80 overflow-y-auto">
@@ -311,8 +311,7 @@ function DoneState({ data }: { data: { artifact?: any; decisions?: any[]; commit
               </p>
             ) : (
               <p className="font-editorial italic text-[12.5px] text-muted-foreground">
-                Transcript is empty.
-              </p>
+                {uiText("Transcript is empty.")}</p>
             )}
           </div>
         )}
@@ -320,17 +319,17 @@ function DoneState({ data }: { data: { artifact?: any; decisions?: any[]; commit
 
       {/* Three structured sections */}
       <TakeawaySection
-        eyebrow="Decisions"
+        eyebrow={uiText("Decisions")}
         icon={<CheckCircle2 className="h-3.5 w-3.5 text-muted-foreground" />}
         items={decisions}
       />
       <TakeawaySection
-        eyebrow="Commitments"
+        eyebrow={uiText("Commitments")}
         icon={<Flag className="h-3.5 w-3.5 text-muted-foreground" />}
         items={commitments}
       />
       <TakeawaySection
-        eyebrow="Learnings"
+        eyebrow={uiText("Learnings")}
         icon={<Lightbulb className="h-3.5 w-3.5 text-muted-foreground" />}
         items={learnings}
       />
@@ -347,6 +346,7 @@ function TakeawaySection({
   icon: React.ReactNode;
   items: Array<{ text: string; [k: string]: any }>;
 }) {
+  useUiLocale();
   return (
     <section>
       <div className="flex items-center gap-2 mb-2">
@@ -372,20 +372,20 @@ function TakeawaySection({
 }
 
 function FailedState({ error, onRetry }: { error: string | null; onRetry: () => void }) {
+  useUiLocale();
   return (
     <div className="card-flat p-4 border border-coral/40 bg-coral/5 space-y-3">
       <div className="flex items-start gap-2">
         <AlertTriangle className="h-4 w-4 text-coral mt-0.5 shrink-0" />
         <div className="min-w-0 flex-1">
-          <p className="text-[13.5px] text-foreground">Notetaker failed</p>
+          <p className="text-[13.5px] text-foreground">{uiText("Notetaker failed")}</p>
           <p className="mt-1 font-editorial italic text-[12.5px] text-muted-foreground">
-            {error ?? 'Something went wrong delivering the transcript. You can try again or paste it manually.'}
+            {error ?? uiText('Something went wrong delivering the transcript. You can try again or paste it manually.')}
           </p>
         </div>
         <Button size="sm" variant="outline" onClick={onRetry} className="gap-1.5">
           <RotateCw className="h-3 w-3" />
-          Try again
-        </Button>
+          {uiText("Try again")}</Button>
       </div>
     </div>
   );

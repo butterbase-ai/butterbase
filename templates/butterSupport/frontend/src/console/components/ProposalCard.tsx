@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useState } from 'react';
 import { Button } from '@/console/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/console/components/ui/card';
@@ -8,6 +9,7 @@ import { toast } from '@/console/components/ui/toast';
 import type { AgentProposal } from '@/console/lib/types';
 
 export function ProposalCard({ proposal, onChanged }: { proposal: AgentProposal; onChanged: () => void }) {
+  useUiLocale();
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
@@ -18,7 +20,7 @@ export function ProposalCard({ proposal, onChanged }: { proposal: AgentProposal;
       await api.approveProposal({ proposal_id: proposal.id });
       onChanged();
     } catch (e: any) {
-      toast.error(e?.message || 'Approve failed');
+      toast.error(e?.message || uiText('Approve failed'));
     } finally {
       setBusy(false);
     }
@@ -30,7 +32,7 @@ export function ProposalCard({ proposal, onChanged }: { proposal: AgentProposal;
       await api.rejectProposal({ proposal_id: proposal.id, reason: reason || undefined });
       onChanged();
     } catch (e: any) {
-      toast.error(e?.message || 'Reject failed');
+      toast.error(e?.message || uiText('Reject failed'));
     } finally {
       setBusy(false);
       setRejecting(false);
@@ -42,7 +44,7 @@ export function ProposalCard({ proposal, onChanged }: { proposal: AgentProposal;
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <div>
-          <div className="section-label">Capability</div>
+          <div className="section-label">{uiText("Capability")}</div>
           <CardTitle className="mt-0.5">{proposal.capability}</CardTitle>
         </div>
         <Badge variant="amber">{proposal.status}</Badge>
@@ -54,16 +56,16 @@ export function ProposalCard({ proposal, onChanged }: { proposal: AgentProposal;
         </pre>
         {rejecting ? (
           <div className="space-y-2">
-            <Textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (optional)" rows={2} />
+            <Textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder={uiText("Reason (optional)")} rows={2} />
             <div className="flex gap-2">
-              <Button size="sm" variant="destructive" onClick={reject} disabled={busy}>Confirm reject</Button>
-              <Button size="sm" variant="outline" onClick={() => setRejecting(false)}>Cancel</Button>
+              <Button size="sm" variant="destructive" onClick={reject} disabled={busy}>{uiText("Confirm reject")}</Button>
+              <Button size="sm" variant="outline" onClick={() => setRejecting(false)}>{uiText("Cancel")}</Button>
             </div>
           </div>
         ) : (
           <div className="flex gap-2">
-            <Button size="sm" onClick={approve} disabled={busy}>Approve</Button>
-            <Button size="sm" variant="outline" onClick={() => setRejecting(true)} disabled={busy}>Reject</Button>
+            <Button size="sm" onClick={approve} disabled={busy}>{uiText("Approve")}</Button>
+            <Button size="sm" variant="outline" onClick={() => setRejecting(true)} disabled={busy}>{uiText("Reject")}</Button>
           </div>
         )}
       </CardContent>

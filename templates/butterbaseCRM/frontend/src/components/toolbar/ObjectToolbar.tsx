@@ -1,3 +1,5 @@
+import { fieldDisplayLabel } from '@/lib/filterDsl';
+import { uiText, useUiLocale } from "../../i18n";
 import { ArrowDownAZ } from 'lucide-react';
 import { AISearchButton } from './AISearchButton';
 import { FieldsPopover } from './FieldsPopover';
@@ -16,6 +18,7 @@ interface Props {
 }
 
 export function ObjectToolbar({ objectType, filteredIds }: Props) {
+  useUiLocale();
   const v = useObjectView(objectType);
   const canSaveList = (objectType === 'people' || objectType === 'companies') && Array.isArray(filteredIds);
 
@@ -30,7 +33,7 @@ export function ObjectToolbar({ objectType, filteredIds }: Props) {
         onSelect={v.setActiveView}
       />
       {v.isDirty && (
-        <span className="font-mono text-[10px] text-amber-700 ml-1">· unsaved</span>
+        <span className="font-mono text-[10px] text-amber-700 ml-1">{uiText("· unsaved")}</span>
       )}
       <span className="mx-1 h-4 w-px bg-border" />
       <AISearchButton
@@ -58,11 +61,11 @@ export function ObjectToolbar({ objectType, filteredIds }: Props) {
       }}>
         <SelectTrigger className="h-8 w-[160px] text-[12.5px] gap-1.5">
           <ArrowDownAZ className="h-3.5 w-3.5" />
-          <SelectValue placeholder="Sort" />
+          <SelectValue placeholder={uiText("Sort")} />
         </SelectTrigger>
         <SelectContent>
           {v.fields.map((f) => (
-            <SelectItem key={f.slug} value={f.slug}>{f.label}</SelectItem>
+            <SelectItem key={f.slug} value={f.slug}>{fieldDisplayLabel(f)}</SelectItem>
           ))}
         </SelectContent>
       </Select>

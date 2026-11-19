@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 // frontend/src/pages/LeadFinder.tsx
 import { useCallback, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -20,6 +21,7 @@ async function fetchPage(query: string): Promise<SearchResponse> {
 }
 
 export default function LeadFinder() {
+  useUiLocale();
   const navigate = useNavigate();
   const [queryText, setQueryText] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -70,10 +72,9 @@ export default function LeadFinder() {
   return (
     <div className="p-6 max-w-5xl">
       <div className="mb-4">
-        <h1 className="text-2xl font-semibold">Lead Finder</h1>
+        <h1 className="text-2xl font-semibold">{uiText("Lead Finder")}</h1>
         <p className="text-sm text-muted-foreground">
-          Search for people by role, industry, and location. Add to a list to reveal emails.
-        </p>
+          {uiText("Search for people by role, industry, and location. Add to a list to reveal emails.")}</p>
       </div>
 
       <div className="space-y-4">
@@ -93,14 +94,13 @@ export default function LeadFinder() {
         {meta && (
           <div className="text-sm text-muted-foreground flex items-center flex-wrap gap-x-2">
             <span>
-              Showing {results.length.toLocaleString()} of {meta.total_count.toLocaleString()} matches
-              {meta.total_count > results.length && <span className="ml-1">— refine filters to narrow.</span>}
+              {uiText("Showing ")}{results.length.toLocaleString()} {uiText(" of ")}{meta.total_count.toLocaleString()} {uiText(" matches")}{meta.total_count > results.length && <span className="ml-1">{uiText("— refine filters to narrow.")}</span>}
             </span>
             {meta.from_cache ? (
-              <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 text-[10px] uppercase tracking-wide">cached · free</span>
+              <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 text-[10px] uppercase tracking-wide">{uiText("cached · free")}</span>
             ) : meta.usage && (meta.usage.credits > 0 || meta.usage.usd > 0) ? (
               <span className="px-1.5 py-0.5 rounded bg-muted text-[10px] uppercase tracking-wide">
-                cost: {meta.usage.credits} credits · ${meta.usage.usd.toFixed(3)}
+                {uiText("cost: ")}{meta.usage.credits} {uiText(" credits · $")}{meta.usage.usd.toFixed(3)}
               </span>
             ) : null}
           </div>
@@ -116,14 +116,12 @@ export default function LeadFinder() {
         {results.length > 0 && (
           <div className="sticky bottom-4 flex items-center justify-between rounded-md border bg-background p-3 shadow-sm">
             <div className="text-sm">
-              {selectedIds.size.toLocaleString()} of {results.length.toLocaleString()} selected
-            </div>
+              {selectedIds.size.toLocaleString()} {uiText(" of ")}{results.length.toLocaleString()} {uiText(" selected")}</div>
             <Button
               onClick={() => setDialogOpen(true)}
               disabled={selectedIds.size === 0}
             >
-              Add {selectedIds.size > 0 ? selectedIds.size : ''} to list…
-            </Button>
+              {uiText("Add ")}{selectedIds.size > 0 ? selectedIds.size : ''} {uiText(" to list…")}</Button>
           </div>
         )}
 

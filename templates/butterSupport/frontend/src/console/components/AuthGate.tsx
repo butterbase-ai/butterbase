@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { bb } from '@/console/lib/bb';
@@ -15,6 +16,7 @@ const Ctx = createContext<AuthState>({ user: null, role: null, loading: true, er
 export const useAuth = () => useContext(Ctx);
 
 export function AuthGate({ children }: { children: ReactNode }) {
+  useUiLocale();
   const [state, setState] = useState<AuthState>({ user: null, role: null, loading: true, error: null });
   const navigate = useNavigate();
   const loc = useLocation();
@@ -99,7 +101,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return (
       <div className="flex h-screen items-center justify-center gap-3 bg-paper text-sm text-ink-muted">
         <span className="inline-block h-1.5 w-1.5 rounded-full bg-caramel animate-pulse-soft" />
-        <span className="font-mono text-[11px] uppercase tracking-[0.22em]">loading…</span>
+        <span className="font-mono text-[11px] uppercase tracking-[0.22em]">{uiText("loading…")}</span>
       </div>
     );
   }
@@ -108,26 +110,21 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return (
       <div className="flex h-screen items-center justify-center p-6 bg-paper">
         <div className="max-w-lg space-y-4">
-          <div className="section-label">Membership lookup failed</div>
-          <h1 className="font-display text-2xl tracking-tight text-ink">Couldn't load your team membership</h1>
+          <div className="section-label">{uiText("Membership lookup failed")}</div>
+          <h1 className="font-display text-2xl tracking-tight text-ink">{uiText("Couldn't load your team membership")}</h1>
           <p className="text-sm text-ink-muted leading-relaxed">
-            The server returned an error when looking up your row in <code className="font-mono text-caramel-deep">memberships</code>. You're authenticated as{' '}
-            <span className="text-ink font-medium">{state.user?.email || state.user?.id}</span>, but something on the backend is preventing the read.
-          </p>
+            {uiText("The server returned an error when looking up your row in ")}<code className="font-mono text-caramel-deep">memberships</code>{uiText(". You're authenticated as")}{' '}
+            <span className="text-ink font-medium">{state.user?.email || state.user?.id}</span>{uiText(", but something on the backend is preventing the read.")}</p>
           <pre className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 font-mono text-xs whitespace-pre-wrap text-destructive">
             {state.error}
           </pre>
           <p className="text-sm text-ink-muted leading-relaxed">
-            Common causes: (1) the post-auth hook didn't insert your owner row yet, or (2) the RLS policy on the
-            <code className="font-mono text-caramel-deep"> memberships </code> table is recursive — a policy like
-            <code className="font-mono text-caramel-deep"> EXISTS (SELECT 1 FROM memberships WHERE …) </code> on the same table will 500. Check the function logs / RLS config, then refresh.
-          </p>
+            {uiText("Common causes: (1) the post-auth hook didn't insert your owner row yet, or (2) the RLS policy on the")}<code className="font-mono text-caramel-deep"> memberships </code> {uiText(" table is recursive — a policy like")}<code className="font-mono text-caramel-deep"> EXISTS (SELECT 1 FROM memberships WHERE …) </code> {uiText(" on the same table will 500. Check the function logs / RLS config, then refresh.")}</p>
           <button
             onClick={() => window.location.reload()}
             className="inline-flex items-center gap-2 rounded-md border border-rule px-4 py-1.5 text-sm text-ink hover:bg-paper-warm transition-colors"
           >
-            Retry
-          </button>
+            {uiText("Retry")}</button>
         </div>
       </div>
     );

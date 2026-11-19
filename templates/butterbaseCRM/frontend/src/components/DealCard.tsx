@@ -1,9 +1,11 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import type { Deal } from '@/lib/types';
 
 export function DealCard({ deal }: { deal: Deal }) {
+  useUiLocale();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: deal.id,
   });
@@ -48,7 +50,7 @@ export function DealCard({ deal }: { deal: Deal }) {
         <div className="mt-2 flex items-center gap-1.5">
           <span className="h-1 w-1 rounded-full bg-muted-foreground/60" />
           <p className="font-editorial italic text-[12px] text-muted-foreground">
-            closes {formatDistanceToNowStrict(new Date(deal.close_date), { addSuffix: true })}
+            {uiText("closes ")}{formatDistanceToNowStrict(new Date(deal.close_date), { addSuffix: true })}
           </p>
         </div>
       )}

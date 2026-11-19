@@ -1,3 +1,4 @@
+import { uiText } from "../i18n";
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { bb, bbInvoke } from '@/lib/butterbase';
 import { qk } from '@/lib/queryKeys';
@@ -81,7 +82,7 @@ export function useCreateCampaignList() {
         { ...input, workspace_id: ws },
       );
       if (error) throw error;
-      if (!data) throw new Error('create-campaign-list returned no data');
+      if (!data) throw new Error(uiText('create-campaign-list returned no data'));
       return data;
     },
     onSuccess: () => {
@@ -160,13 +161,13 @@ export function useCreateCampaign() {
       };
       const userRes: any = await bb.auth.getUser();
       const userId = userRes?.data?.user?.id ?? userRes?.data?.id ?? null;
-      if (!userId) throw new Error('Not authenticated');
+      if (!userId) throw new Error(uiText('Not authenticated'));
       const { data, error } = await bb.from<Campaign>('campaigns')
         .insert({ ...clamped, workspace_id: ws, created_by: userId } as any)
         .select('*');
       if (error) throw error;
       const row = Array.isArray(data) ? data[0] : data;
-      if (!row) throw new Error('campaigns insert returned no row');
+      if (!row) throw new Error(uiText('campaigns insert returned no row'));
       return row as Campaign;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.campaigns(ws) }),

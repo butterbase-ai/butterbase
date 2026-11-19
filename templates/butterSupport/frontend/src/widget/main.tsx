@@ -1,3 +1,4 @@
+import { initializeUiLocale } from '../i18n';
 import { createRoot } from 'react-dom/client';
 import { Widget } from './Widget';
 import { APP_ID_FROM_ENV } from './lib';
@@ -23,6 +24,8 @@ function boot() {
   const script = (document.currentScript as HTMLScriptElement | null) ||
     (document.querySelector('script[src*="widget.js"]') as HTMLScriptElement | null);
   const dataset = script?.dataset || ({} as DOMStringMap);
+
+  if (dataset.lang === 'en' || dataset.lang === 'ja') initializeUiLocale(dataset.lang);
 
   const appId = dataset.appId || APP_ID_FROM_ENV;
   if (!appId) {

@@ -1,3 +1,4 @@
+import { uiMessage, uiText, useUiLocale } from "../../i18n";
 import { useState } from 'react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
@@ -16,6 +17,7 @@ interface Props {
 }
 
 export function AISearchButton({ objectType, customFields, onApply }: Props) {
+  useUiLocale();
   const ws = useCurrentWorkspaceId();
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
@@ -37,9 +39,9 @@ export function AISearchButton({ objectType, customFields, onApply }: Props) {
       const res = data as { filters: Filter[]; sort: SortSpec | null; suggested_name: string };
       onApply({ filters: res.filters, sort: res.sort, suggested_name: res.suggested_name });
       setOpen(false); setPrompt('');
-      toast.success(`Applied ${res.filters.length} filter${res.filters.length === 1 ? '' : 's'}`);
+      toast.success(uiMessage`Applied ${res.filters.length} filter${res.filters.length === 1 ? '' : 's'}`);
     } catch (e: any) {
-      toast.error(e?.message ?? 'AI search failed');
+      toast.error(e?.message ?? uiText('AI search failed'));
     } finally {
       setLoading(false);
     }
@@ -50,14 +52,13 @@ export function AISearchButton({ objectType, customFields, onApply }: Props) {
       <PopoverTrigger asChild>
         <Button variant="outline" size="sm" className="h-8 gap-1.5 text-[12.5px] border-emerald-300/60 text-emerald-700 hover:text-emerald-700 hover:border-emerald-400">
           <Sparkles className="h-3.5 w-3.5" />
-          AI Search
-        </Button>
+          {uiText("AI Search")}</Button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-[420px]">
         <form onSubmit={(e) => { e.preventDefault(); run(); }} className="flex gap-2">
           <Input
             autoFocus
-            placeholder={`Filter ${objectType} in plain English…`}
+            placeholder={uiMessage`Filter ${objectType} in plain English…`}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             className="flex-1 h-9"
@@ -67,8 +68,7 @@ export function AISearchButton({ objectType, customFields, onApply }: Props) {
           </Button>
         </form>
         <p className="mt-2 text-[11px] text-muted-foreground">
-          Translates your prompt into filter chips you can edit or save as a view.
-        </p>
+          {uiText("Translates your prompt into filter chips you can edit or save as a view.")}</p>
       </PopoverContent>
     </Popover>
   );

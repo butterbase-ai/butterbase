@@ -7,7 +7,7 @@ import {
 } from '@/components/ui/dialog';
 import { Sparkles, FileText, MapPin, Users, Clock } from 'lucide-react';
 import { getEntity, listEntities } from '@/lib/substrate';
-import { format } from 'date-fns';
+import { format } from '@/i18n/date';
 import type { Meeting } from '@/lib/types';
 import { MeetingNotetakerPanel } from '@/components/MeetingNotetakerPanel';
 

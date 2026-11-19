@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { ChevronDown, ChevronUp } from 'lucide-react';
@@ -19,6 +20,7 @@ export function DraftReplyEditor({
   onSent: () => void;
   readonly?: boolean;
 }) {
+  useUiLocale();
   const [body, setBody] = useState('');
   const [sending, setSending] = useState(false);
   const [touched, setTouched] = useState(false);
@@ -50,7 +52,7 @@ export function DraftReplyEditor({
       setTouched(false);
       onSent();
     } catch (e: any) {
-      toast.error(e?.message || 'Send failed');
+      toast.error(e?.message || uiText('Send failed'));
     } finally {
       setSending(false);
     }
@@ -59,8 +61,8 @@ export function DraftReplyEditor({
   if (readonly) {
     return (
       <div className="border-t border-butter-300/60 bg-butter-50 px-5 py-4 text-sm">
-        <div className="section-label mb-2">Reply · read-only · driven elsewhere</div>
-        <div className="prose-msg"><ReactMarkdown>{body || '(empty)'}</ReactMarkdown></div>
+        <div className="section-label mb-2">{uiText("Reply · read-only · driven elsewhere")}</div>
+        <div className="prose-msg"><ReactMarkdown>{body || uiText('(empty)')}</ReactMarkdown></div>
       </div>
     );
   }
@@ -82,7 +84,7 @@ export function DraftReplyEditor({
         aria-controls="draft-reply-body"
       >
         <div className="flex items-center gap-3 min-w-0">
-          <div className="section-label shrink-0">Reply</div>
+          <div className="section-label shrink-0">{uiText("Reply")}</div>
           {collapsed && (
             <div className="text-xs text-muted-foreground truncate">{summary}</div>
           )}
@@ -95,20 +97,19 @@ export function DraftReplyEditor({
         <div id="draft-reply-body" className="px-5 pb-4 space-y-3">
           {draft && (
             <div className="text-[11px] font-mono uppercase tracking-[0.18em] text-caramel/80">
-              AI draft loaded — edit before sending
-            </div>
+              {uiText("AI draft loaded — edit before sending")}</div>
           )}
           <Tabs defaultValue="edit">
             <TabsList>
-              <TabsTrigger value="edit">Edit</TabsTrigger>
-              <TabsTrigger value="preview">Preview</TabsTrigger>
+              <TabsTrigger value="edit">{uiText("Edit")}</TabsTrigger>
+              <TabsTrigger value="preview">{uiText("Preview")}</TabsTrigger>
             </TabsList>
             <TabsContent value="edit">
               <Textarea
                 value={body}
                 onChange={(e) => { setBody(e.target.value); setTouched(true); }}
                 rows={6}
-                placeholder="Type your reply…"
+                placeholder={uiText("Type your reply…")}
               />
             </TabsContent>
             <TabsContent value="preview">
@@ -119,10 +120,10 @@ export function DraftReplyEditor({
           </Tabs>
           <div className="flex flex-wrap items-center gap-2 pt-1">
             <Button size="sm" onClick={() => send(true)} disabled={sending || !body.trim()}>
-              {sending ? 'Sending…' : 'Send + resolve'}
+              {sending ? uiText('Sending…') : uiText('Send + resolve')}
             </Button>
             <Button size="sm" variant="crust" onClick={() => send(false)} disabled={sending || !body.trim()}>
-              {sending ? 'Sending…' : 'Send reply'}
+              {sending ? uiText('Sending…') : uiText('Send reply')}
             </Button>
           </div>
         </div>

@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../i18n";
 import { useState } from 'react';
 import { ChevronRight, Wrench, CheckCircle2, Bot, Stethoscope, PencilLine, MessagesSquare, AlertOctagon, AlertTriangle, Radio } from 'lucide-react';
 import type { DoServerEvent } from '@/console/lib/do-ws';
@@ -6,13 +7,13 @@ import { cn } from '@/console/lib/utils';
 type Tone = 'muted' | 'positive' | 'butter' | 'crust' | 'red';
 
 export function LiveAgentStream({ events }: { events: DoServerEvent[] }) {
+  useUiLocale();
   if (events.length === 0) {
     return (
       <div className="p-5">
-        <div className="section-label mb-2">Idle</div>
+        <div className="section-label mb-2">{uiText("Idle")}</div>
         <p className="text-sm text-muted-foreground leading-relaxed">
-          No live agent activity yet. Run <span className="text-caramel">Diagnose</span> or <span className="text-caramel">Draft</span> to kick off the agent.
-        </p>
+          {uiText("No live agent activity yet. Run ")}<span className="text-caramel">{uiText("Diagnose")}</span> {uiText(" or ")}<span className="text-caramel">{uiText("Draft")}</span> {uiText(" to kick off the agent.")}</p>
       </div>
     );
   }
@@ -27,11 +28,12 @@ export function LiveAgentStream({ events }: { events: DoServerEvent[] }) {
 }
 
 function EventRow({ ev }: { ev: DoServerEvent }) {
+  useUiLocale();
   const [open, setOpen] = useState(false);
   if (ev.type === 'tool_call_start') {
     return (
       <Row tone="muted" icon={Wrench} onClick={() => setOpen(!open)} expandable>
-        <span>Calling <code className="font-mono text-caramel/90">{ev.tool}</code></span>
+        <span>{uiText("Calling ")}<code className="font-mono text-caramel/90">{ev.tool}</code></span>
         {open && (
           <pre className="mt-2 max-h-40 overflow-auto rounded-lg border border-rule-soft bg-paper-warm p-2.5 font-mono text-[11px] text-foreground/80">
             {JSON.stringify(ev.args, null, 2)}
@@ -69,22 +71,22 @@ function EventRow({ ev }: { ev: DoServerEvent }) {
     );
   }
   if (ev.type === 'state') {
-    return <Row tone="muted" icon={Radio}><span className="font-mono uppercase text-[10px] tracking-[0.18em]">state → {ev.agent_state}</span></Row>;
+    return <Row tone="muted" icon={Radio}><span className="font-mono uppercase text-[10px] tracking-[0.18em]">{uiText("state → ")}{ev.agent_state}</span></Row>;
   }
   if (ev.type === 'hello') {
-    return <Row tone="muted" icon={Radio}><span className="font-mono uppercase text-[10px] tracking-[0.18em]">session started · state={ev.agent_state}</span></Row>;
+    return <Row tone="muted" icon={Radio}><span className="font-mono uppercase text-[10px] tracking-[0.18em]">{uiText("session started · state=")}{ev.agent_state}</span></Row>;
   }
   if (ev.type === 'diagnosis') {
-    return <Row tone="positive" icon={Stethoscope}><span>Diagnosis posted</span></Row>;
+    return <Row tone="positive" icon={Stethoscope}><span>{uiText("Diagnosis posted")}</span></Row>;
   }
   if (ev.type === 'draft_proposed') {
-    return <Row tone="butter" icon={PencilLine}><span>Draft proposed{ev.confidence ? ` (${ev.confidence})` : ''}</span></Row>;
+    return <Row tone="butter" icon={PencilLine}><span>{uiText("Draft proposed")}{ev.confidence ? ` (${ev.confidence})` : ''}</span></Row>;
   }
   if (ev.type === 'followup_question_proposed') {
-    return <Row tone="butter" icon={MessagesSquare}><span>Follow-up question proposed</span></Row>;
+    return <Row tone="butter" icon={MessagesSquare}><span>{uiText("Follow-up question proposed")}</span></Row>;
   }
   if (ev.type === 'escalation') {
-    return <Row tone="crust" icon={AlertOctagon}><span>Escalation: {ev.reason}</span></Row>;
+    return <Row tone="crust" icon={AlertOctagon}><span>{uiText("Escalation: ")}{ev.reason}</span></Row>;
   }
   if (ev.type === 'error') {
     return <Row tone="red" icon={AlertTriangle}><span>{ev.reason}{ev.message ? `: ${ev.message}` : ''}</span></Row>;
@@ -106,6 +108,7 @@ function Row({
   onClick?: () => void;
   expandable?: boolean;
 }) {
+  useUiLocale();
   const toneClass: Record<Tone, { dot: string; ring: string; text: string }> = {
     muted: { dot: 'bg-paper-warm text-muted-foreground', ring: 'border-rule-soft', text: 'text-muted-foreground' },
     positive: { dot: 'bg-positive/10 text-positive', ring: 'border-positive/25', text: 'text-foreground/90' },

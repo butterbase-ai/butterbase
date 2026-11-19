@@ -1,6 +1,7 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
 import { LayoutGrid, Table as TableIcon } from 'lucide-react';
@@ -39,6 +40,7 @@ const STAGE_LABELS: Record<DealStage, string> = {
 };
 
 function DealColumn({ stage, deals }: { stage: DealStage; deals: Deal[] }) {
+  useUiLocale();
   const { setNodeRef } = useDroppable({ id: `col-${stage}` });
 
   const columnAmount = deals.reduce((sum, d) => sum + (d.amount_cents || 0), 0);
@@ -71,7 +73,7 @@ function DealColumn({ stage, deals }: { stage: DealStage; deals: Deal[] }) {
             </h3>
           </div>
           <p className="mt-1 eyebrow !text-[9.5px]">
-            {deals.length} {deals.length === 1 ? 'deal' : 'deals'}
+            {deals.length} {deals.length === 1 ? uiText('deal') : uiText('deals')}
           </p>
         </div>
         <div className="text-right shrink-0">
@@ -87,8 +89,7 @@ function DealColumn({ stage, deals }: { stage: DealStage; deals: Deal[] }) {
         <SortableContext items={deals.map((d) => d.id)} strategy={verticalListSortingStrategy}>
           {deals.length === 0 ? (
             <div className="flex items-center justify-center py-10 font-editorial italic text-[13px] text-muted-foreground/70">
-              — empty —
-            </div>
+              {uiText("— empty —")}</div>
           ) : (
             deals.map((d) => <DealCard key={d.id} deal={d} />)
           )}
@@ -99,6 +100,7 @@ function DealColumn({ stage, deals }: { stage: DealStage; deals: Deal[] }) {
 }
 
 export default function DealsKanban() {
+  useUiLocale();
   const { data: allDeals = [], isLoading } = useDeals();
   const updateMut = useUpdateDeal();
   const qc = useQueryClient();
@@ -174,7 +176,7 @@ export default function DealsKanban() {
       });
     } catch (e) {
       qc.invalidateQueries({ queryKey: qk.deals(ws) });
-      toast.error(e instanceof Error ? e.message : 'Failed to update deal');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to update deal'));
     }
   }
 
@@ -189,13 +191,12 @@ export default function DealsKanban() {
     <div className="flex h-full flex-col">
       <div className="page-header">
         <div>
-          <p className="eyebrow mb-3">Section 03 · Pipeline</p>
+          <p className="eyebrow mb-3">{uiText("Section 03 · Pipeline")}</p>
           <h1 className="page-title">
-            Deals <em>in motion</em>
+            {uiText("Deals ")}<em>{uiText("in motion")}</em>
           </h1>
           <p className="mt-3 font-editorial italic text-[15px] text-muted-foreground max-w-md">
-            Drag a card to advance its stage. {deals.length} active · {totalFmt} weighted.
-          </p>
+            {uiText("Drag a card to advance its stage. ")}{deals.length} {uiText(" active · ")}{totalFmt} {uiText(" weighted.")}</p>
         </div>
         <NewDealDialog />
       </div>
@@ -207,15 +208,13 @@ export default function DealsKanban() {
             className={cn('h-7 px-2.5 rounded text-[12px] flex items-center gap-1.5 transition-colors',
               mode === 'kanban' ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground')}
           >
-            <LayoutGrid className="h-3 w-3" /> Kanban
-          </button>
+            <LayoutGrid className="h-3 w-3" /> {uiText(" Kanban")}</button>
           <button
             onClick={() => setMode('table')}
             className={cn('h-7 px-2.5 rounded text-[12px] flex items-center gap-1.5 transition-colors',
               mode === 'table' ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground')}
           >
-            <TableIcon className="h-3 w-3" /> Table
-          </button>
+            <TableIcon className="h-3 w-3" /> {uiText(" Table")}</button>
         </div>
       </div>
       <ObjectToolbar objectType="deals" />
@@ -224,7 +223,7 @@ export default function DealsKanban() {
         {isLoading ? (
           mode === 'table'
             ? <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12" />)}</div>
-            : <div className="font-editorial italic text-muted-foreground">Loading the ledger…</div>
+            : <div className="font-editorial italic text-muted-foreground">{uiText("Loading the ledger…")}</div>
         ) : mode === 'kanban' ? (
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
             <div className="flex gap-4 pb-4">
@@ -272,13 +271,14 @@ function renderDealBuiltin(d: Deal, slug: string) {
 }
 
 function DealsTable({ deals, visibleFields, cvLookup }: { deals: Deal[]; visibleFields: string[]; cvLookup: ReturnType<typeof useCustomValueLookup> }) {
+  useUiLocale();
   const visibleBuilt = visibleFields.filter((s) => !parseCustomFieldRef(s));
   const visibleCustom = visibleFields.map(parseCustomFieldRef).filter((x): x is string => !!x);
   if (deals.length === 0) {
     return (
       <div className="rounded-lg border border-dashed p-12 text-center">
-        <h3 className="font-medium">No matches</h3>
-        <p className="mt-1 text-sm text-muted-foreground">Adjust filters or switch to Kanban for the full pipeline.</p>
+        <h3 className="font-medium">{uiText("No matches")}</h3>
+        <p className="mt-1 text-sm text-muted-foreground">{uiText("Adjust filters or switch to Kanban for the full pipeline.")}</p>
       </div>
     );
   }

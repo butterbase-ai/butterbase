@@ -1,3 +1,4 @@
+import { uiText } from "../i18n";
 import { createClient } from '@butterbase/sdk';
 
 export const bb = createClient({
@@ -42,7 +43,7 @@ export async function upsertRow<T extends Record<string, any>>(
 ): Promise<T> {
   const matchEntries = Object.entries(match);
   if (matchEntries.length === 0) {
-    throw new Error('upsertRow: match cannot be empty');
+    throw new Error(uiText('upsertRow: match cannot be empty'));
   }
 
   const sel: any = bb.from(table).select('*');

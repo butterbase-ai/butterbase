@@ -1,5 +1,6 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useState } from 'react';
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -15,6 +16,7 @@ interface Props {
 }
 
 export function NotesPanel({ entityType, entityId }: Props) {
+  useUiLocale();
   const { data: notes } = useNotes(entityType, entityId);
   const createMut = useCreateNote();
   const deleteMut = useDeleteNote();
@@ -36,16 +38,16 @@ export function NotesPanel({ entityType, entityId }: Props) {
       await createMut.mutateAsync({ entity_type: entityType, entity_id: entityId, body: body.trim() });
       setBody('');
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to add note');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to add note'));
     }
   }
 
   async function handleDeleteNote(noteId: string) {
     try {
       await deleteMut.mutateAsync({ id: noteId, entity_type: entityType, entity_id: entityId });
-      toast.success('Note deleted');
+      toast.success(uiText('Note deleted'));
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to delete note');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to delete note'));
     }
   }
 
@@ -53,19 +55,18 @@ export function NotesPanel({ entityType, entityId }: Props) {
     <div className="flex flex-col gap-4">
       <div className="flex gap-2">
         <Textarea
-          placeholder="Add a note..."
+          placeholder={uiText("Add a note...")}
           value={body}
           onChange={(e) => setBody(e.target.value)}
           className="min-h-20"
         />
         <Button onClick={handleAddNote} disabled={!body.trim() || createMut.isPending} className="h-20">
-          Add note
-        </Button>
+          {uiText("Add note")}</Button>
       </div>
 
       {!notes || notes.length === 0 ? (
         <div className="rounded-lg border border-dashed p-8 text-center">
-          <p className="text-sm text-muted-foreground">No notes yet</p>
+          <p className="text-sm text-muted-foreground">{uiText("No notes yet")}</p>
         </div>
       ) : (
         <ScrollArea className="h-96">

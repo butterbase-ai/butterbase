@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../../i18n";
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { bb } from '@/console/lib/bb';
@@ -11,6 +12,7 @@ import { toast } from '@/console/components/ui/toast';
 import { confirm } from '@/console/components/ui/confirm';
 
 export function EscalationSettings() {
+  useUiLocale();
   const qc = useQueryClient();
   const [channel, setChannel] = useState<'email' | 'slack' | 'webhook'>('email');
   const [target, setTarget] = useState('');
@@ -59,19 +61,19 @@ export function EscalationSettings() {
     setBusy(true);
     try {
       if (channel === 'email' && !gmailConnected) {
-        toast.warning('Connect Gmail in Settings → Integrations before adding an email target. The escalation will be sent from your Google account.');
+        toast.warning(uiText('Connect Gmail in Settings → Integrations before adding an email target. The escalation will be sent from your Google account.'));
         return;
       }
       const userRes: any = await bb.auth.getUser();
       const connectedUserId = userRes?.data?.id || userRes?.id || userRes?.user?.id || null;
       if ((channel === 'email' || channel === 'slack') && !connectedUserId) {
-        toast.error('Could not resolve your user id — try signing out and back in.');
+        toast.error(uiText('Could not resolve your user id — try signing out and back in.'));
         return;
       }
       let config: Record<string, unknown>;
       if (channel === 'slack') {
         if (!slackConnected) {
-          toast.warning('Connect Slack in Settings → Integrations before adding a Slack target.');
+          toast.warning(uiText('Connect Slack in Settings → Integrations before adding a Slack target.'));
           return;
         }
         const picked = slackChannels.find((c) => c.id === target);
@@ -88,50 +90,47 @@ export function EscalationSettings() {
       await bb.from('escalation_targets').insert({ channel, config, active: true });
       setTarget('');
       qc.invalidateQueries({ queryKey: ['escalation_targets'] });
-      toast.success('Escalation target added');
+      toast.success(uiText('Escalation target added'));
     } catch (e: any) {
-      toast.error(e?.message || 'Add failed');
+      toast.error(e?.message || uiText('Add failed'));
     } finally {
       setBusy(false);
     }
   }
 
   async function remove(target_id: string) {
-    if (!(await confirm({ title: 'Remove target?', description: 'Escalations will stop firing to this destination.', confirmLabel: 'Remove', variant: 'destructive' }))) return;
+    if (!(await confirm({ title: uiText('Remove target?'), description: uiText('Escalations will stop firing to this destination.'), confirmLabel: uiText('Remove'), variant: 'destructive' }))) return;
     try {
       await bb.from('escalation_targets').delete().eq('id', target_id);
       qc.invalidateQueries({ queryKey: ['escalation_targets'] });
-      toast.success('Target removed');
+      toast.success(uiText('Target removed'));
     } catch (e: any) {
-      toast.error(e?.message || 'Remove failed');
+      toast.error(e?.message || uiText('Remove failed'));
     }
   }
 
   return (
     <SettingsPage
-      label="Escalation"
-      title={<>When the agent calls for <em>backup</em></>}
-      description="Every active target receives every escalation. Add as many channels as you want — they all fire in parallel."
+      label={uiText("Escalation")}
+      title={<>{uiText("When the agent calls for ")}<em>{uiText("backup")}</em></>}
+      description={uiText("Every active target receives every escalation. Add as many channels as you want — they all fire in parallel.")}
     >
       <Card>
-        <CardHeader><CardTitle>Add a target</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{uiText("Add a target")}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           {channel === 'email' && !gmailConnected && (
             <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-              Email escalation sends through your connected Gmail account.{' '}
-              <a href="/settings/integrations" className="underline">Connect Gmail</a> first.
-            </div>
+              {uiText("Email escalation sends through your connected Gmail account.")}{' '}
+              <a href="/settings/integrations" className="underline">{uiText("Connect Gmail")}</a> {uiText(" first.")}</div>
           )}
           {channel === 'slack' && !slackConnected && (
             <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-              Slack escalation posts through your connected Slack workspace.{' '}
-              <a href="/settings/integrations" className="underline">Connect Slack</a> first.
-            </div>
+              {uiText("Slack escalation posts through your connected Slack workspace.")}{' '}
+              <a href="/settings/integrations" className="underline">{uiText("Connect Slack")}</a> {uiText(" first.")}</div>
           )}
           {channel === 'slack' && slackConnected && slackChannelsError && (
             <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-              Couldn't load Slack channels — paste a channel ID (e.g. C0123ABCD) instead.
-            </div>
+              {uiText("Couldn't load Slack channels — paste a channel ID (e.g. C0123ABCD) instead.")}</div>
           )}
           <div className="flex gap-2 flex-wrap">
             <Select
@@ -142,9 +141,9 @@ export function EscalationSettings() {
               }}
               className="w-40"
             >
-              <option value="email">Email</option>
-              <option value="slack">Slack</option>
-              <option value="webhook">Webhook</option>
+              <option value="email">{uiText("Email")}</option>
+              <option value="slack">{uiText("Slack")}</option>
+              <option value="webhook">{uiText("Webhook")}</option>
             </Select>
             {channel === 'slack' && slackConnected && !slackChannelsError ? (
               <Select
@@ -154,7 +153,7 @@ export function EscalationSettings() {
                 disabled={slackChannelsLoading}
               >
                 <option value="">
-                  {slackChannelsLoading ? 'Loading channels…' : 'Select a channel…'}
+                  {slackChannelsLoading ? uiText('Loading channels…') : uiText('Select a channel…')}
                 </option>
                 {slackChannels.map((c) => (
                   <option key={c.id} value={c.id}>
@@ -166,17 +165,17 @@ export function EscalationSettings() {
               <Input
                 value={target}
                 onChange={(e) => setTarget(e.target.value)}
-                placeholder={channel === 'slack' ? 'C0123ABCD' : channel === 'email' ? 'oncall@company.com' : 'https://hooks…'}
+                placeholder={channel === 'slack' ? uiText('C0123ABCD') : channel === 'email' ? uiText('oncall@company.com') : uiText('https://hooks…')}
                 className="flex-1 min-w-[200px]"
               />
             )}
-            <Button onClick={add} disabled={!target || busy}>Add target</Button>
+            <Button onClick={add} disabled={!target || busy}>{uiText("Add target")}</Button>
           </div>
         </CardContent>
       </Card>
 
       <div>
-        <div className="section-label mb-3">Targets · {targets.length}</div>
+        <div className="section-label mb-3">{uiText("Targets · ")}{targets.length}</div>
         <div className="rounded-2xl border border-rule-soft bg-paper-soft divide-y divide-[rgb(244_236_221/0.06)]">
           {targets.map((t) => (
             <div key={t.id} className="flex items-center gap-3 px-4 py-3">
@@ -190,10 +189,10 @@ export function EscalationSettings() {
                     : JSON.stringify(t.config)}
                 </pre>
               </div>
-              <Button size="sm" variant="ghost" onClick={() => remove(t.id)}>Remove</Button>
+              <Button size="sm" variant="ghost" onClick={() => remove(t.id)}>{uiText("Remove")}</Button>
             </div>
           ))}
-          {targets.length === 0 && <div className="p-4 text-sm text-muted-foreground">No escalation targets yet.</div>}
+          {targets.length === 0 && <div className="p-4 text-sm text-muted-foreground">{uiText("No escalation targets yet.")}</div>}
         </div>
       </div>
     </SettingsPage>

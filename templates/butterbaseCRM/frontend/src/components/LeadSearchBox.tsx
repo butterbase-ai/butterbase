@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export function LeadSearchBox({ onSubmit, loading, queryText, onQueryTextChange }: Props) {
+  useUiLocale();
   return (
     <div className="flex gap-2">
       <div className="relative flex-1">
@@ -17,13 +19,13 @@ export function LeadSearchBox({ onSubmit, loading, queryText, onQueryTextChange 
         <Input
           value={queryText}
           onChange={(e) => onQueryTextChange(e.target.value)}
-          placeholder="Describe who you're looking for…  e.g. VPs of engineering at NYC fintechs"
+          placeholder={uiText("Describe who you're looking for…  e.g. VPs of engineering at NYC fintechs")}
           className="pl-9"
           onKeyDown={(e) => { if (e.key === 'Enter') onSubmit(); }}
         />
       </div>
       <Button onClick={onSubmit} disabled={loading}>
-        {loading ? 'Searching…' : 'Search'}
+        {loading ? uiText('Searching…') : uiText('Search')}
       </Button>
     </div>
   );

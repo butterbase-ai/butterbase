@@ -1,3 +1,4 @@
+import { LanguagePicker, uiText, useUiLocale } from "../i18n";
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
@@ -30,18 +31,19 @@ function slugify(s: string) {
   return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50);
 }
 
-const schema = z.object({
-  name: z.string().min(1, 'Workspace name is required'),
-  slug: z.string().min(1).max(50).regex(/^[a-z0-9-]+$/, 'Lowercase letters, numbers, and hyphens only'),
+const schema = () => z.object({
+  name: z.string().min(1, uiText('Workspace name is required')),
+  slug: z.string().min(1).max(50).regex(/^[a-z0-9-]+$/, uiText('Lowercase letters, numbers, and hyphens only')),
 });
 
-type V = z.infer<typeof schema>;
+type V = z.infer<ReturnType<typeof schema>>;
 
 export default function AgentOnboarding() {
+  useUiLocale();
   const navigate = useNavigate();
   const qc = useQueryClient();
 
-  const form = useForm<V>({ resolver: zodResolver(schema), defaultValues: { name: '', slug: '' } });
+  const form = useForm<V>({ resolver: zodResolver(schema()), defaultValues: { name: '', slug: '' } });
 
   function handleNameBlur() {
     const name = form.getValues('name');
@@ -55,7 +57,7 @@ export default function AgentOnboarding() {
     const { data: user } = await bb.auth.getUser();
     if (!user) { navigate('/login', { replace: true }); return; }
     const uid = (user as any).id ?? (user as any).user?.id;
-    if (!uid) { toast.error('No user id'); return; }
+    if (!uid) { toast.error(uiText('No user id')); return; }
 
     const { data: wsData, error: wsError } = await bb
       .from<Workspace>('workspaces')
@@ -63,7 +65,7 @@ export default function AgentOnboarding() {
       .select();
     if (wsError) { toast.error(wsError.message); return; }
     const ws = Array.isArray(wsData) ? wsData[0] : wsData;
-    if (!ws) { toast.error('Failed to create workspace'); return; }
+    if (!ws) { toast.error(uiText('Failed to create workspace')); return; }
 
     const { data: memData, error: memErr } = await bb
       .from('memberships' as any)
@@ -80,10 +82,11 @@ export default function AgentOnboarding() {
 
   return (
     <div className="grid min-h-screen place-items-center bg-muted/40 p-4">
+      <div className="fixed bottom-4 right-4 z-50 rounded bg-background p-1"><LanguagePicker /></div>
       <Card className="w-full max-w-md shadow-lg">
         <CardHeader className="space-y-1">
-          <CardTitle className="text-2xl">Create your workspace</CardTitle>
-          <CardDescription>Name it to get started.</CardDescription>
+          <CardTitle className="text-2xl">{uiText("Create your workspace")}</CardTitle>
+          <CardDescription>{uiText("Name it to get started.")}</CardDescription>
         </CardHeader>
         <CardContent>
           <Form {...form}>
@@ -93,10 +96,10 @@ export default function AgentOnboarding() {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Workspace name</FormLabel>
+                    <FormLabel>{uiText("Workspace name")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="Acme Corp"
+                        placeholder={uiText("Acme Corp")}
                         {...field}
                         onBlur={() => { field.onBlur(); handleNameBlur(); }}
                       />
@@ -110,15 +113,15 @@ export default function AgentOnboarding() {
                 name="slug"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Slug</FormLabel>
-                    <FormControl><Input placeholder="acme-corp" {...field} /></FormControl>
-                    <FormDescription>URL-friendly identifier.</FormDescription>
+                    <FormLabel>{uiText("Slug")}</FormLabel>
+                    <FormControl><Input placeholder={uiText("acme-corp")} {...field} /></FormControl>
+                    <FormDescription>{uiText("URL-friendly identifier.")}</FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
               />
               <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
-                {form.formState.isSubmitting ? 'Creating…' : 'Create workspace'}
+                {form.formState.isSubmitting ? uiText('Creating…') : uiText('Create workspace')}
               </Button>
             </form>
           </Form>

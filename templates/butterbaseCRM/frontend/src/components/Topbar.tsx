@@ -1,3 +1,4 @@
+import { LanguagePicker, uiText, useUiLocale } from "../i18n";
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
@@ -27,6 +28,7 @@ interface AuthUser {
 }
 
 export function Topbar() {
+  useUiLocale();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -69,18 +71,19 @@ export function Topbar() {
         className="hidden lg:flex items-center gap-2 h-9 px-3 rounded-md border border-border bg-card/50 text-muted-foreground hover:text-foreground hover:border-foreground/20 transition-colors text-[13px]"
       >
         <Sparkles className="h-3.5 w-3.5 text-butter" strokeWidth={1.75} />
-        <span>AI search</span>
+        <span>{uiText("AI search")}</span>
         <span className="ml-3 font-mono text-[10px] px-1.5 py-0.5 rounded bg-background border border-border num">⌘K</span>
       </button>
       <AISearchDialog open={searchOpen} onOpenChange={setSearchOpen} />
 
       {isFlagEnabled(FLAGS.aiAssistant) && <AgentLauncher />}
 
+      <LanguagePicker />
       <ThemeToggle />
 
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon" aria-label="Account menu" className="rounded-full">
+          <Button variant="ghost" size="icon" aria-label={uiText("Account menu")} className="rounded-full">
             <Avatar className="h-8 w-8 ring-1 ring-border">
               <AvatarFallback className="text-[11px] font-semibold bg-butter/15 text-foreground">
                 {initials}
@@ -98,8 +101,7 @@ export function Topbar() {
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={signOut}>
             <LogOut className="mr-2 h-4 w-4" />
-            Sign out
-          </DropdownMenuItem>
+            {uiText("Sign out")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
 

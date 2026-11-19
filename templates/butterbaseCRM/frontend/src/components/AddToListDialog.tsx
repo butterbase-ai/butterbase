@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 // frontend/src/components/AddToListDialog.tsx
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
@@ -32,6 +33,7 @@ interface Props {
 }
 
 export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved }: Props) {
+  useUiLocale();
   const workspaceId = useCurrentWorkspaceId();
   const qc = useQueryClient();
   const [target, setTarget] = useState<Target>('all_people');
@@ -78,10 +80,10 @@ export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved
     if (!targetValid()) {
       setError(
         target === 'existing'
-          ? 'Pick a list.'
+          ? uiText('Pick a list.')
           : target === 'new'
-          ? 'Enter a list name.'
-          : 'Pick a target.',
+          ? uiText('Enter a list name.')
+          : uiText('Pick a target.'),
       );
       return;
     }
@@ -116,7 +118,7 @@ export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved
       const description = parts.slice(1).join(' · ') || undefined;
 
       if (savedCount === 0) {
-        toast.error('No leads saved', { description: 'All picks were duplicates or already in the list.' });
+        toast.error(uiText('No leads saved'), { description: uiText('All picks were duplicates or already in the list.') });
       } else {
         toast.success(parts[0], { description });
       }
@@ -139,7 +141,7 @@ export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       setError(msg);
-      toast.error('Failed to save leads', { description: msg });
+      toast.error(uiText('Failed to save leads'), { description: msg });
     } finally {
       setSaving(false);
     }
@@ -149,12 +151,12 @@ export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add {selectedIds.length} {selectedIds.length === 1 ? 'lead' : 'leads'}</DialogTitle>
+          <DialogTitle>{uiText("Add ")}{selectedIds.length} {selectedIds.length === 1 ? uiText('lead') : uiText('leads')}</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 py-2">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Where should these go?</label>
+            <label className="text-sm font-medium">{uiText("Where should these go?")}</label>
 
             <label className="flex items-start gap-2 cursor-pointer rounded-md border p-2 hover:bg-muted/30">
               <input
@@ -167,8 +169,8 @@ export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved
                 disabled={saving}
               />
               <div>
-                <div className="text-sm font-medium">All people (no list)</div>
-                <div className="text-xs text-muted-foreground">Save into the CRM's People — no list grouping.</div>
+                <div className="text-sm font-medium">{uiText("All people (no list)")}</div>
+                <div className="text-xs text-muted-foreground">{uiText("Save into the CRM's People — no list grouping.")}</div>
               </div>
             </label>
 
@@ -183,7 +185,7 @@ export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved
                 disabled={saving || existingLists.length === 0}
               />
               <div className="flex-1">
-                <div className="text-sm font-medium">Add to existing list</div>
+                <div className="text-sm font-medium">{uiText("Add to existing list")}</div>
                 <select
                   value={existingListId}
                   onChange={(e) => setExistingListId(e.target.value)}
@@ -191,7 +193,7 @@ export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved
                   disabled={saving || existingLists.length === 0}
                   className="mt-1 w-full rounded-md border bg-background px-2 py-1 text-sm disabled:opacity-50"
                 >
-                  <option value="">{existingLists.length === 0 ? 'No lists yet' : 'Pick a list…'}</option>
+                  <option value="">{existingLists.length === 0 ? uiText('No lists yet') : uiText('Pick a list…')}</option>
                   {existingLists.map((l) => (
                     <option key={l.id} value={l.id}>
                       {l.name} ({l.member_count})
@@ -212,12 +214,12 @@ export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved
                 disabled={saving}
               />
               <div className="flex-1">
-                <div className="text-sm font-medium">Create new list</div>
+                <div className="text-sm font-medium">{uiText("Create new list")}</div>
                 <Input
                   value={listName}
                   onChange={(e) => setListName(e.target.value)}
                   onFocus={() => setTarget('new')}
-                  placeholder="e.g. Q3 fintech VPs"
+                  placeholder={uiText("e.g. Q3 fintech VPs")}
                   className="mt-1"
                   disabled={saving}
                 />
@@ -226,16 +228,15 @@ export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved
           </div>
 
           <div className="rounded-md border bg-muted/30 p-3 text-sm">
-            {loading && <div className="text-muted-foreground">Calculating cost…</div>}
+            {loading && <div className="text-muted-foreground">{uiText("Calculating cost…")}</div>}
             {revealCost && (
               <>
                 <div>
-                  Revealing emails will use <span className="font-medium">{revealCost.credits} credits</span>
+                  {uiText("Revealing emails will use ")}<span className="font-medium">{revealCost.credits} {uiText(" credits")}</span>
                   {' '}(≈ <span className="font-medium">${revealCost.usd_estimate.toFixed(2)}</span>)
                 </div>
                 <div className="text-xs text-muted-foreground mt-1">
-                  Or add without revealing — leads are saved with empty email; you can reveal later.
-                </div>
+                  {uiText("Or add without revealing — leads are saved with empty email; you can reveal later.")}</div>
               </>
             )}
           </div>
@@ -244,13 +245,11 @@ export function AddToListDialog({ open, onClose, queryHash, selectedIds, onSaved
         </div>
 
         <DialogFooter className="gap-2">
-          <Button variant="ghost" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button variant="ghost" onClick={onClose} disabled={saving}>{uiText("Cancel")}</Button>
           <Button variant="secondary" onClick={() => save(false)} disabled={saving || !targetValid()}>
-            Add without emails
-          </Button>
+            {uiText("Add without emails")}</Button>
           <Button onClick={() => save(true)} disabled={saving || !targetValid() || !revealCost}>
-            Confirm &amp; reveal
-          </Button>
+            {uiText("Confirm & reveal")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

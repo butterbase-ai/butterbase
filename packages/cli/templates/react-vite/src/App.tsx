@@ -1,8 +1,10 @@
+import { LanguagePicker, DocumentLanguage, uiText, useUiLocale } from "./i18n";
 import { useState, useEffect } from 'react';
 import { butterbase } from './lib';
 import './App.css';
 
 function App() {
+  useUiLocale();
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
@@ -40,16 +42,17 @@ function App() {
   }
 
   if (loading) {
-    return <div>Loading...</div>;
+    return <div>{uiText("Loading...")}</div>;
   }
 
   if (!user) {
     return (
       <div className="App">
-        <h1>Welcome to {{PROJECT_NAME}}</h1>
-        <p>Powered by Butterbase</p>
+        <DocumentLanguage /><LanguagePicker />
+        <h1>{uiText("Welcome to ")}{{PROJECT_NAME}}</h1>
+        <p>{uiText("Powered by Butterbase")}</p>
         <div>
-          <h2>Sign In or Sign Up</h2>
+          <h2>{uiText("Sign In or Sign Up")}</h2>
           <form onSubmit={(e) => {
             e.preventDefault();
             const form = e.currentTarget;
@@ -62,10 +65,10 @@ function App() {
               handleSignIn(email, password);
             }
           }}>
-            <input name="email" type="email" placeholder="Email" required />
-            <input name="password" type="password" placeholder="Password" required />
-            <button type="submit" value="signin">Sign In</button>
-            <button type="submit" value="signup">Sign Up</button>
+            <input name="email" type="email" placeholder={uiText("Email")} required />
+            <input name="password" type="password" placeholder={uiText("Password")} required />
+            <button type="submit" value="signin">{uiText("Sign In")}</button>
+            <button type="submit" value="signup">{uiText("Sign Up")}</button>
           </form>
         </div>
       </div>
@@ -74,8 +77,9 @@ function App() {
 
   return (
     <div className="App">
-      <h1>Welcome, {user.email}!</h1>
-      <button onClick={handleSignOut}>Sign Out</button>
+        <DocumentLanguage /><LanguagePicker />
+      <h1>{uiText("Welcome, ")}{user.email}!</h1>
+      <button onClick={handleSignOut}>{uiText("Sign Out")}</button>
     </div>
   );
 }

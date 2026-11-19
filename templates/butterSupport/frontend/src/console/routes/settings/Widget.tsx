@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../../i18n";
 import { useState } from 'react';
 import { APP_ID, SUBDOMAIN } from '@/console/lib/bb';
 import { Button } from '@/console/components/ui/button';
@@ -6,6 +7,7 @@ import { SettingsPage } from '@/console/components/SettingsPage';
 import { Check, Copy } from 'lucide-react';
 
 export function WidgetSettings() {
+  useUiLocale();
   const [copied, setCopied] = useState<string | null>(null);
 
   const base = `https://${SUBDOMAIN}.butterbase.dev`;
@@ -37,7 +39,7 @@ export function WidgetSettings() {
       <button
         onClick={() => copy(label, code)}
         className="absolute right-2 top-2 grid h-8 w-8 place-items-center rounded-lg border border-rule bg-paper-soft text-muted-foreground hover:text-caramel hover:border-butter-300/60 transition-colors"
-        aria-label="Copy snippet"
+        aria-label={uiText("Copy snippet")}
       >
         {copied === label ? <Check className="h-3.5 w-3.5 text-positive" /> : <Copy className="h-3.5 w-3.5" />}
       </button>
@@ -46,42 +48,39 @@ export function WidgetSettings() {
 
   return (
     <SettingsPage
-      label="Widget"
-      title={<>Install the <em>widget</em></>}
-      description="Two lines. Works for logged-in and logged-out visitors. No server code required."
+      label={uiText("Widget")}
+      title={<>{uiText("Install the ")}<em>{uiText("widget")}</em></>}
+      description={uiText("Two lines. Works for logged-in and logged-out visitors. No server code required.")}
     >
       <Card>
-        <CardHeader><CardTitle><span className="font-mono text-caramel mr-2">01</span>Drop this on every page</CardTitle></CardHeader>
+        <CardHeader><CardTitle><span className="font-mono text-caramel mr-2">01</span>{uiText("Drop this on every page")}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
-          <Snippet code={installSnippet} label="install" />
+          <Snippet code={installSnippet} label={uiText("install")} />
           <p className="text-xs text-muted-foreground">
-            That's it for anonymous visitors. Conversations persist via the visitor's browser.
-          </p>
+            {uiText("That's it for anonymous visitors. Conversations persist via the visitor's browser.")}</p>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle><span className="font-mono text-caramel mr-2">02</span>Optional · identify logged-in users</CardTitle></CardHeader>
+        <CardHeader><CardTitle><span className="font-mono text-caramel mr-2">02</span>{uiText("Optional · identify logged-in users")}</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            Add this anywhere after the user logs in. Tickets will be stamped with their name + email.
-          </p>
-          <Snippet code={identifySnippet} label="identify" />
+            {uiText("Add this anywhere after the user logs in. Tickets will be stamped with their name + email.")}</p>
+          <Snippet code={identifySnippet} label={uiText("identify")} />
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader><CardTitle>JavaScript API</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{uiText("JavaScript API")}</CardTitle></CardHeader>
         <CardContent className="space-y-3 text-sm">
-          <p className="text-muted-foreground">Once the widget loads, these methods are available on <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">window.ButterSupport</code>:</p>
+          <p className="text-muted-foreground">{uiText("Once the widget loads, these methods are available on ")}<code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">window.ButterSupport</code>:</p>
           <ul className="space-y-2 text-muted-foreground">
-            <li className="flex gap-2"><span className="text-caramel mt-0.5">▲</span><span><code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">identify(&#123; user_id, email, name &#125;)</code> — attach identity to future tickets</span></li>
-            <li className="flex gap-2"><span className="text-caramel mt-0.5">▲</span><span><code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">open()</code> / <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">close()</code> / <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">toggle()</code> — control the panel</span></li>
-            <li className="flex gap-2"><span className="text-caramel mt-0.5">▲</span><span><code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">reset()</code> — clear identity (call this on logout)</span></li>
+            <li className="flex gap-2"><span className="text-caramel mt-0.5">▲</span><span><code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">identify(&#123; user_id, email, name &#125;)</code> {uiText(" — attach identity to future tickets")}</span></li>
+            <li className="flex gap-2"><span className="text-caramel mt-0.5">▲</span><span><code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">open()</code> / <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">close()</code> / <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">toggle()</code> {uiText(" — control the panel")}</span></li>
+            <li className="flex gap-2"><span className="text-caramel mt-0.5">▲</span><span><code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">reset()</code> {uiText(" — clear identity (call this on logout)")}</span></li>
           </ul>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            Calls made before the bundle loads can be queued via <code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">window.ButterSupport.q.push([method, ...args])</code> — they'll be replayed once the widget mounts.
-          </p>
+            {uiText("Calls made before the bundle loads can be queued via ")}<code className="font-mono text-caramel bg-butter-50 px-1.5 py-0.5 rounded">window.ButterSupport.q.push([method, ...args])</code> {uiText(" — they'll be replayed once the widget mounts.")}</p>
         </CardContent>
       </Card>
     </SettingsPage>

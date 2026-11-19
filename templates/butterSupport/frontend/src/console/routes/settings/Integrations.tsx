@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUiLocale } from "../../../i18n";
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { bb } from '@/console/lib/bb';
@@ -11,8 +12,8 @@ import { confirm } from '@/console/components/ui/confirm';
 type Toolkit = { slug: string; name: string; description: string };
 
 const CURATED: Toolkit[] = [
-  { slug: 'gmail', name: 'Gmail', description: 'Send founder replies from your Google account when a draft is approved.' },
-  { slug: 'slack', name: 'Slack', description: 'Post escalations and ticket alerts to a team channel.' },
+  { slug: 'gmail', name: 'Gmail', get description() { return uiText('Send founder replies from your Google account when a draft is approved.'); } },
+  { slug: 'slack', name: 'Slack', get description() { return uiText('Post escalations and ticket alerts to a team channel.'); } },
 ];
 
 type Connection = {
@@ -29,6 +30,7 @@ function redirectUrl() {
 }
 
 export function IntegrationsSettings() {
+  useUiLocale();
   const qc = useQueryClient();
   const [busySlug, setBusySlug] = useState<string | null>(null);
 
@@ -55,14 +57,14 @@ export function IntegrationsSettings() {
     try {
       const res = await bb.integrations.connect(slug, { redirectUrl: redirectUrl() });
       const authUrl = res.data?.authUrl;
-      if (!authUrl) throw new Error('No authUrl returned. Has the toolkit been enabled for this app?');
+      if (!authUrl) throw new Error(uiText('No authUrl returned. Has the toolkit been enabled for this app?'));
       window.location.href = authUrl;
     } catch (e: any) {
       const msg = e?.message || String(e);
       if (/not_configured|not configured|not enabled/i.test(msg)) {
-        toast.error(`${slug} hasn't been enabled for this app yet. An admin needs to run \`manage_integrations configure toolkit:${slug}\` once before users can connect.`, { title: 'Toolkit not enabled' });
+        toast.error(uiMessage`${slug} hasn't been enabled for this app yet. An admin needs to run \`manage_integrations configure toolkit:${slug}\` once before users can connect.`, { title: uiText('Toolkit not enabled') });
       } else {
-        toast.error(msg || 'Connect failed');
+        toast.error(msg || uiText('Connect failed'));
       }
       setBusySlug(null);
     }
@@ -70,9 +72,9 @@ export function IntegrationsSettings() {
 
   async function disconnect(slug: string, id: string) {
     const ok = await confirm({
-      title: `Disconnect ${slug}?`,
-      description: 'The agent will no longer be able to act through it.',
-      confirmLabel: 'Disconnect',
+      title: uiMessage`Disconnect ${slug}?`,
+      description: uiText('The agent will no longer be able to act through it.'),
+      confirmLabel: uiText('Disconnect'),
       variant: 'destructive',
     });
     if (!ok) return;
@@ -80,9 +82,9 @@ export function IntegrationsSettings() {
     try {
       await bb.integrations.disconnect(id);
       qc.invalidateQueries({ queryKey: ['integration_connections'] });
-      toast.success(`${slug} disconnected`);
+      toast.success(uiMessage`${slug} disconnected`);
     } catch (e: any) {
-      toast.error(e?.message || 'Disconnect failed');
+      toast.error(e?.message || uiText('Disconnect failed'));
     } finally {
       setBusySlug(null);
     }
@@ -100,16 +102,16 @@ export function IntegrationsSettings() {
 
   return (
     <SettingsPage
-      label="Section 11 · Integrations"
-      title={<>Connected <em>accounts</em></>}
+      label={uiText("Section 11 · Integrations")}
+      title={<>{uiText("Connected ")}<em>{uiText("accounts")}</em></>}
       description={
         <>
-          Connect your founder accounts so the agent can act through them on approved proposals — send Gmail replies, post Slack escalations, open GitHub issues. Each connection is scoped to <em>you</em>; teammates must connect their own.
+          {uiText("Connect your founder accounts so the agent can act through them on approved proposals \u2014 send Gmail replies, post Slack escalations, open GitHub issues. Each connection is scoped to ")}<em>{uiText("you")}</em>{uiText("; teammates must connect their own.")}
         </>
       }
     >
       {isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading connections…</p>
+        <p className="text-sm text-muted-foreground">{uiText("Loading connections…")}</p>
       ) : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           {CURATED.map((t) => {
@@ -121,25 +123,24 @@ export function IntegrationsSettings() {
                 <CardHeader className="flex flex-row items-start justify-between gap-2">
                   <CardTitle>{t.name}</CardTitle>
                   {isActive ? (
-                    <Badge variant="green">Connected</Badge>
+                    <Badge variant="green">{uiText("Connected")}</Badge>
                   ) : conn ? (
-                    <Badge variant="amber">{conn.status || 'pending'}</Badge>
+                    <Badge variant="amber">{conn.status || uiText('pending')}</Badge>
                   ) : (
-                    <Badge variant="secondary">Not connected</Badge>
+                    <Badge variant="secondary">{uiText("Not connected")}</Badge>
                   )}
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <p className="text-xs text-muted-foreground leading-relaxed">{t.description}</p>
                   {conn?.connected_at && (
                     <p className="font-mono text-[10px] text-muted-foreground/70">
-                      Connected {new Date(conn.connected_at).toLocaleString()}
+                      {uiText("Connected ")}{new Date(conn.connected_at).toLocaleString()}
                     </p>
                   )}
                   {isActive && (t.slug === 'slack' || t.slug === 'gmail') && (
                     <p className="text-[11px] text-muted-foreground">
                       <a href="/settings/escalation" className="underline hover:text-foreground">
-                        Add a{t.slug === 'slack' ? ' Slack channel' : 'n email'} target →
-                      </a>
+                        {uiText("Add a")}{t.slug === 'slack' ? uiText(' Slack channel') : uiText('n email')} {uiText(" target →")}</a>
                     </p>
                   )}
                   <div className="flex gap-2">
@@ -150,11 +151,11 @@ export function IntegrationsSettings() {
                         disabled={busy}
                         onClick={() => disconnect(t.slug, conn.id)}
                       >
-                        {busy ? 'Working…' : 'Disconnect'}
+                        {busy ? uiText('Working…') : uiText('Disconnect')}
                       </Button>
                     ) : (
                       <Button size="sm" disabled={busy} onClick={() => connect(t.slug)}>
-                        {busy ? 'Redirecting…' : 'Connect'}
+                        {busy ? uiText('Redirecting…') : uiText('Connect')}
                       </Button>
                     )}
                   </div>
@@ -166,9 +167,8 @@ export function IntegrationsSettings() {
       )}
 
       <p className="font-mono text-[11px] text-muted-foreground leading-relaxed">
-        Need a toolkit that isn't listed? Browse all 1,000+ via{' '}
-        <code className="text-caramel bg-butter-50 px-1.5 py-0.5 rounded">manage_integrations list_available</code> and ask an admin to enable it.
-      </p>
+        {uiText("Need a toolkit that isn't listed? Browse all 1,000+ via")}{' '}
+        <code className="text-caramel bg-butter-50 px-1.5 py-0.5 rounded">manage_integrations list_available</code> {uiText(" and ask an admin to enable it.")}</p>
     </SettingsPage>
   );
 }

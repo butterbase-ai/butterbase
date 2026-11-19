@@ -1,10 +1,11 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Pencil, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useEditMode } from '@/lib/editMode';
 import { useQuery } from '@tanstack/react-query';
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { toast } from 'sonner';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -47,6 +48,7 @@ function stageBadgeVariant(stage: string): 'default' | 'secondary' | 'outline' |
 }
 
 export default function CompanyDetail() {
+  useUiLocale();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [editModePref] = useEditMode();
@@ -97,8 +99,8 @@ export default function CompanyDetail() {
       if (field === 'employee_count') {
         const n = value === '' ? null : Number(value);
         if (n !== null && Number.isNaN(n)) {
-          toast.error('Employee count must be a number');
-          throw new Error('nan');
+          toast.error(uiText('Employee count must be a number'));
+          throw new Error(uiText('nan'));
         }
         patch = { employee_count: n } as Partial<Company>;
       } else {
@@ -106,7 +108,7 @@ export default function CompanyDetail() {
       }
       await updateMut.mutateAsync({ id: company.id, patch });
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Update failed');
+      toast.error(e instanceof Error ? e.message : uiText('Update failed'));
       throw e;
     }
   }
@@ -114,7 +116,7 @@ export default function CompanyDetail() {
   if (!id) {
     return (
       <div className="p-8">
-        <h1 className="text-2xl font-semibold">Company not found</h1>
+        <h1 className="text-2xl font-semibold">{uiText("Company not found")}</h1>
       </div>
     );
   }
@@ -131,7 +133,7 @@ export default function CompanyDetail() {
   if (!company || !company.id) {
     return (
       <div className="p-8">
-        <h1 className="text-2xl font-semibold">Company not found</h1>
+        <h1 className="text-2xl font-semibold">{uiText("Company not found")}</h1>
       </div>
     );
   }
@@ -146,7 +148,7 @@ export default function CompanyDetail() {
               <div className="text-3xl font-semibold flex-1 min-w-0">
                 <InlineEditCell
                   value={company.name}
-                  placeholder="Name"
+                  placeholder={uiText("Name")}
                   disabled={fieldsLocked}
                   onSave={(v) => saveField('name', v)}
                   className="text-3xl font-semibold"
@@ -160,22 +162,22 @@ export default function CompanyDetail() {
                   className="gap-1.5"
                 >
                   {toggleEditing ? <X className="h-3.5 w-3.5" /> : <Pencil className="h-3.5 w-3.5" />}
-                  {toggleEditing ? 'Done' : 'Edit'}
+                  {toggleEditing ? uiText('Done') : uiText('Edit')}
                 </Button>
               )}
               <EnrichButton kind="company" entityId={company.id} />
             </div>
             <div className="mt-2 grid max-w-2xl grid-cols-1 gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
-              <FieldRow label="Domain">
+              <FieldRow label={uiText("Domain")}>
                 <InlineEditCell value={company.domain} placeholder="—" type="url" disabled={fieldsLocked} onSave={(v) => saveField('domain', v)} />
               </FieldRow>
-              <FieldRow label="Industry">
+              <FieldRow label={uiText("Industry")}>
                 <InlineEditCell value={company.industry} placeholder="—" disabled={fieldsLocked} onSave={(v) => saveField('industry', v)} />
               </FieldRow>
-              <FieldRow label="Location">
+              <FieldRow label={uiText("Location")}>
                 <InlineEditCell value={company.location} placeholder="—" disabled={fieldsLocked} onSave={(v) => saveField('location', v)} />
               </FieldRow>
-              <FieldRow label="Employees">
+              <FieldRow label={uiText("Employees")}>
                 <InlineEditCell
                   value={company.employee_count == null ? null : String(company.employee_count)}
                   placeholder="—"
@@ -183,14 +185,14 @@ export default function CompanyDetail() {
                   onSave={(v) => saveField('employee_count', v)}
                 />
               </FieldRow>
-              <FieldRow label="LinkedIn" full>
+              <FieldRow label={uiText("LinkedIn")} full>
                 <InlineEditCell value={company.linkedin_url} placeholder="—" type="url" disabled={fieldsLocked} onSave={(v) => saveField('linkedin_url', v)} />
               </FieldRow>
-              <FieldRow label="Description" full>
+              <FieldRow label={uiText("Description")} full>
                 <InlineEditCell value={company.description} placeholder="—" disabled={fieldsLocked} onSave={(v) => saveField('description', v)} />
               </FieldRow>
               {company.enrichment_status && (
-                <FieldRow label="Enrichment">
+                <FieldRow label={uiText("Enrichment")}>
                   <span className="text-sm">
                     {company.enrichment_status}
                     {company.enriched_at && (
@@ -210,22 +212,22 @@ export default function CompanyDetail() {
         <div className="space-y-6">
           <Tabs defaultValue="overview" className="w-full">
             <TabsList className="grid w-full grid-cols-5">
-              <TabsTrigger value="overview">Overview</TabsTrigger>
-              <TabsTrigger value="deals">Deals</TabsTrigger>
-              <TabsTrigger value="notes">Notes</TabsTrigger>
-              <TabsTrigger value="meetings">Meetings</TabsTrigger>
-              <TabsTrigger value="attachments">Attachments</TabsTrigger>
+              <TabsTrigger value="overview">{uiText("Overview")}</TabsTrigger>
+              <TabsTrigger value="deals">{uiText("Deals")}</TabsTrigger>
+              <TabsTrigger value="notes">{uiText("Notes")}</TabsTrigger>
+              <TabsTrigger value="meetings">{uiText("Meetings")}</TabsTrigger>
+              <TabsTrigger value="attachments">{uiText("Attachments")}</TabsTrigger>
             </TabsList>
 
             <TabsContent value="overview" className="mt-4 space-y-4">
               {company.ai_summary && (
                 <Card>
-                  <CardHeader><CardTitle>AI summary</CardTitle></CardHeader>
+                  <CardHeader><CardTitle>{uiText("AI summary")}</CardTitle></CardHeader>
                   <CardContent>
                     <p className="text-sm whitespace-pre-wrap">{company.ai_summary}</p>
                     {company.ai_summary_at && (
                       <p className="mt-2 text-xs text-muted-foreground">
-                        Generated {formatDistanceToNowStrict(new Date(company.ai_summary_at), { addSuffix: true })}
+                        {uiText("Generated ")}{formatDistanceToNowStrict(new Date(company.ai_summary_at), { addSuffix: true })}
                       </p>
                     )}
                   </CardContent>
@@ -233,7 +235,7 @@ export default function CompanyDetail() {
               )}
               {cvLookup.fields.length > 0 && (
                 <Card>
-                  <CardHeader><CardTitle>Custom fields</CardTitle></CardHeader>
+                  <CardHeader><CardTitle>{uiText("Custom fields")}</CardTitle></CardHeader>
                   <CardContent>
                     <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
                       {cvLookup.fields.map((f) => {
@@ -251,7 +253,7 @@ export default function CompanyDetail() {
               )}
               {extraAttrs.length > 0 && (
                 <Card>
-                  <CardHeader><CardTitle>Other attributes</CardTitle></CardHeader>
+                  <CardHeader><CardTitle>{uiText("Other attributes")}</CardTitle></CardHeader>
                   <CardContent>
                     <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
                       {extraAttrs.map(([k, v]) => (
@@ -267,20 +269,20 @@ export default function CompanyDetail() {
                 </Card>
               )}
               <Card>
-                <CardHeader><CardTitle>People</CardTitle></CardHeader>
+                <CardHeader><CardTitle>{uiText("People")}</CardTitle></CardHeader>
                 <CardContent>
                   {!people || people.length === 0 ? (
                     <div className="rounded-lg border border-dashed p-8 text-center">
-                      <p className="text-sm text-muted-foreground">No people at this company yet</p>
+                      <p className="text-sm text-muted-foreground">{uiText("No people at this company yet")}</p>
                     </div>
                   ) : (
                     <Table>
                       <TableHeader>
                         <TableRow>
                           <TableHead className="w-12" />
-                          <TableHead>Name</TableHead>
-                          <TableHead>Email</TableHead>
-                          <TableHead>Title</TableHead>
+                          <TableHead>{uiText("Name")}</TableHead>
+                          <TableHead>{uiText("Email")}</TableHead>
+                          <TableHead>{uiText("Title", "Job title")}</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -307,19 +309,19 @@ export default function CompanyDetail() {
 
             <TabsContent value="deals" className="mt-4">
               <Card>
-                <CardHeader><CardTitle>Deals</CardTitle></CardHeader>
+                <CardHeader><CardTitle>{uiText("Deals")}</CardTitle></CardHeader>
                 <CardContent>
                   {deals.length === 0 ? (
                     <div className="rounded-lg border border-dashed p-8 text-center">
-                      <p className="text-sm text-muted-foreground">No deals for this company yet</p>
+                      <p className="text-sm text-muted-foreground">{uiText("No deals for this company yet")}</p>
                     </div>
                   ) : (
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead>Deal</TableHead>
-                          <TableHead>Stage</TableHead>
-                          <TableHead className="text-right">Amount</TableHead>
+                          <TableHead>{uiText("Deal")}</TableHead>
+                          <TableHead>{uiText("Stage")}</TableHead>
+                          <TableHead className="text-right">{uiText("Amount")}</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -343,7 +345,7 @@ export default function CompanyDetail() {
 
             <TabsContent value="notes" className="mt-4">
               <Card>
-                <CardHeader><CardTitle>Notes</CardTitle></CardHeader>
+                <CardHeader><CardTitle>{uiText("Notes")}</CardTitle></CardHeader>
                 <CardContent>
                   <NotesPanel entityType="company" entityId={id} />
                 </CardContent>
@@ -352,7 +354,7 @@ export default function CompanyDetail() {
 
             <TabsContent value="meetings" className="mt-4">
               <Card>
-                <CardHeader><CardTitle>Meetings</CardTitle></CardHeader>
+                <CardHeader><CardTitle>{uiText("Meetings")}</CardTitle></CardHeader>
                 <CardContent>
                   <MeetingsPanel companyId={id} />
                 </CardContent>
@@ -361,7 +363,7 @@ export default function CompanyDetail() {
 
             <TabsContent value="attachments" className="mt-4">
               <Card>
-                <CardHeader><CardTitle>Attachments</CardTitle></CardHeader>
+                <CardHeader><CardTitle>{uiText("Attachments")}</CardTitle></CardHeader>
                 <CardContent>
                   <AttachmentsPanel entityType="company" entityId={id} />
                 </CardContent>
@@ -375,6 +377,7 @@ export default function CompanyDetail() {
 }
 
 function FieldRow({ label, children, full }: { label: string; children: React.ReactNode; full?: boolean }) {
+  useUiLocale();
   return (
     <div className={`flex items-center gap-2 ${full ? 'sm:col-span-2' : ''}`}>
       <span className="w-20 shrink-0 text-xs uppercase tracking-wide text-muted-foreground">{label}</span>

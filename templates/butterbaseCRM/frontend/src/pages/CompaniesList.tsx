@@ -1,7 +1,8 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ObjectToolbar } from '@/components/toolbar/ObjectToolbar';
@@ -69,6 +70,7 @@ import type { Company } from '@/lib/types';
 type EditableField = 'name' | 'domain' | 'description' | 'linkedin_url' | 'industry' | 'location' | 'employee_count';
 
 export default function CompaniesList() {
+  useUiLocale();
   const { data: companies, isLoading } = useCompanies();
   const updateMut = useUpdateCompany();
   const navigate = useNavigate();
@@ -101,8 +103,8 @@ export default function CompaniesList() {
         } else {
           const n = Number(value);
           if (!Number.isFinite(n) || n < 0) {
-            toast.error('Employees must be a non-negative number');
-            throw new Error('invalid employee_count');
+            toast.error(uiText('Employees must be a non-negative number'));
+            throw new Error(uiText('invalid employee_count'));
           }
           next = Math.trunc(n);
         }
@@ -110,7 +112,7 @@ export default function CompaniesList() {
       const patch: Partial<Company> = { [field]: next } as Partial<Company>;
       await updateMut.mutateAsync({ id, patch });
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Update failed');
+      toast.error(e instanceof Error ? e.message : uiText('Update failed'));
       throw e;
     }
   }
@@ -119,13 +121,12 @@ export default function CompaniesList() {
     <div className="flex h-full flex-col">
       <div className="page-header">
         <div>
-          <p className="eyebrow mb-3">Section 01 · Accounts</p>
+          <p className="eyebrow mb-3">{uiText("Section 01 · Accounts")}</p>
           <h1 className="page-title">
-            Companies <em>&amp; counterparts</em>
+            {uiText("Companies ")}<em>{uiText("& counterparts")}</em>
           </h1>
           <p className="mt-3 font-editorial italic text-[15px] text-muted-foreground max-w-md">
-            Every organisation you’re building a relationship with — sorted, searchable, alive.
-          </p>
+            {uiText("Every organisation you’re building a relationship with — sorted, searchable, alive.")}</p>
         </div>
         <div className="flex items-center gap-3 self-end">
           <NewCompanyDialog />
@@ -139,9 +140,9 @@ export default function CompaniesList() {
           <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12" />)}</div>
         ) : rows.length === 0 ? (
           <div className="rounded-lg border border-dashed p-12 text-center">
-            <h3 className="font-medium">{(companies ?? []).length === 0 ? 'No companies yet' : 'No matches'}</h3>
+            <h3 className="font-medium">{(companies ?? []).length === 0 ? uiText('No companies yet') : uiText('No matches')}</h3>
             <p className="mt-1 text-sm text-muted-foreground">
-              {(companies ?? []).length === 0 ? 'Add your first company to get started.' : 'Loosen filters or clear them.'}
+              {(companies ?? []).length === 0 ? uiText('Add your first company to get started.') : uiText('Loosen filters or clear them.')}
             </p>
           </div>
         ) : (

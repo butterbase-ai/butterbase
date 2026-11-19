@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useState } from 'react'
 import { MessageSquare, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -77,6 +78,7 @@ function extractTargetId(channel: CommentChannel, raw: string): string {
 }
 
 export function NewSocialCommentDialog() {
+  useUiLocale();
   const [open, setOpen] = useState(false)
   const [channel, setChannel] = useState<CommentChannel>('reddit')
   const [targetRaw, setTargetRaw] = useState('')
@@ -97,12 +99,12 @@ export function NewSocialCommentDialog() {
       const target_post_id = extractTargetId(channel, targetRaw)
       const target_post_url = targetRaw.trim().startsWith('http') ? targetRaw.trim() : undefined
       await commentOnSocialPost({ workspace_id: ws, channel, target_post_id, target_post_url, body })
-      toast.success('Comment posted!')
+      toast.success(uiText('Comment posted!'))
       setOpen(false)
       setTargetRaw('')
       setBody('')
     } catch (err: any) {
-      toast.error(err?.message ?? 'Failed to post comment')
+      toast.error(err?.message ?? uiText('Failed to post comment'))
     } finally {
       setSubmitting(false)
     }
@@ -117,19 +119,18 @@ export function NewSocialCommentDialog() {
         onClick={() => setOpen(true)}
       >
         <MessageSquare className="h-3.5 w-3.5" />
-        New comment
-      </Button>
+        {uiText("New comment")}</Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>New comment</DialogTitle>
+            <DialogTitle>{uiText("New comment")}</DialogTitle>
           </DialogHeader>
 
           <form onSubmit={handleSubmit} className="space-y-4 pt-1">
             {/* Channel */}
             <div className="space-y-1.5">
-              <Label>Channel</Label>
+              <Label>{uiText("Channel")}</Label>
               <div className="flex gap-2">
                 {(['reddit', 'linkedin'] as CommentChannel[]).map((c) => (
                   <button
@@ -150,7 +151,7 @@ export function NewSocialCommentDialog() {
 
             {/* Target post */}
             <div className="space-y-1.5">
-              <Label>Post URL or ID</Label>
+              <Label>{uiText("Post URL or ID")}</Label>
               <Input
                 value={targetRaw}
                 onChange={(e) => setTargetRaw(e.target.value)}
@@ -160,8 +161,7 @@ export function NewSocialCommentDialog() {
               {channel === 'linkedin' && (() => {
                 if (!targetRaw.trim()) return (
                   <p className="text-[11px] text-gray-400 leading-relaxed">
-                    Best: use the ··· menu on the post → "Copy link" to get a /posts/…ugcPost… URL
-                  </p>
+                    {uiText("Best: use the ··· menu on the post → \"Copy link\" to get a /posts/…ugcPost… URL")}</p>
                 )
                 const parsed = parseLinkedInUrn(targetRaw)
                 return (
@@ -180,7 +180,7 @@ export function NewSocialCommentDialog() {
             {/* Body */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
-                <Label>Comment</Label>
+                <Label>{uiText("Comment")}</Label>
                 <span className={`text-xs ${bodyLen > limit ? 'text-red-500' : 'text-gray-400'}`}>
                   {bodyLen}/{limit}
                 </span>
@@ -189,21 +189,20 @@ export function NewSocialCommentDialog() {
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
                 rows={4}
-                placeholder="Write your comment…"
+                placeholder={uiText("Write your comment…")}
               />
             </div>
 
             <div className="flex justify-end gap-2 pt-1">
               <Button type="button" variant="ghost" size="sm" onClick={() => setOpen(false)}>
-                Cancel
-              </Button>
+                {uiText("Cancel")}</Button>
               <Button
                 type="submit"
                 size="sm"
                 disabled={submitting || !targetRaw.trim() || !body.trim() || bodyLen > limit || hasLinkedInWarning}
                 className="bg-foreground text-background hover:bg-foreground/85"
               >
-                {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Post comment'}
+                {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : uiText('Post comment')}
               </Button>
             </div>
           </form>

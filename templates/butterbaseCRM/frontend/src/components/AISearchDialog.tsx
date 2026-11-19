@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -34,6 +35,7 @@ const EXAMPLES = [
 ];
 
 export function AISearchDialog({ open, onOpenChange }: Props) {
+  useUiLocale();
   const ws = useCurrentWorkspaceId();
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
@@ -62,7 +64,7 @@ export function AISearchDialog({ open, onOpenChange }: Props) {
       if (error) throw error;
       setResult(data as SearchResult);
     } catch (e: any) {
-      setError(e?.message ?? 'Search failed');
+      setError(e?.message ?? uiText('Search failed'));
     } finally {
       setLoading(false);
     }
@@ -82,8 +84,7 @@ export function AISearchDialog({ open, onOpenChange }: Props) {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 font-display tracking-tight">
             <Sparkles className="h-4 w-4 text-butter" />
-            AI search
-          </DialogTitle>
+            {uiText("AI search")}</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
           <form
@@ -95,20 +96,19 @@ export function AISearchDialog({ open, onOpenChange }: Props) {
           >
             <Input
               autoFocus
-              placeholder="Ask in plain English — e.g. open deals over 10k"
+              placeholder={uiText("Ask in plain English — e.g. open deals over 10k")}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className="flex-1 h-10"
             />
             <Button type="submit" disabled={loading || !query.trim()} className="h-10 px-4 gap-2 bg-foreground text-background hover:bg-foreground/85">
               {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-              Search
-            </Button>
+              {uiText("Search")}</Button>
           </form>
 
           {!result && !loading && !error && (
             <div className="space-y-1.5">
-              <p className="eyebrow">Try</p>
+              <p className="eyebrow">{uiText("Try")}</p>
               <div className="flex flex-wrap gap-1.5">
                 {EXAMPLES.map((ex) => (
                   <button
@@ -142,8 +142,7 @@ export function AISearchDialog({ open, onOpenChange }: Props) {
             <div className="space-y-2 pt-2">
               <div className="flex items-center justify-between">
                 <p className="eyebrow">
-                  {result.count} {result.table} · {result.spec?.filters?.length ?? 0} filters
-                </p>
+                  {result.count} {result.table} · {result.spec?.filters?.length ?? 0} {uiText(" filters")}</p>
                 <div className="flex items-center gap-2">
                   {(result.table === 'people' || result.table === 'companies') && result.count > 0 && (
                     <SaveListFromSearchDialog
@@ -161,8 +160,7 @@ export function AISearchDialog({ open, onOpenChange }: Props) {
               </div>
               {result.count === 0 ? (
                 <p className="font-editorial italic text-[13px] text-muted-foreground py-4 text-center">
-                  No matches. Try a broader phrasing.
-                </p>
+                  {uiText("No matches. Try a broader phrasing.")}</p>
               ) : (
                 <ul className="max-h-72 overflow-auto divide-y divide-border border border-border rounded-md">
                   {result.rows.map((row) => (
@@ -185,6 +183,7 @@ export function AISearchDialog({ open, onOpenChange }: Props) {
 }
 
 function ResultRow({ row, table }: { row: any; table: 'companies' | 'people' | 'deals' }) {
+  useUiLocale();
   if (table === 'companies') {
     return (
       <div>

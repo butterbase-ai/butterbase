@@ -1,5 +1,6 @@
+import { uiText, uiMessage, useUiLocale } from "../i18n";
 import { useRef, useState } from 'react';
-import { formatDistanceToNowStrict } from 'date-fns';
+import { formatDistanceToNowStrict } from '@/i18n/date';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Trash2, Download, Upload, Loader2 } from 'lucide-react';
@@ -22,6 +23,7 @@ function formatBytes(bytes: number | null): string {
 }
 
 export function AttachmentsPanel({ entityType, entityId }: Props) {
+  useUiLocale();
   const { data: attachments } = useAttachments(entityType, entityId);
   const createMut = useCreateAttachment();
   const deleteMut = useDeleteAttachment();
@@ -46,9 +48,9 @@ export function AttachmentsPanel({ entityType, entityId }: Props) {
         content_type: file.type || null,
         size_bytes: file.size,
       });
-      toast.success('File uploaded');
+      toast.success(uiText('File uploaded'));
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Upload failed');
+      toast.error(e instanceof Error ? e.message : uiText('Upload failed'));
     } finally {
       setUploadingFile(null);
       if (fileInputRef.current) {
@@ -60,9 +62,9 @@ export function AttachmentsPanel({ entityType, entityId }: Props) {
   async function handleDelete(id: string) {
     try {
       await deleteMut.mutateAsync({ id, entity_type: entityType, entity_id: entityId });
-      toast.success('Attachment deleted');
+      toast.success(uiText('Attachment deleted'));
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Failed to delete attachment');
+      toast.error(e instanceof Error ? e.message : uiText('Failed to delete attachment'));
     }
   }
 
@@ -70,7 +72,7 @@ export function AttachmentsPanel({ entityType, entityId }: Props) {
     <div className="space-y-4">
       <Button onClick={() => fileInputRef.current?.click()} disabled={uploadingFile !== null} size="sm">
         {uploadingFile ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-        {uploadingFile ? `Uploading ${uploadingFile.name}...` : 'Upload file'}
+        {uploadingFile ? uiMessage`Uploading ${uploadingFile.name}...` : uiText('Upload file')}
       </Button>
       <input
         ref={fileInputRef}
@@ -82,7 +84,7 @@ export function AttachmentsPanel({ entityType, entityId }: Props) {
 
       {!attachments || attachments.length === 0 ? (
         <div className="rounded-lg border border-dashed p-8 text-center">
-          <p className="text-sm text-muted-foreground">No attachments yet</p>
+          <p className="text-sm text-muted-foreground">{uiText("No attachments yet")}</p>
         </div>
       ) : (
         <ScrollArea className="h-96">
@@ -104,6 +106,7 @@ function AttachmentRow({
   attachment: { id: string; object_id: string; filename: string; size_bytes: number | null; created_at: string };
   onDelete: (id: string) => void;
 }) {
+  useUiLocale();
   const { data: downloadUrl } = useDownloadUrl(attachment.object_id);
 
   return (

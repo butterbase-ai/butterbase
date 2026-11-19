@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../../i18n";
 import * as React from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from './dialog';
 import { Button } from './button';
@@ -29,6 +30,7 @@ export function confirm(opts: ConfirmOptions | string): Promise<boolean> {
 }
 
 export function ConfirmHost() {
+  useUiLocale();
   const [state, setState] = React.useState<ConfirmState | null>(null);
 
   React.useEffect(() => {
@@ -56,7 +58,7 @@ export function ConfirmHost() {
     <Dialog open={true} onOpenChange={(o) => { if (!o) close(false); }}>
       <DialogContent onClose={() => close(false)}>
         <DialogHeader>
-          <DialogTitle>{state.title ?? 'Are you sure?'}</DialogTitle>
+          <DialogTitle>{state.title ?? uiText('Are you sure?')}</DialogTitle>
           <DialogDescription>{state.description}</DialogDescription>
         </DialogHeader>
         <div className="mt-4 flex justify-end gap-2">

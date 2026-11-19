@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../i18n";
 import { useEffect, useRef, useState } from 'react';
 import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { bb } from '@/lib/butterbase';
@@ -5,6 +6,7 @@ import { bb } from '@/lib/butterbase';
 type GateState = 'loading' | 'authed' | 'guest' | 'denied';
 
 export function AuthGuard() {
+  useUiLocale();
   const [state, setState] = useState<GateState>('loading');
   const location = useLocation();
   const checkedFor = useRef<string | null>(null);
@@ -67,8 +69,7 @@ export function AuthGuard() {
   if (state === 'loading') {
     return (
       <div className="grid min-h-screen place-items-center text-sm text-muted-foreground">
-        Loading…
-      </div>
+        {uiText("Loading…")}</div>
     );
   }
   if (state === 'denied') {

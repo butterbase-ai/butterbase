@@ -1,3 +1,4 @@
+import { LanguagePicker, uiText, uiMessage, useUiLocale } from "../i18n";
 import { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -10,6 +11,7 @@ import { useWorkspaceStore } from '@/lib/workspace';
 const PENDING_TOKEN_KEY = 'crm.pending_invite_token';
 
 export default function AcceptInvite() {
+  useUiLocale();
   const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
   const setWorkspace = useWorkspaceStore((s) => s.setWorkspace);
@@ -20,7 +22,7 @@ export default function AcceptInvite() {
     let cancelled = false;
     (async () => {
       if (!token) {
-        setError('Missing token');
+        setError(uiText('Missing token'));
         setStatus('error');
         return;
       }
@@ -43,14 +45,14 @@ export default function AcceptInvite() {
         if (cancelled) return;
         if (fnErr) throw fnErr;
         const ws = (data as { workspace_id?: string; workspace_name?: string | null })?.workspace_id;
-        if (!ws) throw new Error('No workspace returned');
+        if (!ws) throw new Error(uiText('No workspace returned'));
         localStorage.removeItem(PENDING_TOKEN_KEY);
         setWorkspace(ws);
-        toast.success(`Joined ${(data as { workspace_name?: string | null })?.workspace_name ?? 'workspace'}`);
+        toast.success(uiMessage`Joined ${(data as { workspace_name?: string | null })?.workspace_name ?? uiText('workspace')}`);
         navigate('/companies', { replace: true });
       } catch (e) {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : 'Failed to accept invite');
+        setError(e instanceof Error ? e.message : uiText('Failed to accept invite'));
         setStatus('error');
       }
     })();
@@ -59,21 +61,21 @@ export default function AcceptInvite() {
 
   return (
     <div className="flex min-h-screen items-center justify-center p-6">
+      <div className="fixed bottom-4 right-4 z-50 rounded bg-background p-1"><LanguagePicker /></div>
       <Card className="w-full max-w-md p-6 space-y-4">
-        <h1 className="text-xl font-semibold">Workspace invite</h1>
+        <h1 className="text-xl font-semibold">{uiText("Workspace invite")}</h1>
         {status === 'checking' && <Skeleton className="h-6 w-3/4" />}
         {status === 'redirect_login' && (
           <p className="text-sm text-muted-foreground">
-            You need to sign in first. Redirecting to login — we'll bring you right back here.
-          </p>
+            {uiText("You need to sign in first. Redirecting to login — we'll bring you right back here.")}</p>
         )}
         {status === 'accepting' && (
-          <p className="text-sm text-muted-foreground">Accepting your invite...</p>
+          <p className="text-sm text-muted-foreground">{uiText("Accepting your invite...")}</p>
         )}
         {status === 'error' && (
           <div className="space-y-3">
             <p className="text-sm text-destructive">{error}</p>
-            <Button variant="outline" onClick={() => navigate('/')}>Go home</Button>
+            <Button variant="outline" onClick={() => navigate('/')}>{uiText("Go home")}</Button>
           </div>
         )}
       </Card>

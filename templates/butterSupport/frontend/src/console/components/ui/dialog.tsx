@@ -1,3 +1,4 @@
+import { uiText, useUiLocale } from "../../../i18n";
 import * as React from 'react';
 import { cn } from '@/console/lib/utils';
 import { X } from 'lucide-react';
@@ -11,6 +12,7 @@ export function Dialog({
   onOpenChange: (o: boolean) => void;
   children: React.ReactNode;
 }) {
+  useUiLocale();
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
@@ -29,6 +31,7 @@ export function DialogContent({
   children: React.ReactNode;
   onClose?: () => void;
 }) {
+  useUiLocale();
   return (
     <div
       className={cn(
@@ -38,7 +41,7 @@ export function DialogContent({
     >
       {onClose && (
         <button
-          aria-label="Close"
+          aria-label={uiText("Close")}
           onClick={onClose}
           className="absolute right-3 top-3 rounded-sm p-1 text-muted-foreground opacity-70 hover:opacity-100 hover:bg-muted transition-opacity"
         >
