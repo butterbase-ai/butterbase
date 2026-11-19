@@ -1,5 +1,7 @@
 # Security Policy
 
+[English](./SECURITY.md) · [日本語](./SECURITY.ja.md)
+
 ## Reporting a vulnerability
 
 Please report security issues privately to **security@butterbase.ai**. We aim to acknowledge within two business days.
