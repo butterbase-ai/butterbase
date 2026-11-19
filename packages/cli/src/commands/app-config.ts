@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import {
@@ -9,8 +10,8 @@ async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
   const current = await getCurrentAppId();
   if (!current) {
-    console.log(chalk.red('No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.log(chalk.red(text('No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
   return current;
@@ -39,16 +40,16 @@ export async function appCorsCommand(options: {
   if (options.allowedHeader) body.allowedHeaders = options.allowedHeader;
   if (options.allowCredentials !== undefined) body.allowCredentials = options.allowCredentials;
   if (Object.keys(body).length === 0) {
-    console.log(chalk.yellow('Nothing to update — pass at least one of --allowed-origin, --allowed-method, --allowed-header, --allow-credentials.'));
+    console.log(chalk.yellow(text('Nothing to update — pass at least one of --allowed-origin, --allowed-method, --allowed-header, --allow-credentials.')));
     process.exit(1);
   }
-  const spinner = ora('Updating CORS...').start();
+  const spinner = ora(text('Updating CORS...')).start();
   try {
     const r = await updateCors(appId, body);
-    spinner.succeed('CORS updated');
+    spinner.succeed(text('CORS updated'));
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('CORS update failed');
+    spinner.fail(text('CORS update failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -62,16 +63,16 @@ export async function appJwtCommand(options: {
   if (options.accessTokenTtl) body.accessTokenTtl = options.accessTokenTtl;
   if (options.refreshTokenTtlDays !== undefined) body.refreshTokenTtlDays = options.refreshTokenTtlDays;
   if (Object.keys(body).length === 0) {
-    console.log(chalk.yellow('Nothing to update — pass --access-token-ttl or --refresh-token-ttl-days.'));
+    console.log(chalk.yellow(text('Nothing to update — pass --access-token-ttl or --refresh-token-ttl-days.')));
     process.exit(1);
   }
-  const spinner = ora('Updating JWT config...').start();
+  const spinner = ora(text('Updating JWT config...')).start();
   try {
     const r = await updateJwt(appId, body);
-    spinner.succeed('JWT config updated');
+    spinner.succeed(text('JWT config updated'));
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('JWT update failed');
+    spinner.fail(text('JWT update failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -86,16 +87,16 @@ export async function appStorageCommand(options: {
   if (options.maxFileSizeMb !== undefined) body.maxFileSizeMb = options.maxFileSizeMb;
   if (options.allowedContentType) body.allowedContentTypes = options.allowedContentType;
   if (Object.keys(body).length === 0) {
-    console.log(chalk.yellow('Nothing to update — pass --public-read, --max-file-size-mb, or --allowed-content-type.'));
+    console.log(chalk.yellow(text('Nothing to update — pass --public-read, --max-file-size-mb, or --allowed-content-type.')));
     process.exit(1);
   }
-  const spinner = ora('Updating storage config...').start();
+  const spinner = ora(text('Updating storage config...')).start();
   try {
     const r = await updateStorageConfig(appId, body as { publicReadEnabled?: boolean });
-    spinner.succeed('Storage config updated');
+    spinner.succeed(text('Storage config updated'));
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('Storage update failed');
+    spinner.fail(text('Storage update failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -103,17 +104,17 @@ export async function appStorageCommand(options: {
 
 export async function appAccessModeCommand(mode: string, options: { app?: string; json?: boolean }) {
   if (mode !== 'public' && mode !== 'authenticated') {
-    console.log(chalk.red(`Invalid mode '${mode}'. Must be 'public' or 'authenticated'.`));
+    console.log(chalk.red(msg`Invalid mode '${mode}'. Must be 'public' or 'authenticated'.`));
     process.exit(1);
   }
   const appId = await requireAppId(options.app);
-  const spinner = ora(`Setting access-mode to ${mode}...`).start();
+  const spinner = ora(msg`Setting access-mode to ${mode}...`).start();
   try {
     const r = await updateAccessMode(appId, mode);
-    spinner.succeed(`Access mode = ${mode}`);
+    spinner.succeed(msg`Access mode = ${mode}`);
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('Access-mode update failed');
+    spinner.fail(text('Access-mode update failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -132,17 +133,17 @@ export async function appSecureCommand(options: {
   }
   if (options.accessMode) {
     if (options.accessMode !== 'public' && options.accessMode !== 'authenticated') {
-      console.log(chalk.red(`Invalid --access-mode '${options.accessMode}'`));
+      console.log(chalk.red(msg`Invalid --access-mode '${options.accessMode}'`));
       process.exit(1);
     }
   }
-  const spinner = ora('Securing app...').start();
+  const spinner = ora(text('Securing app...')).start();
   try {
     const r = await secureApp(appId, body);
-    spinner.succeed('App secured');
+    spinner.succeed(text('App secured'));
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('Secure failed');
+    spinner.fail(text('Secure failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }

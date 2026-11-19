@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import { createClient } from '@butterbase/sdk';
@@ -10,8 +11,8 @@ async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
   const current = await getCurrentAppId();
   if (!current) {
-    console.log(chalk.red('No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.log(chalk.red(text('No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
   return current;
@@ -35,7 +36,7 @@ function metaFooter(meta: PeopleMeta): string {
     `$${meta.usdCharged.toFixed(5)}`,
   ];
   if (meta.cached !== undefined) {
-    parts.push(meta.cached ? chalk.green('cached') : 'live fetch');
+    parts.push(meta.cached ? chalk.green(text('cached')) : text('live fetch'));
   }
   return chalk.gray(parts.join(' · '));
 }
@@ -58,7 +59,7 @@ export async function peopleSearchPersonCommand(
   options: { app?: string; filters?: string; limit?: number; json?: boolean },
 ): Promise<void> {
   const appId = await requireAppId(options.app);
-  const spinner = ora('Searching for people…').start();
+  const spinner = ora(text('Searching for people…')).start();
 
   try {
     const people = await buildPeopleClient(appId);
@@ -71,7 +72,7 @@ export async function peopleSearchPersonCommand(
         req = { ...parsed, pageSize: options.limit ?? 10 };
         if (query) req.query = query;
       } catch {
-        spinner.fail('--filters is not valid JSON');
+        spinner.fail(text('--filters is not valid JSON'));
         process.exit(1);
       }
     }
@@ -86,15 +87,15 @@ export async function peopleSearchPersonCommand(
 
     const results = data.results ?? [];
     if (results.length === 0) {
-      console.log(chalk.gray('No results found.'));
+      console.log(chalk.gray(text('No results found.')));
       return;
     }
 
     console.log('');
     console.log(
-      chalk.bold(pad('Name', 24)) +
-      chalk.bold(pad('Headline', 32)) +
-      chalk.bold(pad('Location', 22)) +
+      chalk.bold(pad(text('Name'), 24)) +
+      chalk.bold(pad(text('Headline'), 32)) +
+      chalk.bold(pad(text('Location'), 22)) +
       chalk.bold('LinkedIn URL'),
     );
     console.log(chalk.gray('─'.repeat(110)));
@@ -113,12 +114,12 @@ export async function peopleSearchPersonCommand(
 
     console.log('');
     console.log(
-      chalk.gray(`Returned ${results.length} result${results.length === 1 ? '' : 's'}`) +
+      chalk.gray(msg`Returned ${results.length} result${results.length === 1 ? '' : 's'}`) +
       chalk.gray(' · ') +
       metaFooter(meta),
     );
   } catch (e) {
-    spinner.fail('Search failed');
+    spinner.fail(text('Search failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -131,7 +132,7 @@ export async function peopleSearchCompanyCommand(
   options: { app?: string; filters?: string; limit?: number; json?: boolean },
 ): Promise<void> {
   const appId = await requireAppId(options.app);
-  const spinner = ora('Searching for companies…').start();
+  const spinner = ora(text('Searching for companies…')).start();
 
   try {
     const people = await buildPeopleClient(appId);
@@ -144,7 +145,7 @@ export async function peopleSearchCompanyCommand(
         req = { ...parsed, pageSize: options.limit ?? 10 };
         if (query) req.query = query;
       } catch {
-        spinner.fail('--filters is not valid JSON');
+        spinner.fail(text('--filters is not valid JSON'));
         process.exit(1);
       }
     }
@@ -159,16 +160,16 @@ export async function peopleSearchCompanyCommand(
 
     const results = data.results ?? [];
     if (results.length === 0) {
-      console.log(chalk.gray('No results found.'));
+      console.log(chalk.gray(text('No results found.')));
       return;
     }
 
     console.log('');
     console.log(
-      chalk.bold(pad('Name', 28)) +
+      chalk.bold(pad(text('Name'), 28)) +
       chalk.bold(pad('LinkedIn URL', 48)) +
-      chalk.bold(pad('Industry', 28)) +
-      chalk.bold('Employees'),
+      chalk.bold(pad(text('Industry'), 28)) +
+      chalk.bold(text('Employees')),
     );
     console.log(chalk.gray('─'.repeat(116)));
 
@@ -187,12 +188,12 @@ export async function peopleSearchCompanyCommand(
 
     console.log('');
     console.log(
-      chalk.gray(`Returned ${results.length} result${results.length === 1 ? '' : 's'}`) +
+      chalk.gray(msg`Returned ${results.length} result${results.length === 1 ? '' : 's'}`) +
       chalk.gray(' · ') +
       metaFooter(meta),
     );
   } catch (e) {
-    spinner.fail('Search failed');
+    spinner.fail(text('Search failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -205,7 +206,7 @@ export async function peopleProfileCommand(
   options: { app?: string; live?: boolean; json?: boolean },
 ): Promise<void> {
   const appId = await requireAppId(options.app);
-  const spinner = ora('Fetching profile…').start();
+  const spinner = ora(text('Fetching profile…')).start();
 
   try {
     const people = await buildPeopleClient(appId);
@@ -221,7 +222,7 @@ export async function peopleProfileCommand(
     }
 
     if (!data) {
-      console.log(chalk.gray('Profile not found.'));
+      console.log(chalk.gray(text('Profile not found.')));
       return;
     }
 
@@ -238,7 +239,7 @@ export async function peopleProfileCommand(
     // Experiences (top 3)
     const exps = Array.isArray(p.experiences) ? p.experiences.slice(0, 3) : [];
     if (exps.length > 0) {
-      console.log(chalk.bold('  Experience'));
+      console.log(chalk.bold(text('  Experience')));
       for (const ex of exps) {
         const e = ex as any;
         const title = e.title ?? e.jobTitle ?? '—';
@@ -247,7 +248,7 @@ export async function peopleProfileCommand(
           .map((d: any) => (d ? (typeof d === 'object' ? `${d.year ?? '?'}` : String(d)) : null))
           .filter(Boolean)
           .join(' – ') || '';
-        console.log(`    ${chalk.cyan(title)}${company ? ` at ${company}` : ''}${dates ? chalk.gray('  ' + dates) : ''}`);
+        console.log(`    ${chalk.cyan(title)}${company ? msg` at ${company}` : ''}${dates ? chalk.gray('  ' + dates) : ''}`);
       }
       console.log('');
     }
@@ -255,7 +256,7 @@ export async function peopleProfileCommand(
     // Education
     const edu = Array.isArray(p.education) ? p.education : [];
     if (edu.length > 0) {
-      console.log(chalk.bold('  Education'));
+      console.log(chalk.bold(text('  Education')));
       for (const ed of edu) {
         const e = ed as any;
         const school = e.school ?? e.schoolName ?? '—';
@@ -268,7 +269,7 @@ export async function peopleProfileCommand(
     console.log('  ' + metaFooter(meta));
     console.log('');
   } catch (e) {
-    spinner.fail('Profile fetch failed');
+    spinner.fail(text('Profile fetch failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -281,7 +282,7 @@ export async function peopleEmailLookupCommand(
   options: { app?: string; json?: boolean },
 ): Promise<void> {
   const appId = await requireAppId(options.app);
-  const spinner = ora('Queuing email lookup…').start();
+  const spinner = ora(text('Queuing email lookup…')).start();
 
   try {
     const people = await buildPeopleClient(appId);
@@ -294,14 +295,14 @@ export async function peopleEmailLookupCommand(
     }
 
     console.log('');
-    console.log(chalk.green('Email lookup queued.'));
-    console.log(`  Lookup ID: ${chalk.cyan(data.lookupId)}`);
-    console.log(`  Status:    ${data.status}`);
+    console.log(chalk.green(text('Email lookup queued.')));
+    console.log(msg`  Lookup ID: ${chalk.cyan(data.lookupId)}`);
+    console.log(msg`  Status:    ${data.status}`);
     console.log('');
-    console.log(chalk.gray(`Poll for results with: butterbase people email-status ${data.lookupId}`));
+    console.log(chalk.gray(msg`Poll for results with: butterbase people email-status ${data.lookupId}`));
     console.log('  ' + metaFooter(meta));
   } catch (e) {
-    spinner.fail('Email lookup failed');
+    spinner.fail(text('Email lookup failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -323,7 +324,7 @@ export async function peopleEmailStatusCommand(
     const people = await buildPeopleClient(appId);
 
     if (!options.watch) {
-      const spinner = ora('Fetching email lookup status…').start();
+      const spinner = ora(text('Fetching email lookup status…')).start();
       const { data, meta } = await people.getEmailLookup(lookupId);
       spinner.stop();
 
@@ -333,15 +334,15 @@ export async function peopleEmailStatusCommand(
       }
 
       console.log('');
-      console.log(`  Status:           ${chalk.cyan(data.status)}`);
-      if (data.email) console.log(`  Email:            ${chalk.green(data.email)}`);
-      if (data.creditsConsumed != null) console.log(`  Credits consumed: ${data.creditsConsumed}`);
+      console.log(msg`  Status:           ${chalk.cyan(data.status)}`);
+      if (data.email) console.log(msg`  Email:            ${chalk.green(data.email)}`);
+      if (data.creditsConsumed != null) console.log(msg`  Credits consumed: ${data.creditsConsumed}`);
       console.log('');
       return;
     }
 
     // Watch mode: poll until terminal status or timeout
-    console.log(chalk.gray(`Watching lookup ${lookupId} (every ${WATCH_POLL_INTERVAL_MS / 1000}s, max ${WATCH_MAX_POLLS * WATCH_POLL_INTERVAL_MS / 60_000} min)…`));
+    console.log(chalk.gray(msg`Watching lookup ${lookupId} (every ${WATCH_POLL_INTERVAL_MS / 1000}s, max ${WATCH_MAX_POLLS * WATCH_POLL_INTERVAL_MS / 60_000} min)…`));
     let lastStatus = '';
 
     for (let i = 0; i < WATCH_MAX_POLLS; i++) {
@@ -369,7 +370,7 @@ export async function peopleEmailStatusCommand(
       }
     }
 
-    console.log(chalk.yellow('Watch timed out after 5 minutes. Run the command again to check status.'));
+    console.log(chalk.yellow(text('Watch timed out after 5 minutes. Run the command again to check status.')));
     process.exit(1);
   } catch (e) {
     console.error(chalk.red((e as Error).message));

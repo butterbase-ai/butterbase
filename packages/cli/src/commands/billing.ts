@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import {
@@ -11,7 +12,7 @@ import {
 } from '../lib/api-client.js';
 
 export async function billingStatusCommand(options: { json?: boolean }) {
-  const spinner = ora('Fetching billing status...').start();
+  const spinner = ora(text('Fetching billing status...')).start();
   try {
     const result: any = await getBilling();
     spinner.stop();
@@ -20,24 +21,24 @@ export async function billingStatusCommand(options: { json?: boolean }) {
       return;
     }
     console.log('');
-    console.log(`  Plan:       ${chalk.cyan(result.plan?.name ?? result.plan ?? '—')}`);
-    console.log(`  Status:     ${result.status ? chalk.green(result.status) : chalk.gray('—')}`);
+    console.log(msg`  Plan:       ${chalk.cyan(result.plan?.name ?? result.plan ?? '—')}`);
+    console.log(msg`  Status:     ${result.status ? chalk.green(result.status) : chalk.gray('—')}`);
     if (result.current_period_end) {
-      console.log(`  Renews:     ${chalk.gray(result.current_period_end)}`);
+      console.log(msg`  Renews:     ${chalk.gray(result.current_period_end)}`);
     }
     if (result.spending_cap !== undefined) {
-      console.log(`  Spend cap:  ${chalk.yellow(`$${result.spending_cap}`)}`);
+      console.log(msg`  Spend cap:  ${chalk.yellow(`$${result.spending_cap}`)}`);
     }
     console.log('');
   } catch (err) {
-    spinner.fail('Failed to fetch billing status');
+    spinner.fail(text('Failed to fetch billing status'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }
 }
 
 export async function billingPortalCommand(options: { json?: boolean }) {
-  const spinner = ora('Creating billing portal session...').start();
+  const spinner = ora(text('Creating billing portal session...')).start();
   try {
     const result: any = await createBillingPortal();
     spinner.stop();
@@ -46,11 +47,11 @@ export async function billingPortalCommand(options: { json?: boolean }) {
       return;
     }
     console.log('');
-    console.log(`  Portal URL: ${chalk.cyan(result.url)}`);
-    console.log(chalk.gray('  Open the URL above in your browser to manage your billing.'));
+    console.log(msg`  Portal URL: ${chalk.cyan(result.url)}`);
+    console.log(chalk.gray(text('  Open the URL above in your browser to manage your billing.')));
     console.log('');
   } catch (err) {
-    spinner.fail('Failed to create billing portal session');
+    spinner.fail(text('Failed to create billing portal session'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }
@@ -59,10 +60,10 @@ export async function billingPortalCommand(options: { json?: boolean }) {
 export async function billingTopupCommand(amount: string, options: { json?: boolean }) {
   const parsed = parseFloat(amount);
   if (isNaN(parsed) || parsed <= 0) {
-    console.error(chalk.red('amount must be a positive number'));
+    console.error(chalk.red(text('amount must be a positive number')));
     process.exit(1);
   }
-  const spinner = ora(`Adding $${parsed} credit...`).start();
+  const spinner = ora(msg`Adding $${parsed} credit...`).start();
   try {
     const result: any = await createTopup(parsed);
     spinner.stop();
@@ -71,18 +72,18 @@ export async function billingTopupCommand(amount: string, options: { json?: bool
       return;
     }
     console.log('');
-    console.log(chalk.green(`  ✓ Top-up initiated for $${parsed}`));
-    if (result.url) console.log(`  URL: ${chalk.cyan(result.url)}`);
+    console.log(chalk.green(msg`  ✓ Top-up initiated for $${parsed}`));
+    if (result.url) console.log(msg`  URL: ${chalk.cyan(result.url)}`);
     console.log('');
   } catch (err) {
-    spinner.fail('Top-up failed');
+    spinner.fail(text('Top-up failed'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }
 }
 
 export async function billingCapGetCommand(options: { json?: boolean }) {
-  const spinner = ora('Fetching spending cap...').start();
+  const spinner = ora(text('Fetching spending cap...')).start();
   try {
     const result: any = await getSpendingCap();
     spinner.stop();
@@ -91,10 +92,10 @@ export async function billingCapGetCommand(options: { json?: boolean }) {
       return;
     }
     console.log('');
-    console.log(`  Spending cap: ${chalk.yellow(`$${result.spending_cap ?? result.cap ?? '—'}`)}`);
+    console.log(msg`  Spending cap: ${chalk.yellow(`$${result.spending_cap ?? result.cap ?? '—'}`)}`);
     console.log('');
   } catch (err) {
-    spinner.fail('Failed to fetch spending cap');
+    spinner.fail(text('Failed to fetch spending cap'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }
@@ -105,12 +106,12 @@ export async function billingCapRaiseCommand(options: { raiseBy?: string; json?:
   if (options.raiseBy !== undefined) {
     const v = parseFloat(options.raiseBy);
     if (isNaN(v) || v <= 0) {
-      console.error(chalk.red('--raise-by must be a positive number'));
+      console.error(chalk.red(text('--raise-by must be a positive number')));
       process.exit(1);
     }
     body.raiseBy = v;
   }
-  const spinner = ora('Raising spending cap...').start();
+  const spinner = ora(text('Raising spending cap...')).start();
   try {
     const result: any = await raiseSpendingCap(body);
     spinner.stop();
@@ -119,20 +120,20 @@ export async function billingCapRaiseCommand(options: { raiseBy?: string; json?:
       return;
     }
     console.log('');
-    console.log(chalk.green(`  ✓ Spending cap updated`));
+    console.log(chalk.green(text(`  ✓ Spending cap updated`)));
     if (result.spending_cap !== undefined) {
-      console.log(`  New cap: ${chalk.yellow(`$${result.spending_cap}`)}`);
+      console.log(msg`  New cap: ${chalk.yellow(`$${result.spending_cap}`)}`);
     }
     console.log('');
   } catch (err) {
-    spinner.fail('Failed to raise spending cap');
+    spinner.fail(text('Failed to raise spending cap'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }
 }
 
 export async function billingPlansCommand(options: { json?: boolean }) {
-  const spinner = ora('Fetching plans...').start();
+  const spinner = ora(text('Fetching plans...')).start();
   try {
     const result: any = await listBillingPlans();
     spinner.stop();
@@ -142,7 +143,7 @@ export async function billingPlansCommand(options: { json?: boolean }) {
     }
     const plans = result.plans ?? result ?? [];
     if (!Array.isArray(plans) || plans.length === 0) {
-      console.log(chalk.gray('No plans available.'));
+      console.log(chalk.gray(text('No plans available.')));
       return;
     }
     console.log('');
@@ -151,7 +152,7 @@ export async function billingPlansCommand(options: { json?: boolean }) {
     }
     console.log('');
   } catch (err) {
-    spinner.fail('Failed to fetch plans');
+    spinner.fail(text('Failed to fetch plans'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }
@@ -163,7 +164,7 @@ export async function billingUsageCommand(options: {
   meter?: string;
   json?: boolean;
 }) {
-  const spinner = ora('Fetching usage...').start();
+  const spinner = ora(text('Fetching usage...')).start();
   try {
     const result: any = await getUsage({ startDate: options.start, endDate: options.end, meterType: options.meter });
     spinner.stop();
@@ -173,7 +174,7 @@ export async function billingUsageCommand(options: {
     }
     const items = result.usage ?? result ?? [];
     if (Array.isArray(items) && items.length === 0) {
-      console.log(chalk.gray('No usage data for the selected period.'));
+      console.log(chalk.gray(text('No usage data for the selected period.')));
       return;
     }
     console.log('');
@@ -186,7 +187,7 @@ export async function billingUsageCommand(options: {
     }
     console.log('');
   } catch (err) {
-    spinner.fail('Failed to fetch usage');
+    spinner.fail(text('Failed to fetch usage'));
     console.error(chalk.red((err as Error).message));
     process.exit(1);
   }

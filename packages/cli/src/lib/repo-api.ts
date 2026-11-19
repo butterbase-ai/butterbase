@@ -1,3 +1,4 @@
+import { msg } from './i18n.js';
 // submodules/butterbase-oss/packages/cli/src/lib/repo-api.ts
 import { apiGet, apiPost, apiDelete } from './api-client.js';
 
@@ -110,14 +111,14 @@ export async function uploadBlob(presignedUrl: string, body: Buffer): Promise<vo
   });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
-    throw new Error(`Presigned PUT failed (${res.status}): ${txt.slice(0, 300)}`);
+    throw new Error(msg`Presigned PUT failed (${res.status}): ${txt.slice(0, 300)}`);
   }
 }
 
 /** Fetch a blob via the presigned GET URL returned by getBlobUrl. */
 export async function downloadBlob(presignedUrl: string): Promise<Buffer> {
   const res = await fetch(presignedUrl);
-  if (!res.ok) throw new Error(`Presigned GET failed (${res.status})`);
+  if (!res.ok) throw new Error(msg`Presigned GET failed (${res.status})`);
   const ab = await res.arrayBuffer();
   return Buffer.from(ab);
 }

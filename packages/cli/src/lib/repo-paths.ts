@@ -1,3 +1,4 @@
+import { text, msg } from './i18n.js';
 // submodules/butterbase-oss/packages/cli/src/lib/repo-paths.ts
 
 /**
@@ -15,17 +16,17 @@ export class PathError extends Error {
 }
 
 export function validateRelativePath(p: string): void {
-  if (p.length === 0) throw new PathError('repo_path_empty', 'Path is empty');
+  if (p.length === 0) throw new PathError('repo_path_empty', text('Path is empty'));
   if (Buffer.byteLength(p, 'utf8') > REPO_MAX_PATH_BYTES) {
-    throw new PathError('repo_path_too_long', `Path exceeds ${REPO_MAX_PATH_BYTES} bytes: ${p}`);
+    throw new PathError('repo_path_too_long', msg`Path exceeds ${REPO_MAX_PATH_BYTES} bytes: ${p}`);
   }
-  if (p.startsWith('/')) throw new PathError('repo_path_absolute', `Path is absolute: ${p}`);
-  if (p.includes('\\')) throw new PathError('repo_path_backslash', `Path contains backslash: ${p}`);
-  if (p.includes('\0')) throw new PathError('repo_path_null_byte', `Path contains null byte`);
+  if (p.startsWith('/')) throw new PathError('repo_path_absolute', msg`Path is absolute: ${p}`);
+  if (p.includes('\\')) throw new PathError('repo_path_backslash', msg`Path contains backslash: ${p}`);
+  if (p.includes('\0')) throw new PathError('repo_path_null_byte', text(`Path contains null byte`));
   for (const seg of p.split('/')) {
-    if (seg === '..') throw new PathError('repo_path_traversal', `Path contains '..': ${p}`);
-    if (seg === '.') throw new PathError('repo_path_dot_segment', `Path contains '.' segment: ${p}`);
-    if (seg.length === 0) throw new PathError('repo_path_empty_segment', `Path has empty segment: ${p}`);
+    if (seg === '..') throw new PathError('repo_path_traversal', msg`Path contains '..': ${p}`);
+    if (seg === '.') throw new PathError('repo_path_dot_segment', msg`Path contains '.' segment: ${p}`);
+    if (seg.length === 0) throw new PathError('repo_path_empty_segment', msg`Path has empty segment: ${p}`);
   }
 }
 

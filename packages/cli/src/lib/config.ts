@@ -1,3 +1,4 @@
+import { msg } from './i18n.js';
 import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
@@ -96,7 +97,7 @@ function warnIfLocalEndpoint(endpoint: string | undefined): void {
       localhostWarned = true;
       // eslint-disable-next-line no-console
       console.warn(
-        `[butterbase] endpoint is ${endpoint} (local). Run \`butterbase config set endpoint ${DEFAULT_ENDPOINT}\` to use the hosted platform.`
+        msg`[butterbase] endpoint is ${endpoint} (local). Run \`butterbase config set endpoint ${DEFAULT_ENDPOINT}\` to use the hosted platform.`
       );
     }
   } catch {}

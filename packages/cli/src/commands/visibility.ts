@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 // submodules/butterbase-oss/packages/cli/src/commands/visibility.ts
 import chalk from 'chalk';
 import { setAppVisibility } from '../lib/api-client.js';
@@ -9,15 +10,15 @@ export async function visibilityCommand(
 ) {
   const appId = opts.app ?? (await getCurrentAppId());
   if (!appId) {
-    console.log(chalk.red('✗ no app — use `butterbase apps use <id>` or --app'));
+    console.log(chalk.red(text('✗ no app — use `butterbase apps use <id>` or --app')));
     process.exit(1);
   }
   if (mode !== 'public' && mode !== 'private') {
-    console.log(chalk.red(`✗ visibility must be "public" or "private" (got ${mode})`));
+    console.log(chalk.red(msg`✗ visibility must be "public" or "private" (got ${mode})`));
     process.exit(1);
   }
   if (opts.listed && opts.unlisted) {
-    console.log(chalk.red('✗ --listed and --unlisted are mutually exclusive'));
+    console.log(chalk.red(text('✗ --listed and --unlisted are mutually exclusive')));
     process.exit(1);
   }
   const body: { visibility: 'public' | 'private'; listed?: boolean } = { visibility: mode };
@@ -28,6 +29,6 @@ export async function visibilityCommand(
   if (opts.json) {
     console.log(JSON.stringify(res, null, 2));
   } else {
-    console.log(chalk.green(`✓ ${appId} is now ${mode}${body.listed === false ? ' (unlisted)' : ''}`));
+    console.log(chalk.green(msg`✓ ${appId} is now ${mode}${body.listed === false ? text(' (unlisted)') : ''}`));
   }
 }

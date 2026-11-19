@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import fs from 'fs-extra';
@@ -17,8 +18,8 @@ async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
   const currentAppId = await getCurrentAppId();
   if (!currentAppId) {
-    console.error(chalk.red('No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.error(chalk.red(text('No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
   return currentAppId;
@@ -74,40 +75,40 @@ export async function deployEdgeSsrCommand(
   const resolvedDir = directory ?? options.from ?? detectEdgeSsrDirectory();
 
   if (!resolvedDir) {
-    console.error(chalk.red(MISSING_WORKER_MESSAGE));
+    console.error(chalk.red(text(MISSING_WORKER_MESSAGE)));
     process.exit(1);
   }
 
   // Pre-upload validation: directory must exist
   if (!fs.existsSync(resolvedDir)) {
-    console.error(chalk.red(`Directory not found: ${resolvedDir}`));
+    console.error(chalk.red(msg`Directory not found: ${resolvedDir}`));
     process.exit(1);
   }
 
   // Pre-upload validation: must contain _worker.js (file or _worker.js/index.js)
   if (!hasWorkerJs(resolvedDir)) {
-    console.error(chalk.red(MISSING_WORKER_MESSAGE));
-    console.error(chalk.gray(`Checked: ${path.resolve(resolvedDir)}`));
+    console.error(chalk.red(text(MISSING_WORKER_MESSAGE)));
+    console.error(chalk.gray(msg`Checked: ${path.resolve(resolvedDir)}`));
     process.exit(1);
   }
 
   const framework = options.framework ?? 'nextjs-edge';
-  const spinner = ora('Creating Edge SSR deployment...').start();
+  const spinner = ora(text('Creating Edge SSR deployment...')).start();
 
   try {
     // Step 1: Create deployment (get upload URL)
     const deployment = await createEdgeSsrDeployment(appId, framework);
 
     // Step 2: Zip the directory
-    spinner.text = 'Zipping build directory...';
+    spinner.text = text('Zipping build directory...');
     const zipBuffer = zipDirectory(resolvedDir);
 
     // Step 3: Upload zip to presigned URL
-    spinner.text = 'Uploading...';
+    spinner.text = text('Uploading...');
     await uploadBinary(deployment.uploadUrl, zipBuffer, 'application/zip');
 
     // Step 4: Start the deployment pipeline
-    spinner.text = 'Deploying...';
+    spinner.text = text('Deploying...');
     await startEdgeSsrDeployment(appId, deployment.id);
 
     // Step 5: Poll until terminal state (5 s × 60 = 5 min max)
@@ -119,7 +120,7 @@ export async function deployEdgeSsrCommand(
 
     while (['BUILDING', 'UPLOADING', 'WAITING'].includes(status) && attempts < 60) {
       await new Promise((r) => setTimeout(r, 5000));
-      spinner.text = `Deploying... (${attempts * 5}s)`;
+      spinner.text = msg`Deploying... (${attempts * 5}s)`;
 
       const result = await getEdgeSsrDeployment(appId, deployment.id);
       status = result.status;
@@ -130,7 +131,7 @@ export async function deployEdgeSsrCommand(
     }
 
     if (status === 'READY') {
-      spinner.succeed('Deployed!');
+      spinner.succeed(text('Deployed!'));
 
       if (options.json) {
         console.log(
@@ -144,24 +145,24 @@ export async function deployEdgeSsrCommand(
       }
 
       console.log('');
-      console.log(`  URL:       ${chalk.green(url)}`);
-      console.log(`  Framework: ${framework}`);
-      if (fileCount) console.log(`  Files:     ${fileCount}`);
-      if (totalSize) console.log(`  Size:      ${(totalSize / 1024 / 1024).toFixed(1)} MB`);
+      console.log(msg`  URL:       ${chalk.green(url)}`);
+      console.log(msg`  Framework: ${framework}`);
+      if (fileCount) console.log(msg`  Files:     ${fileCount}`);
+      if (totalSize) console.log(msg`  Size:      ${(totalSize / 1024 / 1024).toFixed(1)} MB`);
     } else if (status === 'ERROR') {
-      spinner.fail('Deployment failed');
+      spinner.fail(text('Deployment failed'));
       const result = await getEdgeSsrDeployment(appId, deployment.id);
-      console.error(chalk.red(result.error ?? 'Unknown error'));
+      console.error(chalk.red(result.error ?? text('Unknown error')));
       process.exit(1);
     } else if (status === 'CANCELED' || status === 'SUPERSEDED') {
-      spinner.warn(`Deployment ${status.toLowerCase()} (id: ${deployment.id})`);
+      spinner.warn(msg`Deployment ${status.toLowerCase()} (id: ${deployment.id})`);
     } else {
       // Timeout — attempts exhausted while still in a transient state
-      spinner.warn(`Deployment timed out (status: ${status})`);
-      console.log(chalk.gray(`Check status: butterbase status --app ${appId}`));
+      spinner.warn(msg`Deployment timed out (status: ${status})`);
+      console.log(chalk.gray(msg`Check status: butterbase status --app ${appId}`));
     }
   } catch (error) {
-    spinner.fail('Deployment failed');
+    spinner.fail(text('Deployment failed'));
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }

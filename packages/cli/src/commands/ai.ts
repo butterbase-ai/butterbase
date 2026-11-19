@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import {
@@ -9,8 +10,8 @@ async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
   const current = await getCurrentAppId();
   if (!current) {
-    console.log(chalk.red('No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.log(chalk.red(text('No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
   return current;
@@ -21,7 +22,7 @@ export async function aiChatCommand(prompt: string, options: { app?: string; mod
   const messages: any[] = [];
   if (options.system) messages.push({ role: 'system', content: options.system });
   messages.push({ role: 'user', content: prompt });
-  const spinner = ora('Calling AI...').start();
+  const spinner = ora(text('Calling AI...')).start();
   try {
     const r: any = await aiChat(appId, {
       messages, stream: false,
@@ -34,7 +35,7 @@ export async function aiChatCommand(prompt: string, options: { app?: string; mod
     const content = r.choices?.[0]?.message?.content;
     console.log(content ?? JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('AI request failed');
+    spinner.fail(text('AI request failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -44,14 +45,14 @@ export async function aiEmbedCommand(input: string[], options: { app?: string; m
   const appId = await requireAppId(options.app);
   const body: any = { input: input.length === 1 ? input[0] : input };
   if (options.model) body.model = options.model;
-  const spinner = ora('Embedding...').start();
+  const spinner = ora(text('Embedding...')).start();
   try {
     const r: any = await aiEmbed(appId, body);
     spinner.stop();
     if (options.json) return console.log(JSON.stringify(r, null, 2));
-    console.log(`${r.data?.length ?? 0} embedding(s)  model=${r.model ?? '?'}  tokens=${r.usage?.total_tokens ?? '?'}`);
+    console.log(msg`${r.data?.length ?? 0} embedding(s)  model=${r.model ?? '?'}  tokens=${r.usage?.total_tokens ?? '?'}`);
   } catch (e) {
-    spinner.fail('Embed failed');
+    spinner.fail(text('Embed failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -59,7 +60,7 @@ export async function aiEmbedCommand(input: string[], options: { app?: string; m
 
 export async function aiModelsCommand(options: { app?: string; json?: boolean }) {
   const appId = await requireAppId(options.app);
-  const spinner = ora('Fetching models...').start();
+  const spinner = ora(text('Fetching models...')).start();
   try {
     const r: any = await aiListModels(appId);
     spinner.stop();
@@ -70,7 +71,7 @@ export async function aiModelsCommand(options: { app?: string; json?: boolean })
       console.log(`${m.id}  (${m.provider})${caps}${ctx}`);
     }
   } catch (e) {
-    spinner.fail('List models failed');
+    spinner.fail(text('List models failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -95,16 +96,16 @@ export async function aiConfigSetCommand(options: { app?: string; defaultModel?:
   if (options.maxTokensPerRequest !== undefined) body.maxTokensPerRequest = options.maxTokensPerRequest;
   if (options.byokKey !== undefined) body.byokKey = options.byokKey;
   if (Object.keys(body).length === 0) {
-    console.log(chalk.yellow('Nothing to update — pass at least one of --default-model, --allowed-models, --max-tokens-per-request, --byok-key'));
+    console.log(chalk.yellow(text('Nothing to update — pass at least one of --default-model, --allowed-models, --max-tokens-per-request, --byok-key')));
     process.exit(1);
   }
-  const spinner = ora('Updating AI config...').start();
+  const spinner = ora(text('Updating AI config...')).start();
   try {
     const r = await aiUpdateConfig(appId, body);
-    spinner.succeed('AI config updated');
+    spinner.succeed(text('AI config updated'));
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('Update failed');
+    spinner.fail(text('Update failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -130,7 +131,7 @@ import { apiGet, apiPost, apiPut, apiDelete } from '../lib/api-client.js';
 export async function aiMeetingsStartCommand(meetingUrl: string, options: { app?: string; transcript?: boolean; recording?: 'mp4' | 'audio_only' | 'false'; botName?: string; json?: boolean }) {
   const appId = await requireAppId(options.app);
   const recording = options.recording === 'false' ? false : (options.recording ?? 'mp4');
-  const spinner = ora('Spawning meeting bot...').start();
+  const spinner = ora(text('Spawning meeting bot...')).start();
   try {
     const r: any = await apiPost(`/v1/${appId}/ai/meetings`, {
       meetingUrl, transcript: options.transcript ?? true, recording,
@@ -138,10 +139,10 @@ export async function aiMeetingsStartCommand(meetingUrl: string, options: { app?
     });
     spinner.stop();
     if (options.json) return console.log(JSON.stringify(r, null, 2));
-    console.log(chalk.green('Bot spawned:'), r.id);
-    console.log(chalk.gray('status:'), r.status);
+    console.log(chalk.green(text('Bot spawned:')), r.id);
+    console.log(chalk.gray(text('status:')), r.status);
   } catch (e) {
-    spinner.fail('Spawn failed');
+    spinner.fail(text('Spawn failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -153,11 +154,11 @@ export async function aiMeetingsGetCommand(meetingId: string, options: { app?: s
     const r: any = await apiGet(`/v1/${appId}/ai/meetings/${encodeURIComponent(meetingId)}`);
     if (options.json) return console.log(JSON.stringify(r, null, 2));
     console.log(chalk.bold(r.id));
-    console.log('  status:        ', r.status);
-    console.log('  startedAt:     ', r.startedAt ?? '—');
-    console.log('  duration (s):  ', r.durationSeconds ?? '—');
-    if (r.recordingUrl) console.log('  recordingUrl:  ', r.recordingUrl);
-    if (r.transcriptUrl) console.log('  transcriptUrl: ', r.transcriptUrl);
+    console.log(text('  status:        '), r.status);
+    console.log(text('  startedAt:     '), r.startedAt ?? '—');
+    console.log(text('  duration (s):  '), r.durationSeconds ?? '—');
+    if (r.recordingUrl) console.log(text('  recordingUrl:  '), r.recordingUrl);
+    if (r.transcriptUrl) console.log(text('  transcriptUrl: '), r.transcriptUrl);
   } catch (e) {
     console.error(chalk.red((e as Error).message));
     process.exit(1);
@@ -178,7 +179,7 @@ export async function aiMeetingsListCommand(options: { app?: string; status?: st
     for (const b of rows) {
       console.log(`${b.id}  ${b.status?.padEnd(10) ?? '-'}  ${b.startedAt ?? ''}`);
     }
-    if (r.nextCursor) console.log(chalk.gray(`-- next cursor: ${r.nextCursor}`));
+    if (r.nextCursor) console.log(chalk.gray(msg`-- next cursor: ${r.nextCursor}`));
   } catch (e) {
     console.error(chalk.red((e as Error).message));
     process.exit(1);
@@ -189,7 +190,7 @@ export async function aiMeetingsStopCommand(meetingId: string, options: { app?: 
   const appId = await requireAppId(options.app);
   try {
     await apiDelete(`/v1/${appId}/ai/meetings/${encodeURIComponent(meetingId)}`);
-    console.log(chalk.green('Stopped:'), meetingId);
+    console.log(chalk.green(text('Stopped:')), meetingId);
   } catch (e) {
     console.error(chalk.red((e as Error).message));
     process.exit(1);
@@ -204,7 +205,7 @@ export async function aiMeetingsEstimateCommand(options: { app?: string; duratio
   try {
     const r: any = await apiGet(`/v1/${appId}/ai/meetings/_estimate?${q.toString()}`);
     if (options.json) return console.log(JSON.stringify(r, null, 2));
-    console.log(chalk.bold(`$${(r.usd ?? r).toFixed?.(4) ?? r}`), chalk.gray(`for ${options.durationMinutes}min ${options.transcript === false ? '(no transcript)' : 'with transcript'}`));
+    console.log(chalk.bold(`$${(r.usd ?? r).toFixed?.(4) ?? r}`), chalk.gray(msg`for ${options.durationMinutes}min ${options.transcript === false ? text('(no transcript)') : text('with transcript')}`));
   } catch (e) {
     console.error(chalk.red((e as Error).message));
     process.exit(1);
@@ -217,7 +218,7 @@ export async function aiMeetingsUsageCommand(options: { app?: string; json?: boo
     const r: any = await apiGet(`/v1/${appId}/ai/meetings/usage`);
     if (options.json) return console.log(JSON.stringify(r, null, 2));
     for (const row of r.rows ?? []) {
-      console.log(`${row.created_at}  ${row.dimension.padEnd(14)} ${String(row.seconds).padStart(6)}s  $${row.usd_charged}`);
+      console.log(msg`${row.created_at}  ${row.dimension.padEnd(14)} ${String(row.seconds).padStart(6)}s  $${row.usd_charged}`);
     }
   } catch (e) {
     console.error(chalk.red((e as Error).message));
@@ -233,10 +234,10 @@ export async function aiMeetingsWebhookCommand(forwardUrl: string, options: { ap
       rotate_secret: options.rotateSecret ?? false,
     });
     if (options.json) return console.log(JSON.stringify(r, null, 2));
-    console.log(chalk.green('Webhook configured.'));
-    console.log(chalk.gray('forward_url:'), r.forward_url);
+    console.log(chalk.green(text('Webhook configured.')));
+    console.log(chalk.gray(text('forward_url:')), r.forward_url);
     if (r.secret) {
-      console.log(chalk.yellow('\nNew signing secret (shown once — store it now):'));
+      console.log(chalk.yellow(text('\nNew signing secret (shown once — store it now):')));
       console.log('  ', r.secret);
     }
   } catch (e) {

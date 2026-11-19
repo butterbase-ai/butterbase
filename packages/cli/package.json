@@ -19,7 +19,9 @@
   "files": [
     "dist",
     "templates",
-    "README.md"
+    "README.md",
+    "README.ja.md",
+    "docs/ja"
   ],
   "scripts": {
     "build": "tsc -b",

@@ -1,3 +1,4 @@
+import { text, msg } from '../lib/i18n.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import { oauthCreate, oauthList, oauthGet, oauthUpdate, oauthDelete } from '../lib/api-client.js';
@@ -7,8 +8,8 @@ async function requireAppId(appId?: string): Promise<string> {
   if (appId) return appId;
   const current = await getCurrentAppId();
   if (!current) {
-    console.log(chalk.red('No app specified and no current app set'));
-    console.log(chalk.gray('Use: butterbase apps use <app-id>'));
+    console.log(chalk.red(text('No app specified and no current app set')));
+    console.log(chalk.gray(text('Use: butterbase apps use <app-id>')));
     process.exit(1);
   }
   return current;
@@ -34,13 +35,13 @@ export async function oauthConfigureCommand(
   if (options.authorizationUrl) body.authorization_url = options.authorizationUrl;
   if (options.tokenUrl) body.token_url = options.tokenUrl;
   if (options.userinfoUrl) body.userinfo_url = options.userinfoUrl;
-  const spinner = ora(`Configuring OAuth provider: ${provider}`).start();
+  const spinner = ora(msg`Configuring OAuth provider: ${provider}`).start();
   try {
     const r = await oauthCreate(appId, body);
-    spinner.succeed(`Configured ${provider}`);
+    spinner.succeed(msg`Configured ${provider}`);
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('Configure failed');
+    spinner.fail(text('Configure failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -53,11 +54,11 @@ export async function oauthListCommand(options: { app?: string; json?: boolean }
     if (options.json) return console.log(JSON.stringify(r, null, 2));
     const providers = r.providers ?? r;
     if (!Array.isArray(providers) || providers.length === 0) {
-      console.log(chalk.gray('No OAuth providers configured.'));
+      console.log(chalk.gray(text('No OAuth providers configured.')));
       return;
     }
     for (const p of providers) {
-      console.log(`${p.provider}  enabled=${p.enabled}`);
+      console.log(msg`${p.provider}  enabled=${p.enabled}`);
     }
   } catch (e) {
     console.error(chalk.red((e as Error).message));
@@ -92,16 +93,16 @@ export async function oauthUpdateCommand(
   if (options.scope) body.scopes = options.scope;
   if (options.enabled !== undefined) body.enabled = options.enabled;
   if (Object.keys(body).length === 0) {
-    console.log(chalk.yellow('Nothing to update — pass at least one field.'));
+    console.log(chalk.yellow(text('Nothing to update — pass at least one field.')));
     process.exit(1);
   }
-  const spinner = ora(`Updating ${provider}...`).start();
+  const spinner = ora(msg`Updating ${provider}...`).start();
   try {
     const r = await oauthUpdate(appId, provider, body);
-    spinner.succeed(`Updated ${provider}`);
+    spinner.succeed(msg`Updated ${provider}`);
     if (options.json) console.log(JSON.stringify(r, null, 2));
   } catch (e) {
-    spinner.fail('Update failed');
+    spinner.fail(text('Update failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
@@ -109,13 +110,13 @@ export async function oauthUpdateCommand(
 
 export async function oauthDeleteCommand(provider: string, options: { app?: string; json?: boolean }) {
   const appId = await requireAppId(options.app);
-  const spinner = ora(`Deleting ${provider}...`).start();
+  const spinner = ora(msg`Deleting ${provider}...`).start();
   try {
     await oauthDelete(appId, provider);
-    spinner.succeed(`Deleted ${provider}`);
+    spinner.succeed(msg`Deleted ${provider}`);
     if (options.json) console.log(JSON.stringify({ deleted: true }));
   } catch (e) {
-    spinner.fail('Delete failed');
+    spinner.fail(text('Delete failed'));
     console.error(chalk.red((e as Error).message));
     process.exit(1);
   }
