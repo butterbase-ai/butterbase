@@ -1,5 +1,7 @@
 # agent-runtime
 
+English | [日本語](README.ja.md)
+
 ## What this service does
 
 agent-runtime compiles declarative graph specs (expressed as Pydantic models) into runnable async graph runners (llm tool-calling loop, tool, and end nodes) and executes them. It is an internal service: control-api calls it over the `INTERNAL_SERVICE_TOKEN` channel, and it is never reachable from the public internet. Each run persists per-step checkpoint state to Postgres (`agent_checkpoints` table) and emits incremental events to Redis so control-api can stream them to clients.

@@ -22,7 +22,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.ja.md",
+    "docs/ja"
   ],
   "scripts": {
     "build": "tsc -b",
