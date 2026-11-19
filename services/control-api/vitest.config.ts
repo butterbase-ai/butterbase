@@ -39,6 +39,7 @@ export default defineConfig({
       'src/routes/storage.test.ts',
       'src/services/fork-count-sweeper.test.ts',
       'src/services/kv/kv-scope.test.ts',
+      'src/services/rls-context.integration.test.ts',
     ],
   },
 });
