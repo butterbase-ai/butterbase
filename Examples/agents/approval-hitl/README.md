@@ -1,5 +1,7 @@
 # approval-hitl
 
+English | [日本語](README.ja.md)
+
 Demonstrates the **human-in-the-loop** flow when an agent calls a `read_write` tool.
 
 This agent has a single LLM node with one tool — `cancel_subscription` — marked `read_write`. The runtime emits a `run_paused` event when a run is paused, and the run waits for the caller to resume it before proceeding.

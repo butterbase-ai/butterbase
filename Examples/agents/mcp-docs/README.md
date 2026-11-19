@@ -1,5 +1,7 @@
 # mcp-docs
 
+English | [日本語](README.ja.md)
+
 Demonstrates using an **external MCP server** as an agent tool source. This example wires up the [Stripe docs MCP server](https://mcp.stripe.com) and lets the agent answer Stripe API questions by searching the docs.
 
 ## Deploy

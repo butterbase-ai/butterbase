@@ -1,5 +1,7 @@
 # Agent examples
 
+English | [日本語](README.ja.md)
+
 Three reference bundles that exercise the Butterbase agent system end to end. Each directory contains an `agent-spec.json` plus the function code or MCP server config you need to make it run.
 
 | Bundle | What it shows |

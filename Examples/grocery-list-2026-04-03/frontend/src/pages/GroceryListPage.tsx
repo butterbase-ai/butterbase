@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+import { useLocale, text, errorMessage, UiError } from '../i18n';
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { GroceryForm } from '../components/GroceryForm';
@@ -8,9 +10,10 @@ import { butterbase } from '../lib/butterbase';
 import type { GroceryItem } from '../types';
 
 export function GroceryListPage() {
+  useLocale();
   const [items, setItems] = useState<GroceryItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ReactNode>('');
   const { user, token, logout } = useAuth();
   const navigate = useNavigate();
 
@@ -22,13 +25,13 @@ export function GroceryListPage() {
       const { data, error } = await butterbase.from<GroceryItem>('grocery_items').execute();
 
       if (error || !data) {
-        throw error || new Error('Failed to fetch grocery items');
+        throw error || new UiError("Failed to fetch grocery items");
       }
 
       setItems(data);
       setError('');
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to load list';
+      const message = errorMessage(err, "Failed to load list");
       setError(message);
     } finally {
       setLoading(false);
@@ -45,7 +48,7 @@ export function GroceryListPage() {
   };
 
   if (loading) {
-    return <div style={{ textAlign: 'center', padding: '50px' }}>Loading...</div>;
+    return <div style={{ textAlign: 'center', padding: '50px' }}>{text("Loading...")}</div>;
   }
 
   return (
@@ -54,17 +57,16 @@ export function GroceryListPage() {
         style={{
           display: 'flex',
           justifyContent: 'space-between',
+          flexWrap: 'wrap', gap: '12px',
           alignItems: 'center',
           marginBottom: '20px',
         }}
       >
         <div>
-          <h1>Grocery list</h1>
-          <p style={{ color: '#666' }}>Signed in as {user?.email}</p>
+          <h1>{text("Grocery list")}</h1>
+          <p style={{ color: '#666' }}>{text("Signed in as")}{' '}{user?.email}</p>
         </div>
-        <button onClick={handleLogout} style={{ padding: '10px 20px', cursor: 'pointer' }}>
-          Logout
-        </button>
+        <button onClick={handleLogout} style={{ padding: '10px 20px', cursor: 'pointer' }}>{text("Logout")}</button>
       </div>
 
       {error && (

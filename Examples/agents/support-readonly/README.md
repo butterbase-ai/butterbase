@@ -1,5 +1,7 @@
 # support-readonly
 
+English | [日本語](README.ja.md)
+
 A simple customer-support agent. Two LLM nodes:
 
 1. **triage** — classify the message as `billing` or `other`.

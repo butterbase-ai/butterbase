@@ -1,5 +1,7 @@
 # Todo App Example
 
+English | [日本語](README.ja.md)
+
 A complete example demonstrating the Butterbase user experience: building a todo application with authentication and image storage using MCP tools.
 
 ## What This Demonstrates

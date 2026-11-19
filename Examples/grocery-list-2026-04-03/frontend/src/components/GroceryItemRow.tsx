@@ -1,3 +1,4 @@
+import { useLocale, text, formatDate } from '../i18n';
 import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { butterbase } from '../lib/butterbase';
@@ -10,6 +11,7 @@ interface GroceryItemRowProps {
 }
 
 export function GroceryItemRow({ item, onItemUpdated, onItemDeleted }: GroceryItemRowProps) {
+  useLocale();
   const [loading, setLoading] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const { token } = useAuth();
@@ -32,14 +34,14 @@ export function GroceryItemRow({ item, onItemUpdated, onItemDeleted }: GroceryIt
 
       onItemUpdated();
     } catch {
-      alert('Failed to update item');
+      alert(text("Failed to update item"));
     } finally {
       setLoading(false);
     }
   };
 
   const handleDelete = async () => {
-    if (!token || !confirm('Remove this item from your list?')) return;
+    if (!token || !confirm(text("Remove this item from your list?"))) return;
     setLoading(true);
 
     try {
@@ -56,7 +58,7 @@ export function GroceryItemRow({ item, onItemUpdated, onItemDeleted }: GroceryIt
 
       onItemDeleted();
     } catch {
-      alert('Failed to delete item');
+      alert(text("Failed to delete item"));
     } finally {
       setLoading(false);
     }
@@ -101,7 +103,7 @@ export function GroceryItemRow({ item, onItemUpdated, onItemDeleted }: GroceryIt
           checked={item.completed}
           onChange={handleToggleGotIt}
           disabled={loading}
-          title="Got it"
+          title={text("Got it")}
           style={{ marginTop: '5px' }}
         />
         <div style={{ flex: 1 }}>
@@ -123,8 +125,7 @@ export function GroceryItemRow({ item, onItemUpdated, onItemDeleted }: GroceryIt
               style={{ maxWidth: '200px', maxHeight: '200px', display: 'block', marginTop: '10px' }}
             />
           )}
-          <div style={{ fontSize: '12px', color: '#999', marginTop: '10px' }}>
-            Added {new Date(item.created_at).toLocaleString()}
+          <div style={{ fontSize: '12px', color: '#999', marginTop: '10px' }}>{text("Added")}{' '}{formatDate(item.created_at)}
           </div>
         </div>
         <button
@@ -138,9 +139,7 @@ export function GroceryItemRow({ item, onItemUpdated, onItemDeleted }: GroceryIt
             border: 'none',
             cursor: loading ? 'not-allowed' : 'pointer',
           }}
-        >
-          Remove
-        </button>
+        >{text("Remove")}</button>
       </div>
     </div>
   );

@@ -1,5 +1,7 @@
 # Butterbase Backend Setup
 
+English | [日本語](BUTTERBASE_SETUP.ja.md)
+
 This document shows the exact MCP tool calls used to provision the backend for this todo app example.
 
 ## Step 1: Initialize App

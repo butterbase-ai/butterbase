@@ -1,3 +1,4 @@
+import { useLocale, text, formatDate } from '../i18n';
 import { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { butterbase } from '../lib/butterbase';
@@ -10,6 +11,7 @@ interface TodoItemProps {
 }
 
 export function TodoItem({ todo, onTodoUpdated, onTodoDeleted }: TodoItemProps) {
+  useLocale();
   const [loading, setLoading] = useState(false);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const { token } = useAuth();
@@ -31,15 +33,15 @@ export function TodoItem({ todo, onTodoUpdated, onTodoDeleted }: TodoItemProps) 
       }
 
       onTodoUpdated();
-    } catch (err) {
-      alert('Failed to update todo');
+    } catch {
+      alert(text("Failed to update todo"));
     } finally {
       setLoading(false);
     }
   };
 
   const handleDelete = async () => {
-    if (!token || !confirm('Are you sure you want to delete this todo?')) return;
+    if (!token || !confirm(text("Are you sure you want to delete this todo?"))) return;
     setLoading(true);
 
     try {
@@ -55,8 +57,8 @@ export function TodoItem({ todo, onTodoUpdated, onTodoDeleted }: TodoItemProps) 
       }
 
       onTodoDeleted();
-    } catch (err) {
-      alert('Failed to delete todo');
+    } catch {
+      alert(text("Failed to delete todo"));
     } finally {
       setLoading(false);
     }
@@ -110,8 +112,7 @@ export function TodoItem({ todo, onTodoUpdated, onTodoDeleted }: TodoItemProps) 
               style={{ maxWidth: '200px', maxHeight: '200px', display: 'block', marginTop: '10px' }}
             />
           )}
-          <div style={{ fontSize: '12px', color: '#999', marginTop: '10px' }}>
-            Created: {new Date(todo.created_at).toLocaleString()}
+          <div style={{ fontSize: '12px', color: '#999', marginTop: '10px' }}>{text("Created:")}{' '}{formatDate(todo.created_at)}
           </div>
         </div>
         <button
@@ -124,9 +125,7 @@ export function TodoItem({ todo, onTodoUpdated, onTodoDeleted }: TodoItemProps) 
             border: 'none',
             cursor: loading ? 'not-allowed' : 'pointer'
           }}
-        >
-          Delete
-        </button>
+        >{text("Delete")}</button>
       </div>
     </div>
   );

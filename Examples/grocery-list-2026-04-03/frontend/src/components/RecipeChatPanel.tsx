@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+import { useLocale, text, errorMessage } from '../i18n';
 import { useState, type FormEvent } from 'react';
 import type { RecipeChatMessage } from '../types';
 import { sendRecipeChat } from '../services/recipeChat';
@@ -7,10 +9,11 @@ interface RecipeChatPanelProps {
 }
 
 export function RecipeChatPanel({ token }: RecipeChatPanelProps) {
+  useLocale();
   const [messages, setMessages] = useState<RecipeChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ReactNode>('');
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -32,7 +35,7 @@ export function RecipeChatPanel({ token }: RecipeChatPanelProps) {
       const { reply } = await sendRecipeChat(token, nextHistory);
       setMessages([...nextHistory, { role: 'assistant', content: reply }]);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Something went wrong';
+      const message = errorMessage(err, "Something went wrong");
       setError(message);
       setMessages(previous);
     } finally {
@@ -50,11 +53,8 @@ export function RecipeChatPanel({ token }: RecipeChatPanelProps) {
         backgroundColor: '#fafafa',
       }}
     >
-      <h2 style={{ marginTop: 0 }}>Recipe assistant</h2>
-      <p style={{ color: '#555', fontSize: '14px', marginBottom: '16px' }}>
-        Ask for meal ideas based on your list. The assistant sees your current items (including what you
-        still need vs already have) and can suggest what to add plus a recipe.
-      </p>
+      <h2 style={{ marginTop: 0 }}>{text("Recipe assistant")}</h2>
+      <p style={{ color: '#555', fontSize: '14px', marginBottom: '16px' }}>{text("Ask for meal ideas based on your list. The assistant sees your current items (including what you still need vs already have) and can suggest what to add plus a recipe.")}</p>
 
       {error && (
         <div
@@ -82,9 +82,7 @@ export function RecipeChatPanel({ token }: RecipeChatPanelProps) {
         }}
       >
         {messages.length === 0 ? (
-          <div style={{ color: '#888', fontSize: '14px' }}>
-            Example: &quot;I have pasta and tomatoes — what else do I need for a simple dinner?&quot;
-          </div>
+          <div style={{ color: '#888', fontSize: '14px' }}>{text("Example: \"I have pasta and tomatoes — what else do I need for a simple dinner?\"")}</div>
         ) : (
           messages.map((m, i) => (
             <div
@@ -97,13 +95,13 @@ export function RecipeChatPanel({ token }: RecipeChatPanelProps) {
               }}
             >
               <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
-                {m.role === 'user' ? 'You' : 'Assistant'}
+                {m.role === 'user' ? text("You") : text("Assistant")}
               </div>
               <div style={{ whiteSpace: 'pre-wrap', fontSize: '14px' }}>{m.content}</div>
             </div>
           ))
         )}
-        {loading && <div style={{ color: '#666', fontSize: '14px' }}>Thinking…</div>}
+        {loading && <div style={{ color: '#666', fontSize: '14px' }}>{text("Thinking…")}</div>}
       </div>
 
       <form onSubmit={handleSubmit} style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
@@ -111,7 +109,7 @@ export function RecipeChatPanel({ token }: RecipeChatPanelProps) {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask about meals, recipes, or what to add…"
+          placeholder={text("Ask about meals, recipes, or what to add…")}
           disabled={!token || loading}
           style={{
             flex: '1 1 200px',
@@ -128,9 +126,7 @@ export function RecipeChatPanel({ token }: RecipeChatPanelProps) {
             padding: '10px 18px',
             cursor: !token || loading || !input.trim() ? 'not-allowed' : 'pointer',
           }}
-        >
-          Send
-        </button>
+        >{text("Send")}</button>
       </form>
     </section>
   );
