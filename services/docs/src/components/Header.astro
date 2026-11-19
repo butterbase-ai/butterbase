@@ -3,6 +3,9 @@ import config from 'virtual:starlight/user-config';
 
 import Search from 'virtual:starlight/components/Search';
 import SiteTitle from 'virtual:starlight/components/SiteTitle';
+import LanguageSelect from 'virtual:starlight/components/LanguageSelect';
+
+const japanese = Astro.locals.starlightRoute.locale === 'ja';
 
 const shouldRenderSearch =
 	config.pagefind || config.components.Search !== '@astrojs/starlight/components/Search.astro';
@@ -15,13 +18,16 @@ const shouldRenderSearch =
 	<div class="sl-flex print:hidden">
 		{shouldRenderSearch && <Search />}
 	</div>
-	<div class="sl-hidden md:sl-flex print:hidden right-group">
-		<a href="/changelog" class="nav-link">
-			Changelog
+	<div class="sl-flex print:hidden right-group">
+		<LanguageSelect />
+		<nav class="sl-hidden md:sl-flex right-group">
+		<a href={japanese ? '/ja/changelog' : '/changelog'} class="nav-link">
+			{japanese ? '変更履歴' : 'Changelog'}
 		</a>
 		<a href="https://dashboard.butterbase.ai" class="login-btn">
-			Log In
+			{japanese ? 'ログイン' : 'Log In'}
 		</a>
+		</nav>
 	</div>
 </div>
 

@@ -35,7 +35,7 @@ export const GET: APIRoute = async () => {
   const entries = docs
     .filter((entry) => !entry.data.draft)
     .map((entry) => {
-      const path = normalizePath(entry.slug || entry.id.replace(/\.(md|mdx)$/i, ''));
+      const path = normalizePath(entry.id.replace(/\.(md|mdx)$/i, ''));
       const lastmod = formatLastModified(
         entry.data.lastUpdated as Date | string | undefined
       );
