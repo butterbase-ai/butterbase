@@ -1,5 +1,7 @@
 # @butterbase/mcp
 
+[English](README.md) | [日本語](README.ja.md)
+
 The official [Model Context Protocol](https://modelcontextprotocol.io) server for [Butterbase](https://butterbase.ai) — manage schemas, auth, functions, storage, RAG, realtime, and deploys on Butterbase from any MCP-capable client (Claude Code, Claude Desktop, Cursor, Windsurf, etc.).
 
 ## Install
@@ -74,6 +76,18 @@ The available tools depend on the server's enabled capabilities, including:
 - **Office (optional cloud capability)** — `manage_office` provides 44 organization-scoped actions for Ask, conversations, decisions, lifecycle controls, business records, curated agent memory, routines, cadence and paginated records. Read `butterbase_docs` with `topic: "office"` first. Every call needs an explicit `org_id` and platform credential; no app is selected. Enable/pause/resume/approve return confirmation receipts for the initiating owner to review in the browser. Agents must show the URL and observe the outcome, never confirm it themselves. OSS-only installations may omit this tool. See the [Office client reference](https://docs.butterbase.ai/core-concepts/office-clients/).
 
 See the [Butterbase docs](https://butterbase.ai/docs) for the full list.
+
+## Japanese documentation
+
+Call `butterbase_docs` with `{ "topic": "auth", "language": "ja" }` or
+`{ "query": "ファイルのアップロード", "language": "ja" }`. English remains the default.
+The local docs tool keeps its existing topic identifiers and read-only behavior.
+
+Maintainers can refresh the static Japanese corpus with
+`node scripts/sync-japanese-docs.mjs` from this package after Japanese public docs
+are available in `services/docs/src/content/docs/ja`. An optional local git
+revision can be supplied; it is read locally and never fetched. The tool itself
+has no git, filesystem, or network dependency at runtime.
 
 ## License
 

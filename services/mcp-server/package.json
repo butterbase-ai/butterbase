@@ -57,7 +57,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "README.ja.md"
   ],
   "scripts": {
     "build": "tsc -b --force",
