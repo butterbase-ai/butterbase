@@ -85,3 +85,7 @@ If your client code writes to a Butterbase app during a move, you'll get HTTP 50
 **Can I move while the dashboard's offline?** Yes — use the API or MCP. The dashboard is just a friendly wrapper.
 
 **What if I have custom domains?** They follow the app automatically (Cloudflare KV is updated atomically during cutover).
+
+## Local development
+
+To exercise the saga without Neon credentials, see [Local move-app smoke test](./local-move-smoke.md).

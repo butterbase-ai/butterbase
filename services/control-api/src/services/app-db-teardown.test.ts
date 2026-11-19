@@ -1,4 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+const local = vi.hoisted(() => ({ query: vi.fn(), end: vi.fn(), pool: vi.fn() }));
+vi.mock('pg', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('pg')>();
+  return { ...actual, default: { ...actual.default, Pool: local.pool } };
+});
 
 // vi.mock is hoisted before variable declarations, so mocks must use vi.fn() inline.
 vi.mock('./neon-client.js', () => ({
@@ -199,5 +205,48 @@ describe('teardownAppDb', () => {
 
     expect(res.mode).toBe('skipped');
     expect(res.degraded).toBe(true);
+  });
+});
+
+describe('teardownAppDb — local move compensation', () => {
+  beforeEach(() => {
+    vi.stubEnv('BUTTERBASE_LOCAL', 'true');
+    vi.stubEnv('NODE_ENV', 'test');
+    vi.stubEnv('LOCAL_DATA_PLANE_URL_US_EAST_1', 'postgresql://fixture:fixture@localhost:5542/postgres');
+    local.query.mockReset().mockResolvedValue({ rows: [{ '?column?': 1 }] });
+    local.end.mockReset().mockResolvedValue(undefined);
+    local.pool.mockReset().mockImplementation(() => ({ query: local.query, end: local.end }));
+    vi.mocked(deleteDatabase).mockClear();
+    vi.mocked(deleteProject).mockClear();
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it('drops the local destination without contacting Neon', async () => {
+    const out = await teardownAppDb({ region: REGION, neonProjectId: null, neonDatabaseName: 'cust_fixture' });
+    expect(out).toEqual({ mode: 'local', databaseName: 'cust_fixture', alreadyGone: false });
+    expect(local.query).toHaveBeenCalledWith('DROP DATABASE IF EXISTS "cust_fixture" WITH (FORCE)');
+    expect(local.end).toHaveBeenCalledOnce();
+    expect(deleteDatabase).not.toHaveBeenCalled();
+    expect(deleteProject).not.toHaveBeenCalled();
+  });
+  it('treats an already removed local database as success', async () => {
+    local.query.mockResolvedValue({ rows: [] });
+    await expect(teardownAppDb({ region: REGION, neonDatabaseName: 'cust_fixture' })).resolves.toMatchObject({ mode: 'local', alreadyGone: true });
+  });
+  it('closes the local admin pool when deletion fails', async () => {
+    local.query.mockRejectedValueOnce(new Error('fixture failure'));
+    await expect(teardownAppDb({ region: REGION, neonDatabaseName: 'cust_fixture' })).rejects.toThrow('fixture failure');
+    expect(local.end).toHaveBeenCalledOnce();
+  });
+  it('rejects local compensation in production', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    await expect(teardownAppDb({ region: REGION, neonDatabaseName: 'cust_fixture' })).rejects.toThrow(/BUTTERBASE_LOCAL.*production/);
+    expect(local.pool).not.toHaveBeenCalled();
+  });
+  it('still uses stored Neon ownership when a Neon project id is present', async () => {
+    vi.mocked(getDataProjectIdForRegion).mockReturnValue(SHARED);
+    await expect(teardownAppDb({ region: REGION, neonProjectId: SHARED, neonDatabaseName: 'cust_fixture' })).resolves.toMatchObject({ mode: 'legacy' });
+    expect(local.pool).not.toHaveBeenCalled();
+    expect(deleteDatabase).toHaveBeenCalledWith(SHARED, 'cust_fixture');
   });
 });
